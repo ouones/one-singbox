@@ -867,7 +867,7 @@ create() {
                     --argjson version 5 \
                     '{inbounds:[{tag:$tag,type:"snell",listen:"::",listen_port:$port,version:$version,psk:$psk,obfs_mode:$obfs_mode}]}')
             fi
-            is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX.json") || err "无法创建 Snell 临时配置文件."
+            is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || err "无法创建 Snell 临时配置文件."
             printf '%s\n' "$is_new_json" >"$is_snell_tmp_file"
             if ! "$is_core_bin" check -c "$is_snell_tmp_file" &>/dev/null; then
                 rm -f "$is_snell_tmp_file"
@@ -2606,7 +2606,7 @@ relay_add() {
 
     local relay_file="$is_conf_dir/relay-${local_port}.json"
     local tmp_file
-    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX.json") || err "无法创建中转临时配置文件."
+    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建中转临时配置文件."
 
     jq -n \
         --arg tag "relay-${local_port}.json" \
