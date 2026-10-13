@@ -143,6 +143,9 @@ if [[ -f $is_caddy_bin && -d $is_caddy_dir && $is_caddy_service ]]; then
     fi
 fi
 
+load log.sh
+log_limit_init || warn "无法启用日志大小限制，请在其他菜单中重新设置."
+
 load core.sh
 [[ ! $args ]] && args=main
 main $args

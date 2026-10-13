@@ -446,6 +446,9 @@ main() {
     is_new_install=1
     install_service $is_core &>/dev/null
 
+    load log.sh
+    log_limit_init || warn "无法启用日志大小限制，请在其他菜单中重新设置."
+
     # create condf dir
     mkdir -p $is_conf_dir
 

@@ -1466,6 +1466,8 @@ uninstall() {
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
+    load log.sh
+    log_limit_remove
     rm -rf $is_core_dir $is_log_dir $is_sh_bin ${is_sh_bin/$is_core/sb}
     if [[ $is_systemd ]]; then
         rm -f /lib/systemd/system/$is_core.service
@@ -2528,7 +2530,9 @@ is_main_menu() {
         show_help
         ;;
     9)
-        ask list is_do_other "启用BBR 查看日志 测试运行 重装脚本 设置DNS"
+        load log.sh
+        is_tmp_list=("启用BBR" "查看日志" "测试运行" "重装脚本" "设置DNS" "日志大小限制($(log_limit_read)MB)")
+        ask list is_do_other
         case $REPLY in
         1)
             load bbr.sh
@@ -2547,6 +2551,9 @@ is_main_menu() {
         5)
             load dns.sh
             dns_set
+            ;;
+        6)
+            log_limit_set
             ;;
         esac
         ;;
