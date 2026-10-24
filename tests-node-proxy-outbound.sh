@@ -13,6 +13,11 @@ mkdir -p "$fake_bin"
 
 cat >"$fake_bin/sing-box" <<'FAKE_CORE'
 #!/usr/bin/env bash
+if [[ $1 == version ]]; then
+    printf 'sing-box version %s\n\nEnvironment: go1.26.7 linux/amd64\nTags: %s\n' \
+        "${FAKE_CORE_VERSION:-1.14.0}" "${FAKE_CORE_TAGS:-with_gvisor,with_quic,with_utls}"
+    exit 0
+fi
 if [[ $1 == check ]]; then
     printf '%s\n' "$*" >>"$FAKE_CORE_LOG"
     config=
@@ -34,6 +39,9 @@ if [[ $1 == check ]]; then
         for file in "$conf_dir"/*.json; do
             jq -e . "$file" >/dev/null || exit 5
         done
+    fi
+    if [[ ${TEST_REJECT_GRPC_CHECK:-0} == 1 ]] && jq -e '[.outbounds[]? | select(.transport.type == "grpc")] | length > 0' "$config" >/dev/null; then
+        exit 6
     fi
 fi
 FAKE_CORE
@@ -278,9 +286,51 @@ vless-menu)
     parse_proxy_uri vless "vless://$vless_uuid@reality.example.com:443?security=reality&flow=xtls-rprx-vision&publicKey=$vless_pbk&pbk=$vless_pbk&sid=&shortId=&skip-cert-verify=1&insecure=true#Reality" || fail "VLESS Reality aliases, empty short ID, and Vision should parse"
     jq -e '.flow == "xtls-rprx-vision" and .tls.enabled == true and .tls.server_name == "reality.example.com" and .tls.utls.enabled == true and .tls.utls.fingerprint == "chrome" and .tls.insecure == true and .tls.reality.enabled == true and .tls.reality.public_key == "'"$vless_pbk"'" and .tls.reality.short_id == ""' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS Reality should retain the public-key authentication and default short ID"
     if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-reality-vision.json"; fi
+
+    parse_proxy_uri vless "vless://$vless_uuid@ws.example.com:443?type=ws&security=none&path=%2Fsocket%3Ftoken%3Da%2526b#WS" || fail "VLESS WS without TLS should parse"
+    jq -e '.transport.type == "ws" and .transport.path == "/socket?token=a%26b" and (.transport.headers | not) and (.tls | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "WS should preserve encoded path query semantics without forcing TLS or Host"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-ws-none.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@ws.example.com:443?type=ws&security=tls&sni=tls.example.com&host=ws.example.com&path=%2Fws%3Fed%3D16%26eh%3Dx-early-data%26token%3Da%2526b" || fail "VLESS WS TLS and early data in path should parse"
+    jq -e '.transport.type == "ws" and .transport.path == "/ws?token=a%26b" and .transport.headers.Host == "ws.example.com" and .transport.max_early_data == 16 and .transport.early_data_header_name == "x-early-data" and .tls.server_name == "tls.example.com"' <<<"$outbound_proxy_config_json" >/dev/null || fail "WS should consume only inner early-data parameters and keep Host distinct from SNI"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-ws-tls.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@ws.example.com:443?type=ws&security=tls&ed=8&eh=Custom-Early" || fail "VLESS WS outer early data should parse"
+    jq -e '.transport.path == "/" and .transport.max_early_data == 8 and .transport.early_data_header_name == "Custom-Early"' <<<"$outbound_proxy_config_json" >/dev/null || fail "WS should use the default path and preserve an explicit early-data header"
+    parse_proxy_uri vless "vless://$vless_uuid@ws.example.com:443?type=ws&security=none&ed=0" || fail "VLESS WS should accept zero early-data size"
+    jq -e '.transport.max_early_data == 0 and (.transport | has("early_data_header_name") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "zero WS early data should not add a header name"
+    parse_proxy_uri vless "vless://$vless_uuid@ws.example.com:443?type=ws&security=tls&path=%2Fws%3Fed%3D12&ed=12" || fail "equal outer and inner WS early-data values should coalesce"
+    jq -e '.transport.path == "/ws" and .transport.max_early_data == 12 and .transport.early_data_header_name == "Sec-WebSocket-Protocol"' <<<"$outbound_proxy_config_json" >/dev/null || fail "WS should remove consumed inner early-data parameters and use the default header"
+    parse_proxy_uri vless "vless://$vless_uuid@ws.example.com:443?type=ws&security=reality&pbk=$vless_pbk" || fail "VLESS WS Reality should parse without imposing a Vision flow"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-ws-reality.json"; fi
+
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=none&serviceName=svc&service_name=svc&mode=gun" || fail "VLESS gRPC without TLS and equal service-name aliases should parse"
+    jq -e '.transport.type == "grpc" and .transport.service_name == "svc" and (.transport | has("mode") | not) and (.tls | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "gRPC should map serviceName, omit its default mode, and remain unencrypted"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-grpc-none.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=tls.example.com&service_name=" || fail "VLESS gRPC should preserve an explicitly empty service name"
+    jq -e '.transport.type == "grpc" and .transport.service_name == "" and .tls.server_name == "tls.example.com"' <<<"$outbound_proxy_config_json" >/dev/null || fail "gRPC explicit empty serviceName must remain distinct from omission and SNI"
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=grpc-tls.example.com&serviceName=svc%2Ftls" || fail "VLESS gRPC TLS serviceName should parse"
+    jq -e '.transport.type == "grpc" and .transport.service_name == "svc/tls" and .tls.server_name == "grpc-tls.example.com"' <<<"$outbound_proxy_config_json" >/dev/null || fail "gRPC TLS should map the serviceName alias separately from SNI"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-grpc-tls.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=reality&pbk=$vless_pbk&serviceName=svc" || fail "VLESS gRPC Reality should parse without imposing a Vision flow"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-grpc-reality.json"; fi
+
+    export FAKE_CORE_TAGS=with_gvisor,with_quic,with_utls
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=front.example.com&authority=front.example.com:443" || fail "lite gRPC authority matching its default should be accepted"
+    if parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=front.example.com&authority=front.example.com"; then fail "lite gRPC authority must include the default port"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@[2001:db8::2]:443?type=grpc&authority=%5B2001%3Adb8%3A%3A2%5D%3A443" || fail "lite gRPC IPv6 authority should use brackets"
+    export FAKE_CORE_TAGS=with_grpc,with_gvisor,with_utls
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=front.example.com&authority=front.example.com" || fail "full gRPC authority matching its TLS default should be accepted"
+    if parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=front.example.com&authority=front.example.com:443"; then fail "full gRPC authority must not include the port when TLS supplies the name"; fi
+    export FAKE_CORE_VERSION=1.15.0
+    if parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&authority=grpc.example.com:443"; then fail "unknown gRPC authority build must be rejected"; fi
+    export FAKE_CORE_VERSION=1.14.0 FAKE_CORE_TAGS=with_gvisor,with_quic,with_utls
+    parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&authority=" || fail "an empty gRPC authority should not require build detection"
+    if parse_proxy_uri vless "vless://$vless_uuid@grpc.example.com:443?type=grpc&unknown=1"; then fail "unknown VLESS transport parameters must be rejected"; fi
+    [[ $outbound_proxy_parse_error == *"unknown"* ]] || fail "unknown VLESS transport rejection should identify the parameter: $outbound_proxy_parse_error"
+
     for bad_uri in \
         "vless://not-a-uuid@vless.example.com:443" \
         "vless://$vless_uuid@vless.example.com:443?encryption=aes-128-gcm" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&security=tls&flow=xtls-rprx-vision" \
         "vless://$vless_uuid@vless.example.com:443?security=none&sni=front.example.com" \
         "vless://$vless_uuid@vless.example.com:443?security=none&flow=xtls-rprx-vision" \
         "vless://$vless_uuid@vless.example.com:443?security=reality" \
@@ -299,6 +349,30 @@ vless-menu)
         "vless://$vless_uuid@vless.example.com:443?security=tls&sni=a&sni=b" \
         "vless://$vless_uuid@vless.example.com:443?security=tls&allowInsecure=0&insecure=true" \
         "vless://$vless_uuid@vless.example.com:443?security=tls&path=%2Fws" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&path=" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&host=" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&host=ws.example.com%2Cother.example.com" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&mode=multi" \
+        "vless://$vless_uuid@vless.example.com:443?type=http&serviceName=ignored" \
+        "vless://$vless_uuid@vless.example.com:443?type=quic&security=tls&ed=16" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&mode=guna" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&mode=unknown" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&ed=4" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&authority=ws.example.com" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&serviceName=a&service_name=b" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&authority=wrong.example.com:443" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&security=tls&flow=xtls-rprx-vision" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&path=%2Fws%3Fed%3D1&ed=2" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&ed=2&eh=Outer&path=%2Fws%3Feh%3DInner" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&eh=Header" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&ed=not-a-number" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&ed=4294967296" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&ed=0&eh=Header" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&path=%2Fws%3Fed%3D1%26ed%3D2" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&headerType=http" \
+        "vless://$vless_uuid@vless.example.com:443?type=grpc&path=%2Fgrpc" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&serviceName=svc" \
+        "vless://$vless_uuid@vless.example.com:443?type=tcp&host=ws.example.com" \
         "vless://$vless_uuid@vless.example.com:443?security=tls&sni=%00bad"; do
         if parse_proxy_uri vless "$bad_uri"; then
             fail "unsupported or invalid VLESS URI should be rejected: $bad_uri"
@@ -314,13 +388,64 @@ vless-menu)
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
     restart_before=$(restart_count)
-    if change_output=$(printf '6\nvless://%s@vless.example.com:443?type=xhttp&security=tls\n' "$vless_uuid" | change node-one.json outbound 2>&1); then
-        fail "invalid VLESS replacement should fail"
+    for invalid_vless_uri in \
+        "vless://$vless_uuid@vless.example.com:443?type=xhttp&security=tls" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&path="; do
+        if change_output=$(printf '6\n%s\n' "$invalid_vless_uri" | change node-one.json outbound 2>&1); then
+            fail "invalid VLESS replacement should fail: $invalid_vless_uri"
+        fi
+        [[ $change_output == *"VLESS"* ]] || fail "invalid VLESS input should name the rejected capability: $change_output"
+        if [[ $invalid_vless_uri == *"type=xhttp"* ]]; then
+            [[ $change_output == *"xhttp"* ]] || fail "unsupported VLESS transport should name its type: $change_output"
+        else
+            [[ $change_output == *"path"* ]] || fail "empty VLESS WebSocket path should name the rejected field: $change_output"
+        fi
+        cmp -s "$case_dir/meta.before" "$meta_file" || fail "invalid VLESS replacement must preserve metadata"
+        cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid VLESS replacement must preserve the public config"
+        [[ $(restart_count) == "$restart_before" ]] || fail "invalid VLESS replacement must not restart the service"
+    done
+
+    ws_uri="vless://$vless_uuid@ws.example.com:443?type=ws&security=tls&sni=tls.example.com&host=ws.example.com&path=%2Fsocket%3Ftoken%3Da%2526b%26ed%3D16#WS-Upstream"
+    change_output=$(printf '6\n%s\n' "$ws_uri" | change node-one.json outbound 2>&1) || fail "VLESS WS menu entry should apply: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"WS-Upstream"* ]] || fail "VLESS WS success should show the upstream name: $change_output"
+    [[ $change_output != *"$vless_uuid"* && $change_output != *"vless://"* ]] || fail "VLESS WS output must not expose credentials or the share link"
+    jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "WS-Upstream" and .outbound_proxy.config.transport.type == "ws" and .outbound_proxy.config.transport.path == "/socket?token=a%26b" and .outbound_proxy.config.transport.max_early_data == 16' "$meta_file" >/dev/null || fail "VLESS WS normalized config should be cached"
+    jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "ws" and .transport.path == "/socket?token=a%26b" and .tls.server_name == "tls.example.com" and .transport.headers.Host == "ws.example.com"' "$is_config_json" >/dev/null || fail "runtime VLESS WS outbound should preserve the normalized transport and TLS fields"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (WS-Upstream)' ]] || fail "VLESS WS renderer should display the upstream name"
+    change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "switching cached WS VLESS to direct should succeed: $change_output"
+    jq -e '.outbound_mode == "仅V4" and .outbound_proxy.config.transport.type == "ws"' "$meta_file" >/dev/null || fail "switching direct should retain the WS VLESS cache"
+    change_output=$(printf '6\n\n' | change node-one.json outbound 2>&1) || fail "cached WS VLESS config should be reusable: $change_output"
+    jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "ws" and .transport.max_early_data == 16' "$is_config_json" >/dev/null || fail "reusing WS cache should restore the normalized transport"
+
+    grpc_uri="vless://$vless_uuid@grpc.example.com:443?type=grpc&security=tls&sni=grpc-tls.example.com&serviceName=api%2Fv1#GRPC-Upstream"
+    change_output=$(printf '6\n%s\n' "$grpc_uri" | change node-one.json outbound 2>&1) || fail "VLESS gRPC menu entry should apply: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"GRPC-Upstream"* ]] || fail "VLESS gRPC success should show the upstream name: $change_output"
+    [[ $change_output != *"$vless_uuid"* && $change_output != *"vless://"* ]] || fail "VLESS gRPC output must not expose credentials or the share link"
+    jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "GRPC-Upstream" and .outbound_proxy.config.transport.type == "grpc" and .outbound_proxy.config.transport.service_name == "api/v1"' "$meta_file" >/dev/null || fail "VLESS gRPC normalized config should be cached"
+    jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "grpc" and .transport.service_name == "api/v1" and .tls.server_name == "grpc-tls.example.com"' "$is_config_json" >/dev/null || fail "runtime VLESS gRPC outbound should preserve serviceName and separate TLS SNI"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (GRPC-Upstream)' ]] || fail "VLESS gRPC renderer should display the upstream name"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    restart_before=$(restart_count)
+    for bad_grpc_uri in \
+        "vless://$vless_uuid@grpc.example.com:443?type=grpc&mode=multi" \
+        "vless://$vless_uuid@grpc.example.com:443?type=grpc&authority=other.example.com:443"; do
+        if change_output=$(printf '6\n%s\n' "$bad_grpc_uri" | change node-one.json outbound 2>&1); then
+            fail "invalid VLESS gRPC parameters should fail without replacing the cached outbound"
+        fi
+        cmp -s "$case_dir/meta.before" "$meta_file" || fail "invalid VLESS gRPC parameters must preserve metadata"
+        cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid VLESS gRPC parameters must preserve runtime config"
+        [[ $(restart_count) == "$restart_before" ]] || fail "invalid VLESS gRPC parameters must not restart the service"
+    done
+    export TEST_REJECT_GRPC_CHECK=1
+    if change_output=$(printf '6\n%s\n' "$grpc_uri" | change node-one.json outbound 2>&1); then
+        fail "a kernel check that lacks gRPC capability must fail the menu operation"
     fi
-    [[ $change_output == *"VLESS"* && $change_output == *"type"* ]] || fail "invalid VLESS input should name the rejected field or capability: $change_output"
-    cmp -s "$case_dir/meta.before" "$meta_file" || fail "invalid VLESS replacement must preserve metadata"
-    cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid VLESS replacement must preserve the public config"
-    [[ $(restart_count) == "$restart_before" ]] || fail "invalid VLESS replacement must not restart the service"
+    unset TEST_REJECT_GRPC_CHECK
+    [[ $change_output == *"完整配置校验失败"* ]] || fail "missing gRPC capability should report complete config validation failure: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "missing gRPC capability must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "missing gRPC capability must preserve runtime config"
+    [[ $(restart_count) == "$restart_before" ]] || fail "missing gRPC capability must not restart the service"
 
     change_output=$(printf '6\n\n' | change node-one.json outbound 2>&1) || fail "cached VLESS config should be reusable: $change_output"
     change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "switching VLESS to direct should succeed: $change_output"
