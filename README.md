@@ -60,7 +60,7 @@ bash <(wget -qO- -o- https://github.com/ouones/one-singbox/raw/main/install.sh)
 
 日志维护服务每 10 秒检查一次，超限后轮转并优先清理最旧记录，保留最近记录，同时留出一半容量供新日志写入；调低限制会立即检查。检查间隔内可能短暂超过上限。轮转采用复制后截断的方式，无需重启 sing-box，但复制与截断之间并发写入的少量记录可能丢失。
 
-节点出站方式：运行 `sing-box c <节点配置名> outbound`，或在节点编辑菜单中选择“更改出站方式”。支持四种 IPv4／IPv6 直连方式、SS SIP002 `ss://` 分享链接（Base64／Base64URL 或百分号编码凭据，兼容既有 SS2022 Base64 链接及多密钥密码）和 VLESS TCP/raw（none/TLS/Reality）分享链接。SS 非空插件、未知连接参数及当前不支持的 VLESS 传输会明确拒绝。选择同类型代理并直接回车可复用缓存；切回直连保留最近一次代理配置。展示名称或地址与端口，不回显凭据。配置会先完整校验，再同步重启并确认服务运行后才提示“配置已应用”；该状态不表示上游连通性已检测，代理故障时不会自动改走直连。
+节点出站方式：运行 `sing-box c <节点配置名> outbound`，或在节点编辑菜单中选择“更改出站方式”。支持四种 IPv4／IPv6 直连方式、SS SIP002 `ss://` 分享链接（Base64／Base64URL 或百分号编码凭据，兼容既有 SS2022 Base64 链接及多密钥密码）和 VLESS TCP/raw（none/TLS/Reality）、HTTP/h2、HTTPUpgrade 与原生 QUIC 分享链接。HTTP 支持明文/TLS/Reality，`h2` 需要 TLS/Reality；HTTPUpgrade 支持 none/TLS/Reality；QUIC 仅支持无额外加密的 sing-box 原生 TLS，不兼容其他内核的额外 QUIC 加密或 Reality 组合。HTTP host 按列表解析，HTTPUpgrade host 为单值；TCP `headerType=http` 伪装及未知或暂不支持的连接参数会明确拒绝。选择同类型代理并直接回车可复用缓存；切回直连保留最近一次代理配置。展示名称或地址与端口，不回显凭据。配置会先完整校验，再同步重启并确认服务运行后才提示“配置已应用”；该状态不表示上游连通性已检测，代理故障时不会自动改走直连。
 
 使用：`sing-box help`
 

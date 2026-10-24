@@ -1393,10 +1393,12 @@ uri_query_alias_value() {
 
 parse_vless_uri() {
     local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
-    local fragment_present=0 remark_name key encryption transport security flow
+    local fragment_present=0 remark_name key encryption transport transport_original security flow
     local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
     local public_key public_key_present short_id short_id_present insecure=false insecure_present
     local packet_encoding packet_encoding_present utls_enabled=false
+    local transport_config_json='{}' path path_present host host_present host_json
+    local header_type header_type_present quic_security quic_security_present quic_key quic_key_present
     local canonical_public_key public_key_length
 
     outbound_proxy_parse_error="VLESS 链接格式或参数无效"
@@ -1460,7 +1462,7 @@ parse_vless_uri() {
 
     while IFS= read -r key; do
         case $key in
-        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding) ;;
+        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | headerType | quicSecurity | key) ;;
         *)
             outbound_proxy_parse_error="VLESS 暂不支持连接参数: $key"
             return 1
@@ -1473,17 +1475,31 @@ parse_vless_uri() {
         outbound_proxy_parse_error="VLESS encryption 仅支持 none"
         return 1
     }
-    transport=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
-    [[ $transport == tcp || $transport == raw ]] || {
-        outbound_proxy_parse_error="VLESS type=$transport 传输暂不支持，本票仅支持 TCP/raw"
+    transport_original=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
+    transport=$transport_original
+    case $transport in
+    tcp | raw) transport=tcp ;;
+    h2) transport=http ;;
+    http | httpupgrade | quic) ;;
+    *)
+        outbound_proxy_parse_error="VLESS type=$transport_original 传输暂不支持"
         return 1
-    }
+        ;;
+    esac
     security=$(jq -r '.security // "none"' <<<"$uri_query_json")
     [[ ! $security ]] && security=none
     [[ $security == none || $security == tls || $security == reality ]] || {
         outbound_proxy_parse_error="VLESS security=$security 暂不支持"
         return 1
     }
+    if [[ $transport_original == h2 && $security == none ]]; then
+        outbound_proxy_parse_error="VLESS type=h2 需要 TLS 或 Reality，避免按明文 HTTP/2 处理"
+        return 1
+    fi
+    if [[ $transport == quic && $security != tls ]]; then
+        outbound_proxy_parse_error="VLESS QUIC 仅支持 sing-box 原生 TLS；无 TLS 或跨内核 Reality QUIC 不受支持"
+        return 1
+    fi
     flow=$(jq -r '.flow // ""' <<<"$uri_query_json")
     [[ ! $flow || $flow == xtls-rprx-vision ]] || {
         outbound_proxy_parse_error="VLESS flow=$flow 暂不支持"
@@ -1514,6 +1530,112 @@ parse_vless_uri() {
     packet_encoding_present=$uri_alias_present
     uri_query_alias_value "$uri_query_json" raw remark remarks || return 1
     remark_name=$uri_alias_value
+    path_present=$(jq -r 'has("path")' <<<"$uri_query_json")
+    path=$(jq -r '.path // ""' <<<"$uri_query_json")
+    host_present=$(jq -r 'has("host")' <<<"$uri_query_json")
+    host=$(jq -r '.host // ""' <<<"$uri_query_json")
+    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
+    header_type=$(jq -r '.headerType // ""' <<<"$uri_query_json")
+    quic_security_present=$(jq -r 'has("quicSecurity")' <<<"$uri_query_json")
+    quic_security=$(jq -r '.quicSecurity // ""' <<<"$uri_query_json")
+    quic_key_present=$(jq -r 'has("key")' <<<"$uri_query_json")
+    quic_key=$(jq -r '.key // ""' <<<"$uri_query_json")
+
+    if [[ $transport != quic && ($quic_security_present == true || $quic_key_present == true) ]]; then
+        outbound_proxy_parse_error="VLESS quicSecurity 和 key 仅用于 QUIC 传输"
+        return 1
+    fi
+    case $transport in
+    tcp)
+        if [[ $path_present == true || $host_present == true ]]; then
+            outbound_proxy_parse_error="VLESS TCP/raw 不支持 path 或 host 传输参数"
+            return 1
+        fi
+        if [[ $header_type_present == true ]]; then
+            case $header_type in
+            none) ;;
+            http)
+                outbound_proxy_parse_error="VLESS TCP headerType=http 伪装与原生 HTTP 传输不等价"
+                return 1
+                ;;
+            *)
+                outbound_proxy_parse_error="VLESS TCP headerType 仅支持 none"
+                return 1
+                ;;
+            esac
+        fi
+        ;;
+    http)
+        if [[ $header_type_present == true ]]; then
+            outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
+            return 1
+        fi
+        if [[ $path_present == true ]]; then
+            [[ $path ]] || {
+                outbound_proxy_parse_error="VLESS HTTP path 不能为空"
+                return 1
+            }
+        else
+            path=/
+        fi
+        if [[ $host_present == true ]]; then
+            [[ $host ]] || {
+                outbound_proxy_parse_error="VLESS HTTP host 不能为空"
+                return 1
+            }
+            host_json=$(jq -cn --arg host "$host" '$host | split(",")') || return 1
+            jq -e 'length > 0 and all(.[]; length > 0)' <<<"$host_json" >/dev/null || {
+                outbound_proxy_parse_error="VLESS HTTP host 必须是逗号分隔的非空列表"
+                return 1
+            }
+            transport_config_json=$(jq -cn --arg path "$path" --argjson host "$host_json" '{type:"http",path:$path,host:$host}') || return 1
+        else
+            transport_config_json=$(jq -cn --arg path "$path" '{type:"http",path:$path}') || return 1
+        fi
+        ;;
+    httpupgrade)
+        if [[ $header_type_present == true ]]; then
+            outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
+            return 1
+        fi
+        if [[ $path_present == true ]]; then
+            [[ $path ]] || {
+                outbound_proxy_parse_error="VLESS HTTPUpgrade path 不能为空"
+                return 1
+            }
+        else
+            path=/
+        fi
+        if [[ $host_present == true ]]; then
+            [[ $host ]] || {
+                outbound_proxy_parse_error="VLESS HTTPUpgrade host 不能为空"
+                return 1
+            }
+            [[ $host != *,* ]] || {
+                outbound_proxy_parse_error="VLESS HTTPUpgrade host 只支持单值，不能接收逗号分隔列表"
+                return 1
+            }
+            transport_config_json=$(jq -cn --arg path "$path" --arg host "$host" '{type:"httpupgrade",path:$path,host:$host}') || return 1
+        else
+            transport_config_json=$(jq -cn --arg path "$path" '{type:"httpupgrade",path:$path}') || return 1
+        fi
+        ;;
+    quic)
+        if [[ $path_present == true || $host_present == true || $header_type_present == true ]]; then
+            outbound_proxy_parse_error="VLESS QUIC 不支持 path、host 或 headerType 传输参数"
+            return 1
+        fi
+        if [[ $quic_security_present == true && $quic_security != none ]]; then
+            outbound_proxy_parse_error="VLESS QUIC 仅支持 quicSecurity=none；额外加密不兼容 sing-box"
+            return 1
+        fi
+        if [[ $quic_key_present == true && $quic_key ]]; then
+            outbound_proxy_parse_error="VLESS QUIC 不支持额外加密 key；跨内核 QUIC 变体不兼容"
+            return 1
+        fi
+        transport_config_json='{"type":"quic"}'
+        ;;
+    esac
 
     if [[ $security == none ]]; then
         if [[ ($sni_present == 1 && $sni) || ($alpn_present == 1 && $alpn) || ($fingerprint_present == 1 && $fingerprint) || ($insecure_present == 1 && $insecure) || ($public_key_present == 1 && $public_key) || ($short_id_present == 1 && $short_id) ]]; then
@@ -1589,6 +1711,10 @@ parse_vless_uri() {
             outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
             return 1
         fi
+        if [[ $flow && $transport != tcp ]]; then
+            outbound_proxy_parse_error="VLESS Vision flow 仅支持 TCP/raw 传输"
+            return 1
+        fi
     fi
     [[ ! $packet_encoding || $packet_encoding == xudp || $packet_encoding == packetaddr ]] || {
         outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
@@ -1618,6 +1744,8 @@ parse_vless_uri() {
         --arg public_key "$public_key" \
         --arg short_id "$short_id" \
         --arg flow "$flow" \
+        --arg transport "$transport" \
+        --argjson transport_config "$transport_config_json" \
         --arg packet_encoding "$packet_encoding" \
         --argjson packet_encoding_present "${packet_encoding_present:-0}" \
         '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
@@ -1628,6 +1756,7 @@ parse_vless_uri() {
                 + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end)}
           end
         + if $flow == "" then {} else {flow:$flow} end
+        + if $transport == "tcp" then {} else {transport:$transport_config} end
         + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end') || {
         outbound_proxy_parse_error="无法构造 VLESS 原生出站参数"
         return 1
