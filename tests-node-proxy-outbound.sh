@@ -353,8 +353,9 @@ vless-menu)
         "vless://$vless_uuid@vless.example.com:443?type=ws&host=" \
         "vless://$vless_uuid@vless.example.com:443?type=ws&host=ws.example.com%2Cother.example.com" \
         "vless://$vless_uuid@vless.example.com:443?type=grpc&mode=multi" \
-        "vless://$vless_uuid@vless.example.com:443?type=http&serviceName=ignored" \
-        "vless://$vless_uuid@vless.example.com:443?type=quic&security=tls&ed=16" \
+        "vless://$vless_uuid@vless.example.com:443?type=http&security=tls&ed=16" \
+        "vless://$vless_uuid@vless.example.com:443?type=quic&security=tls&serviceName=ignored" \
+        "vless://$vless_uuid@vless.example.com:443?type=quic&security=tls&authority=ignored" \
         "vless://$vless_uuid@vless.example.com:443?type=grpc&mode=guna" \
         "vless://$vless_uuid@vless.example.com:443?type=grpc&mode=unknown" \
         "vless://$vless_uuid@vless.example.com:443?type=grpc&ed=4" \
