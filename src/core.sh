@@ -1881,7 +1881,7 @@ parse_vless_uri() {
     local vless_certificate_sha256_json='[]'
     local transport_config_json='{}' path path_present host host_present host_json
     local header_type header_type_present quic_security quic_security_present quic_key quic_key_present
-    local canonical_public_key public_key_length ed eh mode grpc_authority
+    local canonical_public_key public_key_length ed eh mode grpc_authority transport_parameter
     local ed_present eh_present mode_present authority_present
     local ws_path=/ ws_host= ws_host_present=0 ws_early_data= ws_early_data_present=0 ws_early_data_header= ws_early_data_header_present=0
     local grpc_service_name= grpc_service_name_present=0 grpc_default_authority
@@ -2059,7 +2059,15 @@ parse_vless_uri() {
         ;;
     tcp | raw)
         if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 || $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
-            outbound_proxy_parse_error="VLESS type=$transport 不能使用 WebSocket 或 gRPC 专属参数"
+            if [[ $path_present == 1 ]]; then transport_parameter=path
+            elif [[ $host_present == 1 ]]; then transport_parameter=host
+            elif [[ $ed_present == 1 ]]; then transport_parameter=ed
+            elif [[ $eh_present == 1 ]]; then transport_parameter=eh
+            elif [[ $grpc_service_name_present == 1 ]]; then transport_parameter=serviceName
+            elif [[ $mode_present == true ]]; then transport_parameter=mode
+            else transport_parameter=authority
+            fi
+            outbound_proxy_parse_error="VLESS type=$transport 不支持参数: $transport_parameter"
             return 1
         fi
         ;;
