@@ -10,6 +10,7 @@
 
 ## 真实内核验证
 
-- 截至本提交，尚未完成真实产品 parser 对象的完整 `check` 或 ECH／pcs 正负连接；本记录不将替身菜单测试当成协议互通证据。独立 native-lab 验收正在进行，结果将在后续文档提交补充。
-- 本地可用的 1.15.0 对照仅为 `v1.15.0-alpha.13`；未验收正式版。空 `ech` 的 DNS HTTPS 获取行为也尚未实测。
-
+- NAS 上 Debian 12、Linux/amd64 的官方 sing-box v1.14.0（Go 1.26.7，revision `0b8995879f29a9b98ee027bc17b75e101445b238`）与官方 `v1.15.0-alpha.13`（Go 1.26.10，revision `824dbcfb4dd0a95921840b1737b950cde590241e`）均执行了从两份产品 parser 导出的实际对象。两份 core 的 ECH Base64／PEM 与 pcs 对象一致；v1.14.0 ECH、默认 TLS 和空 ECH，及 alpha.13 ECH／pcs 的完整配置检查通过；v1.14.0 的非空 pcs 因不支持字段被拒绝。
+- v1.14.0 对实际静态 ECH 对象完成 TCP、UDP、远端域名、断开上游后无直连回退验证，全部通过；替换为另一份有效 ECH 配置后，TLS 握手按预期拒绝。显式空 `ech` 对象触发了 loopback DNS 夹具的 HTTPS/SVCB 查询，并完成 TCP／UDP／远端域名和 no-fallback 验证。
+- 默认 TLS 校验用例拒绝了不受信任证书；在隔离验证进程显式信任该测试证书后连接通过。alpha.13 的实际 pcs 对象在正确整张证书 SHA-256 pin 下连接通过，换为错误 pin 后连接被拒绝。
+- native-lab 原始报告及 parser JSON 保存在本地 `.scratch/issue7-native-support/results/`。全部链路限于 loopback 测试夹具；不代表公开上游可达。可用的 1.15 对照仅为 alpha.13，未验收正式 1.15.0 版。
