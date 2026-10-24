@@ -272,6 +272,106 @@ vless-menu)
     parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&fp=none#TLSDefault" || fail "TLS default certificate validation should parse"
     jq -e '.tls.enabled == true and .tls.insecure == false and (.tls | has("utls") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "TLS should validate certificates by default and fp=none should omit uTLS"
     if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-tls.json"; fi
+    ech_base64=${TEST_ECH_BASE64:-AA==}
+    ech_expected_body=$(printf '%s' "$ech_base64" | base64 -d 2>/dev/null | base64) || fail "ECH test fixture must be valid Base64"
+    ech_expected_pem="-----BEGIN ECH CONFIGS-----"$'\n'"$ech_expected_body"$'\n'"-----END ECH CONFIGS-----"
+    parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=tls&ech=$ech_base64#ECH" || fail "static ECH Base64 should parse"
+    jq -e --arg config "$ech_expected_pem" '.tls.ech.enabled == true and .tls.ech.config == $config' <<<"$outbound_proxy_config_json" >/dev/null || fail "bare ECH Base64 should normalize to ECH CONFIGS PEM"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-ech.json"; fi
+
+    ech_encoded=$(printf '%s' "$ech_expected_pem" | jq -sRr '@uri')
+    parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=tls&ech=$ech_encoded#ECH-Pem" || fail "URL-decoded ECH CONFIGS PEM should parse"
+    jq -e --arg config "$ech_expected_pem" '.tls.ech.enabled == true and .tls.ech.config == $config' <<<"$outbound_proxy_config_json" >/dev/null || fail "ECH PEM query value should normalize to the native config string"
+    ech_raw_uri=$(printf 'vless://%s@ech.example.com:443?security=tls&ech=%s#ECH-Raw' "$vless_uuid" "$ech_expected_pem")
+    parse_proxy_uri vless "$ech_raw_uri" || fail "legal ECH PEM newlines should be allowed inside the ech field"
+    jq -e --arg config "$ech_expected_pem" '.tls.ech.config == $config' <<<"$outbound_proxy_config_json" >/dev/null || fail "raw ECH PEM should preserve its config block"
+    parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=tls&ech=#ECH-DNS" || fail "explicit empty ech should enable DNS-based ECH"
+    jq -e '.tls.ech.enabled == true and (.tls.ech | has("config") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "empty ech should omit static config and use the native DNS behavior"
+    if parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=tls&fp=chrome&ech=$ech_base64"; then
+        fail "ECH with uTLS fingerprint must be rejected when it cannot be faithfully combined"
+    fi
+    [[ $outbound_proxy_parse_error == *"ECH"* && $outbound_proxy_parse_error == *"fingerprint"* ]] || fail "ECH fingerprint incompatibility should be explained: $outbound_proxy_parse_error"
+    if parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=reality&pbk=$vless_pbk&ech=$ech_base64"; then
+        fail "ECH with Reality must be rejected when it cannot be faithfully represented"
+    fi
+    [[ $outbound_proxy_parse_error == *"ECH"* ]] || fail "ECH security incompatibility should be explained: $outbound_proxy_parse_error"
+    for bad_ech in \
+        'example.com,AA==' \
+        '-----BEGIN ECH KEYS-----%0AAA%3D%3D%0A-----END ECH KEYS-----' \
+        '-----BEGIN ECH CONFIGS-----%0AAA%3D%3D%0ATRAILER%0A-----END ECH CONFIGS-----'; do
+        if parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=tls&ech=$bad_ech"; then
+            fail "mixed or malformed ECH parameters must be rejected: $bad_ech"
+        fi
+    done
+    if parse_proxy_uri vless "vless://$vless_uuid@ech.example.com:443?security=tls&sni=bad%0Aname&ech=$ech_base64"; then
+        fail "ECH exception must not allow control characters in SNI"
+    fi
+    bad_name_uri=$(printf 'vless://%s@ech.example.com:443?security=tls&ech=%s#Bad\nName' "$vless_uuid" "$ech_base64")
+    if parse_proxy_uri vless "$bad_name_uri"; then
+        fail "ECH exception must not allow control characters in the display name"
+    fi
+    bad_authority_uri=$(printf 'vless://%s@ech.\nexample.com:443?security=tls&ech=%s' "$vless_uuid" "$ech_base64")
+    if parse_proxy_uri vless "$bad_authority_uri"; then
+        fail "ECH exception must not allow control characters in the authority"
+    fi
+
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&vcn=front.example.com" || fail "vcn equal to the actual SNI should be treated as equivalent"
+    jq -e '.tls.server_name == "front.example.com" and (.tls | has("vcn") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "equivalent vcn should not add an independent native certificate name"
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&vcn=vless.example.com" || fail "vcn equal to the default certificate name should be treated as equivalent"
+    if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&vcn=other.example.com"; then
+        fail "an independent vcn override must be rejected"
+    fi
+    [[ $outbound_proxy_parse_error == *"vcn"* ]] || fail "independent vcn rejection should identify the field: $outbound_proxy_parse_error"
+    if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&vcn=front.example.com%2Cother.example.com"; then
+        fail "multiple independent vcn values must be rejected"
+    fi
+    if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=none&vcn=vless.example.com"; then
+        fail "vcn must not be accepted without TLS certificate validation"
+    fi
+
+    is_core_ver=1.15.0-alpha.13
+    pin_zero_base64=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    pin_text_hex=3031323334353637383961626364656630313233343536373839616263646566
+    pin_text_base64=$(printf '%s' '0123456789abcdef0123456789abcdef' | base64 -w 0)
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&pcs=$pin_zero_base64,$pin_text_hex#Pins" || fail "valid whole-certificate SHA-256 pins should parse on a capable core version"
+    jq -e --arg first "$pin_zero_base64" --arg second "$pin_text_base64" '.tls.certificate_sha256 == [$first,$second]' <<<"$outbound_proxy_config_json" >/dev/null || fail "pcs must retain multiple 32-byte whole-certificate pins as normalized Base64 values"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-pcs.json"; fi
+    is_core_ver=1.14.0
+    if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&pcs=$pin_zero_base64"; then
+        fail "sing-box 1.14.0 must reject non-empty whole-certificate pcs"
+    fi
+    [[ $outbound_proxy_parse_error == *"pcs"* && $outbound_proxy_parse_error == *"1.14.0"* ]] || fail "v1.14.0 pcs rejection should name the unsupported feature and version: $outbound_proxy_parse_error"
+    is_core_ver=1.15.0-alpha.13
+    if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=none&pcs=$pin_zero_base64"; then
+        fail "certificate pins must require TLS"
+    fi
+    [[ $outbound_proxy_parse_error == *"pcs"* ]] || fail "pcs without TLS should identify the field: $outbound_proxy_parse_error"
+    for bad_pcs in 'AA==' 'zz' "$pin_zero_base64,"; do
+        if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&pcs=$bad_pcs"; then
+            fail "invalid or partial pcs digest should be rejected: $bad_pcs"
+        fi
+    done
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&pcs=" || fail "an explicit empty pcs value should not enable pinning"
+    jq -e '(.tls | has("certificate_sha256") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "empty pcs should omit the whole-certificate pin list"
+
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&spx=&spiderX=" || fail "empty Reality spiderX values should remain disabled"
+    for bad_param in \
+        'spx=%2Fpath' \
+        'spiderX=%2Fpath' \
+        'type=xhttp' \
+        'extra=opaque' \
+        'type=kcp' \
+        'fm=mask' \
+        'mode=auto' \
+        'encryption=aes-128-gcm' \
+        'mux=4' \
+        'smux=1'; do
+        if parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?$bad_param"; then
+            fail "unmapped VLESS extension must be rejected: $bad_param"
+        fi
+        bad_key=${bad_param%%=*}
+        [[ $outbound_proxy_parse_error == *"$bad_key"* || $bad_key == type && $outbound_proxy_parse_error == *"type=xhttp"* ]] || fail "unmapped VLESS extension should identify its field: $bad_param ($outbound_proxy_parse_error)"
+    done
     parse_proxy_uri vless "vless://$vless_uuid@reality.example.com:443?security=reality&flow=xtls-rprx-vision&publicKey=$vless_pbk&pbk=$vless_pbk&sid=&shortId=&skip-cert-verify=1&insecure=true#Reality" || fail "VLESS Reality aliases, empty short ID, and Vision should parse"
     jq -e '.flow == "xtls-rprx-vision" and .tls.enabled == true and .tls.server_name == "reality.example.com" and .tls.utls.enabled == true and .tls.utls.fingerprint == "chrome" and .tls.insecure == true and .tls.reality.enabled == true and .tls.reality.public_key == "'"$vless_pbk"'" and .tls.reality.short_id == ""' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS Reality should retain the public-key authentication and default short ID"
     if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-reality-vision.json"; fi
@@ -331,6 +431,47 @@ vless-menu)
     change_output=$(printf '6\n%s\n' "$vless_uri" | change node-one.json outbound 2>&1) || fail "SS to VLESS replacement should succeed: $change_output"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.config.type == "vless"' "$meta_file" >/dev/null || fail "VLESS replacement should replace the SS cache"
     change_output=$(printf '6\n\n' | change node-one.json mode 2>&1) || fail "non-Snell mode compatibility entry should reuse VLESS: $change_output"
+
+    ech_menu_uri="vless://$vless_uuid@ech.example.com:443?security=tls&ech=$ech_encoded#ECH+Menu"
+    change_output=$(printf '6\n%s\n' "$ech_menu_uri" | change node-one.json outbound 2>&1) || fail "VLESS ECH import should apply: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"ECH+Menu"* ]] || fail "ECH success should display the name and applied state: $change_output"
+    [[ $change_output != *"$ech_base64"* && $change_output != *"vless://"* ]] || fail "ECH import should not echo the full link or config"
+    jq -e --arg config "$ech_expected_pem" '.outbound_proxy.config.tls.ech.enabled == true and .outbound_proxy.config.tls.ech.config == $config' "$meta_file" >/dev/null || fail "ECH normalized config should be cached"
+    jq -e --arg config "$ech_expected_pem" '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .tls.ech.enabled == true and .tls.ech.config == $config' "$is_config_json" >/dev/null || fail "ECH config should reach the runtime outbound"
+
+    vcn_menu_uri="vless://$vless_uuid@vless.example.com:443?security=tls&vcn=vless.example.com#VCN"
+    change_output=$(printf '6\n%s\n' "$vcn_menu_uri" | change node-one.json outbound 2>&1) || fail "equivalent VLESS vcn should apply: $change_output"
+    jq -e '.outbound_proxy.config.tls.server_name == "vless.example.com" and (.outbound_proxy.config.tls | has("vcn") | not)' "$meta_file" >/dev/null || fail "equivalent vcn should use the native server_name only"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    restart_before=$(restart_count)
+    bad_vcn_uri="vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&vcn=other.example.com#BadVCN"
+    if change_output=$(printf '6\n%s\n' "$bad_vcn_uri" | change node-one.json outbound 2>&1); then
+        fail "an independent VLESS vcn override must not apply"
+    fi
+    [[ $change_output == *"vcn"* ]] || fail "independent vcn should be explained: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "independent vcn rejection must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "independent vcn rejection must preserve runtime config"
+    [[ $(restart_count) == "$restart_before" ]] || fail "independent vcn rejection must not restart the service"
+
+    is_core_ver=1.14.0
+    pcs_menu_uri="vless://$vless_uuid@vless.example.com:443?security=tls&pcs=$pin_zero_base64,$pin_text_hex#Pins"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    restart_before=$(restart_count)
+    if change_output=$(printf '6\n%s\n' "$pcs_menu_uri" | change node-one.json outbound 2>&1); then
+        fail "sing-box 1.14.0 must reject non-empty whole-certificate pcs"
+    fi
+    [[ $change_output == *"pcs"* && $change_output == *"1.14.0"* ]] || fail "v1.14.0 pcs rejection should name the feature and version: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "v1.14.0 pcs rejection must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "v1.14.0 pcs rejection must preserve runtime config"
+    [[ $(restart_count) == "$restart_before" ]] || fail "v1.14.0 pcs rejection must not restart the service"
+
+    is_core_ver=1.15.0-alpha.13
+    change_output=$(printf '6\n%s\n' "$pcs_menu_uri" | change node-one.json outbound 2>&1) || fail "VLESS pcs should apply when the target version supports whole-certificate pins: $change_output"
+    jq -e --arg first "$pin_zero_base64" --arg second "$pin_text_base64" '.outbound_proxy.config.tls.certificate_sha256 == [$first,$second]' "$meta_file" >/dev/null || fail "whole-certificate pins should be cached as a Base64 list"
+    jq -e --arg first "$pin_zero_base64" --arg second "$pin_text_base64" '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .tls.certificate_sha256 == [$first,$second]' "$is_config_json" >/dev/null || fail "whole-certificate pins should reach the runtime outbound"
+    is_core_ver=1.14.0
     exit 0
     ;;
 vless-http-quic)
