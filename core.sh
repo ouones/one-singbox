@@ -371,7 +371,7 @@ get_pbk() {
 show_list() {
     PS3=''
     COLUMNS=1
-    select i in "$@"; do echo; done &
+    select i in "$@"; do echo; done </dev/null &
     wait
     # i=0
     # for v in "$@"; do
@@ -606,13 +606,21 @@ current_outbound_mode_display() {
         return
     }
     if [[ $mode == 'SS 出站' ]]; then
+        name=$(meta_get "$cfg" '.outbound_proxy.name')
+        [[ $name ]] && {
+            echo "$mode ($name)"
+            return
+        }
         name=$(meta_get "$cfg" '.outbound_ss_name')
         [[ $name ]] && {
             echo "$mode ($name)"
             return
         }
-        server=$(meta_get "$cfg" '.outbound_ss_server')
-        port=$(meta_get "$cfg" '.outbound_ss_port')
+        server=$(meta_get "$cfg" '.outbound_proxy.config.server')
+        port=$(meta_get "$cfg" '.outbound_proxy.config.server_port')
+        [[ ! $server ]] && server=$(meta_get "$cfg" '.outbound_ss_server')
+        [[ ! $port ]] && port=$(meta_get "$cfg" '.outbound_ss_port')
+        [[ $server == *:* && $server != \[*\] ]] && server="[$server]"
         [[ $server && $port ]] && {
             echo "$mode ($server:$port)"
             return
@@ -628,55 +636,137 @@ runtime_node_ss_outbound_tag() {
 }
 
 runtime_domain_resolver_tag() {
-    jq -r 'if (.route.default_domain_resolver | type) == "string" then .route.default_domain_resolver elif (.route.default_domain_resolver | type) == "object" then (.route.default_domain_resolver.server // "local") else "local" end' "$is_config_json" 2>/dev/null
+    local config_file=${1:-$is_config_json}
+    jq -r 'if (.route.default_domain_resolver | type) == "string" then .route.default_domain_resolver elif (.route.default_domain_resolver | type) == "object" then (.route.default_domain_resolver.server // "local") else "local" end' "$config_file" 2>/dev/null
 }
 
-sync_runtime_node_outbound_modes() {
-    local resolver rules ss_outbounds tmp file cfg mode outbound server port method password
-    [[ -f "$is_config_json" ]] || return
+runtime_node_vless_outbound_tag() {
+    local cfg=$1 safe
+    safe=${cfg//[^[:alnum:]_-]/_}
+    echo "managed_node_vless_$safe"
+}
 
-    resolver=$(runtime_domain_resolver_tag)
+render_runtime_node_outbound_modes() {
+    local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-}
+    local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
+    local -A used_proxy_tags=()
+    runtime_sync_error=
+    [[ -f $source_config && $output ]] || {
+        runtime_sync_error="公共配置文件不存在"
+        return 1
+    }
+    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.route // {}) | type == "object") and ((.route.rules // []) | type == "array")' "$source_config" >/dev/null 2>&1 || {
+        runtime_sync_error="公共配置格式无效"
+        return 1
+    }
+    resolver=$(runtime_domain_resolver_tag "$source_config") || {
+        runtime_sync_error="无法读取上游域名解析器"
+        return 1
+    }
     [[ $resolver ]] || resolver=local
-    rules='[]'
-    ss_outbounds='[]'
-    shopt -s nullglob
+    direct_rules='[]'
+    proxy_rules='[]'
+    proxy_outbounds='[]'
     for file in "$is_conf_dir"/*.json; do
+        [[ -f $file ]] || continue
         cfg=${file##*/}
         [[ $cfg =~ dynamic-port-.*-link ]] && continue
-        mode=$(meta_get "$cfg" '.outbound_mode')
+        meta_path=$(meta_file "$cfg")
+        [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
+        [[ -f $meta_path ]] || continue
+        jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
+            runtime_sync_error="节点元数据格式无效: $cfg"
+            return 1
+        }
+        mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
+            runtime_sync_error="无法读取节点出站方式: $cfg"
+            return 1
+        }
         [[ $mode ]] || continue
         outbound=$(outbound_mode_to_direct_tag "$mode")
         if [[ $outbound ]]; then
-            rules=$(jq --arg inbound "$cfg" --arg outbound "$outbound" '. += [{inbound:[$inbound],action:"route",outbound:$outbound}]' <<<"$rules")
+            tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
+                runtime_sync_error="无法读取节点入站 tag: $cfg"
+                return 1
+            }
+            [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
+                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+                return 1
+            }
+            direct_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$direct_rules") || {
+                runtime_sync_error="生成直连路由失败: $cfg"
+                return 1
+            }
             continue
         fi
-        [[ $mode == 'SS 出站' ]] || continue
-        server=$(meta_get "$cfg" '.outbound_ss_server')
-        port=$(meta_get "$cfg" '.outbound_ss_port')
-        method=$(meta_get "$cfg" '.outbound_ss_method')
-        password=$(meta_get "$cfg" '.outbound_ss_password')
-        [[ $server && $port && $method && $password ]] || continue
-        ss_method_supported "$method" || continue
-        [[ $(is_test port "$port") ]] || continue
-        ss_password_valid_for_method "$method" "$password" || continue
-        outbound=$(runtime_node_ss_outbound_tag "$cfg")
-        ss_outbounds=$(jq --arg tag "$outbound" --arg server "$server" --argjson port "$port" --arg method "$method" --arg password "$password" '. += [{tag:$tag,type:"shadowsocks",server:$server,server_port:$port,method:$method,password:$password}]' <<<"$ss_outbounds")
-        rules=$(jq --arg inbound "$cfg" --arg outbound "$outbound" '. += [{inbound:[$inbound],action:"route",outbound:$outbound}]' <<<"$rules")
+        [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] || continue
+        outbound_proxy_from_metadata "$cfg" "$meta_path" || {
+            runtime_sync_error="节点代理配置无效: $cfg"
+            return 1
+        }
+        [[ $outbound_proxy_json ]] || {
+            runtime_sync_error="节点代理配置缺失: $cfg"
+            return 1
+        }
+        config_type=$(jq -r '.config.type' <<<"$outbound_proxy_json")
+        if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
+            tag=$(runtime_node_ss_outbound_tag "$cfg")
+        elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
+            tag=$(runtime_node_vless_outbound_tag "$cfg")
+        else
+            runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
+            return 1
+        fi
+        [[ ! ${used_proxy_tags[$tag]+exists} ]] || {
+            runtime_sync_error="受管出站 tag 冲突: $tag"
+            return 1
+        }
+        used_proxy_tags[$tag]=$cfg
+        tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
+            runtime_sync_error="无法读取节点入站 tag: $cfg"
+            return 1
+        }
+        [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
+            runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+            return 1
+        }
+        server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
+        if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
+            config=$(jq -c --arg tag "$tag" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
+                runtime_sync_error="生成代理出站失败: $cfg"
+                return 1
+            }
+        else
+            config=$(jq -c --arg tag "$tag" '.config + {tag:$tag}' <<<"$outbound_proxy_json") || {
+                runtime_sync_error="生成代理出站失败: $cfg"
+                return 1
+            }
+        fi
+        proxy_outbounds=$(jq -c --argjson config "$config" '. + [$config]' <<<"$proxy_outbounds") || {
+            runtime_sync_error="生成代理出站列表失败"
+            return 1
+        }
+        proxy_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$tag" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$proxy_rules") || {
+            runtime_sync_error="生成代理路由失败: $cfg"
+            return 1
+        }
     done
-    shopt -u nullglob
 
-    tmp="$is_config_json.tmp"
-    jq --arg resolver "$resolver" --argjson rules "$rules" --argjson ss_outbounds "$ss_outbounds" '
-        def managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
-        def managed_outbounds($r): [
+    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" '
+        def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
+        def is_managed_tag($tag):
+            ((direct_managed_tags | index($tag)) != null)
+            or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
+        def is_broad_direct_rule:
+            .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
+        def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
             {tag:"direct_v4_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv4"}},
             {tag:"direct_v4_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv4_only"}},
             {tag:"direct_v6_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv6_only"}}
         ];
-        def is_managed_ss_tag($tag): $tag | startswith("managed_node_ss_");
         .dns = (.dns // {})
-        | if (($rules | length) > 0 and $resolver == "local") then
+        | if (((($direct_rules | length) + ($proxy_rules | length)) > 0) and $resolver == "local") then
             .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end)
             | if any(.dns.servers[]?; .tag == "local") then . else .dns.servers += [{tag:"local",type:"local"}] end
           else . end
@@ -691,10 +781,350 @@ sync_runtime_node_outbound_modes() {
           elif (.route.default_domain_resolver | type) == "string" and ((.route.default_domain_resolver // "") | length) == 0 then
             del(.route.default_domain_resolver)
           else . end
-        | .outbounds = ((.outbounds // []) | map(select(((.tag // "") as $tag | (managed_tags | index($tag) | not) and (is_managed_ss_tag($tag) | not)))))
-        | if (($rules | length) > 0) then .outbounds += managed_outbounds($resolver) + $ss_outbounds else . end
-        | .route.rules = ((.route.rules // []) | map(select(((.outbound // "") as $outbound | (managed_tags | index($outbound) | not) and (is_managed_ss_tag($outbound) | not))))) + $rules
-    ' "$is_config_json" >"$tmp" && mv -f "$tmp" "$is_config_json"
+        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_tag($tag)) | not))))
+        | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
+        | .outbounds += $proxy_outbounds
+        | (.route.rules // [] | map(select((((.outbound // "") as $tag | is_managed_tag($tag)) | not)))) as $existing_rules
+        | .route.rules = (
+            if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
+            else
+                ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
+                | if $direct_fallback == null then
+                    $proxy_rules + $existing_rules + $direct_rules
+                  else
+                    $proxy_rules + $existing_rules[:$direct_fallback] + $direct_rules + $existing_rules[$direct_fallback:]
+                  end
+            end
+          )
+    ' "$source_config" >"$output" || {
+        rm -f "$output"
+        runtime_sync_error="运行时出站配置生成失败"
+        return 1
+    }
+    return 0
+}
+
+sync_runtime_node_outbound_modes() {
+    local tmp
+    runtime_sync_error=
+    [[ -f $is_config_json ]] || return 0
+    tmp=$(mktemp "$is_config_json.tmp.XXXXXX") || {
+        runtime_sync_error="无法创建运行时配置临时文件"
+        return 1
+    }
+    if ! render_runtime_node_outbound_modes "$is_config_json" "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$is_config_json"; then
+        rm -f "$tmp"
+        runtime_sync_error="无法保存运行时配置: $is_config_json"
+        return 1
+    fi
+}
+
+manage_restart_confirmed() {
+    local pid
+    if [[ $is_systemd ]]; then
+        systemctl restart "$is_core" || return 1
+        sleep 2
+        systemctl is-active --quiet "$is_core" || return 1
+        pid=$(systemctl show -p MainPID --value "$is_core" 2>/dev/null) || return 1
+        [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+        return 0
+    fi
+    if [[ $is_openrc ]]; then
+        rc-service "$is_core" restart || return 1
+        sleep 2
+        rc-service "$is_core" status >/dev/null 2>&1 || return 1
+        return 0
+    fi
+    return 1
+}
+
+default_runtime_config() {
+    local log_path="/var/log/$is_core/access.log" ntp=
+    [[ $is_ntp_on ]] && ntp=1
+    jq -cn --arg log_path "$log_path" --arg ntp "$ntp" '
+        {log:{output:$log_path,level:"info",timestamp:true},dns:{},outbounds:[{tag:"direct",type:"direct"}]}
+        + (if $ntp == "1" then {ntp:{enabled:true,server:"time.apple.com"}} else {} end)
+    '
+}
+
+restore_outbound_apply_file() {
+    local backup=$1 target=$2 existed=$3 stage
+    if [[ $existed == 1 ]]; then
+        [[ -f $backup ]] || return 1
+        stage=$(mktemp "$target.restore.XXXXXX") || return 1
+        if ! cp -p "$backup" "$stage"; then
+            rm -f "$stage"
+            return 1
+        fi
+        if ! mv -f "$stage" "$target"; then
+            rm -f "$stage"
+            return 1
+        fi
+    else
+        rm -f "$target" || return 1
+    fi
+}
+
+apply_node_outbound_mode() {
+    local cfg=$1 mode=$2 proxy_config=${3:-} proxy_name=${4:-}
+    local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
+    local source_config candidate_meta candidate_config original_meta original_config
+    local candidate_meta_json proxy_json config_type method password
+    local meta_install config_install old_meta_exists=0 old_config_exists=0
+    local restore_errors=()
+    outbound_apply_error=
+    case $mode in
+    "V6优先" | "V4优先" | "仅V4" | "仅V6") ;;
+    "SS 出站" | "VLESS 出站") ;;
+    *)
+        outbound_apply_error="不支持的出站方式: $mode"
+        return 1
+        ;;
+    esac
+    [[ -f $node_file ]] || {
+        outbound_apply_error="本机节点配置不存在: $node_file"
+        return 1
+    }
+    jq -e 'type == "object" and (.inbounds | type == "array")' "$node_file" >/dev/null 2>&1 || {
+        outbound_apply_error="本机节点配置格式无效: $node_file"
+        return 1
+    }
+    metadata_file=$(meta_file "$cfg")
+    if [[ -f $metadata_file ]]; then
+        jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || {
+            outbound_apply_error="节点元数据格式无效: $metadata_file"
+            return 1
+        }
+    fi
+    if [[ $proxy_config && ($mode == 'SS 出站' || $mode == 'VLESS 出站') ]]; then
+        proxy_json=
+    else
+        outbound_proxy_from_metadata "$cfg" "$metadata_file" || {
+            outbound_apply_error="当前代理缓存无效，未更改运行配置: $metadata_file"
+            return 1
+        }
+        proxy_json=$outbound_proxy_json
+    fi
+    if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
+        if [[ $proxy_config ]]; then
+            config_type=$(jq -r '.type // empty' <<<"$proxy_config" 2>/dev/null)
+            if [[ $mode == 'SS 出站' ]]; then
+                [[ $config_type == shadowsocks ]] || {
+                    outbound_apply_error="SS 出站需要 Shadowsocks 连接参数"
+                    return 1
+                }
+                jq -e '
+                    type == "object"
+                    and (.server | type == "string" and length > 0)
+                    and (.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+                    and (.method | type == "string" and length > 0)
+                    and (.password | type == "string" and length > 0)
+                    and ((has("tag") or has("detour")) | not)
+                ' <<<"$proxy_config" >/dev/null 2>&1 || {
+                    outbound_apply_error="SS 出站参数无效"
+                    return 1
+                }
+                method=$(jq -r '.method' <<<"$proxy_config")
+                password=$(jq -r '.password' <<<"$proxy_config")
+                ss_method_supported "$method" && ss_password_valid_for_method "$method" "$password" || {
+                    outbound_apply_error="SS 加密方式或密钥无效"
+                    return 1
+                }
+            else
+                jq -e '
+                    type == "object"
+                    and .type == "vless"
+                    and (.server | type == "string" and length > 0)
+                    and (.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+                    and (.uuid | type == "string" and length > 0)
+                    and ((has("tag") or has("detour")) | not)
+                ' <<<"$proxy_config" >/dev/null 2>&1 || {
+                    outbound_apply_error="VLESS 出站参数无效"
+                    return 1
+                }
+            fi
+            proxy_json=$(jq -cn --arg name "$proxy_name" --argjson config "$proxy_config" '{name:$name,config:$config}') || {
+                outbound_apply_error="无法构造代理缓存"
+                return 1
+            }
+        else
+            [[ $proxy_json ]] || {
+                outbound_apply_error="没有可复用的代理缓存"
+                return 1
+            }
+            config_type=$(jq -r '.config.type // empty' <<<"$proxy_json")
+            [[ ($mode == 'SS 出站' && $config_type == shadowsocks) || ($mode == 'VLESS 出站' && $config_type == vless) ]] || {
+                outbound_apply_error="当前代理缓存与所选出站方式不匹配"
+                return 1
+            }
+        fi
+    fi
+
+    tmp_parent=$(dirname "$is_config_json")
+    tmp_dir=$(mktemp -d "$tmp_parent/.outbound-apply.XXXXXX") || {
+        outbound_apply_error="无法创建候选配置目录: $tmp_parent"
+        return 1
+    }
+    source_config="$tmp_dir/config-source.json"
+    candidate_meta="$tmp_dir/metadata-candidate.json"
+    candidate_config="$tmp_dir/config-candidate.json"
+    original_meta="$tmp_dir/metadata-original"
+    original_config="$tmp_dir/config-original"
+    if [[ -f $metadata_file ]]; then
+        cp -p "$metadata_file" "$original_meta" || {
+            outbound_apply_error="无法备份节点元数据: $metadata_file"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_meta_exists=1
+        candidate_meta_json=$(jq -c --arg mode "$mode" --argjson proxy "${proxy_json:-null}" '
+            .outbound_mode = $mode
+            | if $proxy == null then . else .outbound_proxy = $proxy | del(.outbound_ss_server,.outbound_ss_port,.outbound_ss_method,.outbound_ss_password,.outbound_ss_name) end
+        ' "$metadata_file" 2>/dev/null) || {
+            outbound_apply_error="无法构造节点元数据: $metadata_file"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    else
+        candidate_meta_json=$(jq -cn --arg mode "$mode" --argjson proxy "${proxy_json:-null}" '
+            {outbound_mode:$mode}
+            | if $proxy == null then . else .outbound_proxy = $proxy end
+        ') || {
+            outbound_apply_error="无法构造节点元数据"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+    if ! printf '%s\n' "$candidate_meta_json" >"$candidate_meta"; then
+        outbound_apply_error="无法写入候选节点元数据"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if [[ -f $is_config_json ]]; then
+        cp -p "$is_config_json" "$original_config" || {
+            outbound_apply_error="无法备份公共配置: $is_config_json"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_config_exists=1
+        cp -p "$is_config_json" "$source_config" || {
+            outbound_apply_error="无法读取公共配置: $is_config_json"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    else
+        default_runtime_config >"$source_config" || {
+            outbound_apply_error="无法构造默认公共配置"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+    if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" "$cfg" "$candidate_meta"; then
+        outbound_apply_error="完整配置生成失败: ${runtime_sync_error:-未知错误}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! "$is_core_bin" check -c "$candidate_config" -C "$is_conf_dir" >/dev/null 2>&1; then
+        outbound_apply_error="完整配置校验失败，原配置未改变"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$metadata_file")" || {
+        outbound_apply_error="无法创建节点元数据目录: $(dirname "$metadata_file")"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    meta_install=$(mktemp "$metadata_file.apply.XXXXXX") || {
+        outbound_apply_error="无法准备节点元数据保存: $metadata_file"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    config_install=$(mktemp "$is_config_json.apply.XXXXXX") || {
+        outbound_apply_error="无法准备公共配置保存: $is_config_json"
+        rm -f "$meta_install"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if ! cp "$candidate_meta" "$meta_install" || ! cp "$candidate_config" "$config_install" || ! chmod 600 "$meta_install" "$config_install"; then
+        outbound_apply_error="无法暂存候选配置文件"
+        rm -f "$meta_install" "$config_install"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! mv -f "$meta_install" "$metadata_file"; then
+        outbound_apply_error="保存节点元数据失败: $metadata_file"
+        rm -f "$meta_install" "$config_install"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! mv -f "$config_install" "$is_config_json"; then
+        outbound_apply_error="保存公共配置失败: $is_config_json"
+        if ! restore_outbound_apply_file "$original_meta" "$metadata_file" "$old_meta_exists"; then
+            outbound_apply_error+="；恢复节点元数据失败: $metadata_file"
+        fi
+        rm -f "$meta_install" "$config_install"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! manage_restart_confirmed; then
+        if ! restore_outbound_apply_file "$original_meta" "$metadata_file" "$old_meta_exists"; then
+            restore_errors+=("$metadata_file")
+        fi
+        if ! restore_outbound_apply_file "$original_config" "$is_config_json" "$old_config_exists"; then
+            restore_errors+=("$is_config_json")
+        fi
+        if manage_restart_confirmed; then
+            if ((${#restore_errors[@]})); then
+                outbound_apply_error="重启失败且文件恢复失败: ${restore_errors[*]}；原配置恢复重启已完成"
+            else
+                outbound_apply_error="重启失败，已恢复原配置并恢复服务"
+            fi
+        else
+            if ((${#restore_errors[@]})); then
+                outbound_apply_error="重启失败且文件恢复失败: ${restore_errors[*]}；原配置恢复重启也失败"
+            else
+                outbound_apply_error="重启失败，原配置已恢复但服务恢复失败"
+            fi
+        fi
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    rm -rf "$tmp_dir"
+    return 0
+}
+
+edit_node_outbound_mode() {
+    local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type
+    ask set_outbound_mode
+    metadata_file=$(meta_file "$is_config_file")
+    if [[ $is_outbound_mode == 'SS 出站' ]]; then
+        if outbound_proxy_from_metadata "$is_config_file" "$metadata_file"; then
+            proxy_json=$outbound_proxy_json
+        fi
+        current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
+        if [[ $current_proxy_type == shadowsocks ]]; then
+            echo -ne "请输入 SS 分享链接 (直接回车复用当前配置):"
+        else
+            echo -ne "请输入 SS 分享链接:"
+        fi
+        IFS= read -r is_outbound_ss_uri
+        if [[ $is_outbound_ss_uri ]]; then
+            parse_proxy_uri ss "$is_outbound_ss_uri" || err "SS 链接格式或参数无效，请检查地址、端口、加密方式和插件参数."
+            proxy_config=$outbound_proxy_config_json
+            proxy_name=$outbound_proxy_name
+        else
+            [[ $current_proxy_type == shadowsocks ]] || err "没有可复用的 Shadowsocks 配置，请粘贴 SS 分享链接."
+            proxy_config=
+            proxy_name=
+        fi
+    fi
+    apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || err "$outbound_apply_error"
+    msg "\n配置已应用: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
 }
 
 is_valid_ipv4_addr() {
@@ -705,6 +1135,42 @@ is_valid_ipv4_addr() {
         [[ $o -le 255 ]] || return 1
     done
     return 0
+}
+
+is_valid_ipv6_addr() {
+    local addr=$1 compressed=0 ipv4_groups=0 group_count=0 left right side part ipv4
+    local -a groups
+    [[ $addr == *:* ]] || return 1
+    if [[ $addr == *.* ]]; then
+        ipv4=${addr##*:}
+        [[ $ipv4 != "$addr" ]] && is_valid_ipv4_addr "$ipv4" || return 1
+        addr=${addr%:*}
+        ipv4_groups=2
+    fi
+    if [[ $addr == *::* ]]; then
+        compressed=1
+        left=${addr%%::*}
+        right=${addr#*::}
+        [[ $right != *::* && $left != *: && $right != :* ]] || return 1
+    else
+        left=$addr
+        right=
+    fi
+    for side in "$left" "$right"; do
+        [[ $side ]] || continue
+        [[ $side != :* && $side != *: ]] || return 1
+        IFS=: read -r -a groups <<<"$side"
+        for part in "${groups[@]}"; do
+            [[ $part =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
+            group_count=$((group_count + 1))
+        done
+    done
+    group_count=$((group_count + ipv4_groups))
+    if [[ $compressed == 1 ]]; then
+        ((group_count < 8)) || return 1
+    else
+        ((group_count == 8))
+    fi
 }
 
 is_valid_entry_addr() {
@@ -735,12 +1201,17 @@ ss_password_for_method() {
 }
 
 ss_password_valid_for_method() {
-    local method=$1 password=$2 expected_len decoded_len
+    local method=$1 password=$2 expected_len decoded_len key
+    local -a keys
     [[ $method != *2022* ]] && return 0
     [[ $password ]] || return 1
     [[ $(grep 128 <<<$method) ]] && expected_len=16 || expected_len=32
-    decoded_len=$(printf '%s' "$password" | base64 -d 2>/dev/null | wc -c)
-    [[ ${decoded_len// /} -eq $expected_len ]]
+    [[ $password != :* && $password != *: && $password != *::* ]] || return 1
+    IFS=: read -r -a keys <<<"$password"
+    for key in "${keys[@]}"; do
+        decoded_len=$(printf '%s' "$key" | base64 -d 2>/dev/null | wc -c)
+        [[ ${decoded_len// /} -eq $expected_len ]] || return 1
+    done
 }
 
 ss_base64_decode() {
@@ -762,36 +1233,196 @@ ss_method_supported() {
     return 1
 }
 
-url_decode() {
-    local s=${1//+/ }
-    printf '%b' "${s//%/\\x}"
+url_percent_decode() {
+    local input=$1 output= prefix hex char code
+    [[ ! $input =~ [[:cntrl:]] ]] || return 1
+    while [[ $input == *%* ]]; do
+        prefix=${input%%\%*}
+        output+=$prefix
+        input=${input#*%}
+        [[ $input =~ ^([[:xdigit:]]{2})(.*)$ ]] || return 1
+        hex=${BASH_REMATCH[1]}
+        input=${BASH_REMATCH[2]}
+        code=$((16#$hex))
+        ((code > 0 && code >= 32 && code != 127)) || return 1
+        printf -v char '%b' "\\x$hex"
+        output+=$char
+    done
+    output+=$input
+    [[ ! $output =~ [[:cntrl:]] ]] || return 1
+    printf '%s' "$output"
 }
 
-parse_ss_uri_for_outbound() {
-    local uri auth endpoint raw_name decoded_auth
-    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<$1)
-    [[ $uri == ss://* ]] || return 1
+parse_uri_query() {
+    local query=$1 pair key raw_value value
+    uri_query_json='{}'
+    [[ $query ]] || return 0
+    while :; do
+        [[ $query == *'&'* ]] && {
+            pair=${query%%&*}
+            query=${query#*&}
+        } || {
+            pair=$query
+            query=
+        }
+        [[ $pair == *=* ]] || return 1
+        key=${pair%%=*}
+        raw_value=${pair#*=}
+        [[ $key && ! $key =~ [^A-Za-z0-9_-] ]] || return 1
+        value=$(url_percent_decode "$raw_value") || return 1
+        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$uri_query_json") != true ]] || return 1
+        uri_query_json=$(jq -c --arg key "$key" --arg value "$value" '. + {($key):$value}' <<<"$uri_query_json") || return 1
+        [[ $query ]] || break
+    done
+}
+
+parse_uri_authority() {
+    local authority=$1
+    uri_server=
+    uri_port=
+    if [[ $authority =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]+)$ ]]; then
+        uri_server=${BASH_REMATCH[1]}
+        uri_port=${BASH_REMATCH[2]}
+        is_valid_ipv6_addr "$uri_server" || return 1
+    else
+        [[ $authority == *:* && $authority != *:*:* ]] || return 1
+        uri_server=${authority%:*}
+        uri_port=${authority##*:}
+        [[ $uri_server ]] || return 1
+        is_valid_ipv4_addr "$uri_server" || [[ $(is_test domain "$uri_server") ]] || return 1
+    fi
+    [[ $uri_port =~ ^[0-9]+$ ]] || return 1
+    uri_port_number=$((10#$uri_port))
+    ((uri_port_number >= 1 && uri_port_number <= 65535))
+}
+
+parse_proxy_uri() {
+    local expected=$1 uri=$2 raw_name= raw_query= auth authority decoded_auth
+    local fragment_present=0 remark_name remarks_name plugin key
+    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
+    [[ ! $uri =~ [[:cntrl:]] ]] || return 1
+    [[ $expected == ss && $uri == ss://* ]] || return 1
     uri=${uri#ss://}
     if [[ $uri == *#* ]]; then
+        fragment_present=1
         raw_name=${uri#*#}
         uri=${uri%%#*}
     fi
-    [[ $uri == *\?* ]] && return 1
+    if [[ $uri == *\?* ]]; then
+        raw_query=${uri#*\?}
+        uri=${uri%%\?*}
+        parse_uri_query "$raw_query" || return 1
+    else
+        uri_query_json='{}'
+    fi
     [[ $uri == *@* ]] || return 1
     auth=${uri%@*}
-    endpoint=${uri#*@}
-    decoded_auth=$(ss_base64_decode "$auth") || return 1
+    authority=${uri#*@}
+    [[ $auth && $auth != *@* && $authority != *@* ]] || return 1
+    [[ $authority == */ ]] && authority=${authority%/}
+    [[ $authority != */* ]] || return 1
+    parse_uri_authority "$authority" || return 1
+
+    decoded_auth=$(url_percent_decode "$auth") || return 1
+    if [[ $decoded_auth != *:* ]]; then
+        decoded_auth=$(ss_base64_decode "$decoded_auth") || return 1
+    fi
     [[ $decoded_auth == *:* ]] || return 1
     is_outbound_ss_method=${decoded_auth%%:*}
     is_outbound_ss_password=${decoded_auth#*:}
-    is_outbound_ss_server=${endpoint%:*}
-    is_outbound_ss_port=${endpoint##*:}
-    [[ $is_outbound_ss_server && $is_outbound_ss_port && $is_outbound_ss_server != "$endpoint" ]] || return 1
+    is_outbound_ss_server=$uri_server
+    is_outbound_ss_port=$uri_port_number
     ss_method_supported "$is_outbound_ss_method" || return 1
-    [[ $(is_test port "$is_outbound_ss_port") ]] || return 1
-    [[ $is_outbound_ss_password ]] || return 1
+    [[ $is_outbound_ss_password && ! $decoded_auth =~ [[:cntrl:]] ]] || return 1
     ss_password_valid_for_method "$is_outbound_ss_method" "$is_outbound_ss_password" || return 1
-    is_outbound_ss_name=$(url_decode "$raw_name")
+
+    while IFS= read -r key; do
+        case $key in
+        remark | remarks | plugin) ;;
+        *) return 1 ;;
+        esac
+    done < <(jq -r 'keys[]' <<<"$uri_query_json")
+    plugin=$(jq -r '.plugin // empty' <<<"$uri_query_json")
+    [[ ! $plugin ]] || return 1
+    remarks_name=$(jq -r '.remarks // empty' <<<"$uri_query_json")
+    remark_name=$(jq -r '.remark // empty' <<<"$uri_query_json")
+    [[ ! $remarks_name || ! $remark_name || $remarks_name == "$remark_name" ]] || return 1
+    is_outbound_ss_name=
+    if [[ $fragment_present == 1 ]]; then
+        is_outbound_ss_name=$(url_percent_decode "$raw_name") || return 1
+    elif [[ $remarks_name ]]; then
+        is_outbound_ss_name=$remarks_name
+    else
+        is_outbound_ss_name=$remark_name
+    fi
+    outbound_proxy_name=$is_outbound_ss_name
+    outbound_proxy_config_json=$(jq -cn \
+        --arg server "$is_outbound_ss_server" \
+        --argjson server_port "$is_outbound_ss_port" \
+        --arg method "$is_outbound_ss_method" \
+        --arg password "$is_outbound_ss_password" \
+        '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
+    return 0
+}
+
+parse_ss_uri_for_outbound() {
+    parse_proxy_uri ss "$1"
+}
+
+outbound_proxy_from_metadata() {
+    local cfg=$1 metadata_file=$2 mode server port method password name
+    outbound_proxy_json=
+    outbound_proxy_config_json=
+    outbound_proxy_name=
+    [[ -f $metadata_file ]] || return 0
+    jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || return 1
+    mode=$(jq -r '.outbound_mode // empty' "$metadata_file")
+    if jq -e 'has("outbound_proxy")' "$metadata_file" >/dev/null; then
+        outbound_proxy_json=$(jq -c '.outbound_proxy' "$metadata_file")
+        if ! jq -e '
+            (.name | type == "string")
+            and (.config | type == "object")
+            and (.config.type == "shadowsocks" or .config.type == "vless")
+            and (.config.server | type == "string" and length > 0)
+            and (.config.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+            and ((.config | has("tag") or has("detour")) | not)
+            and (.config.type != "shadowsocks" or
+                ((.config.method | type == "string" and length > 0)
+                 and (.config.password | type == "string" and length > 0)))
+            and (.config.type != "vless" or
+                (.config.uuid | type == "string" and length > 0))
+        ' <<<"$outbound_proxy_json" >/dev/null 2>&1; then
+            outbound_proxy_json=
+            [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
+            return 0
+        fi
+        outbound_proxy_name=$(jq -r '.name' <<<"$outbound_proxy_json")
+        outbound_proxy_config_json=$(jq -c '.config' <<<"$outbound_proxy_json")
+        return 0
+    fi
+
+    if [[ $mode == 'SS 出站' || $(jq -r 'has("outbound_ss_server")' "$metadata_file") == true ]]; then
+        server=$(jq -r '.outbound_ss_server // empty' "$metadata_file")
+        port=$(jq -r '.outbound_ss_port // empty' "$metadata_file")
+        method=$(jq -r '.outbound_ss_method // empty' "$metadata_file")
+        password=$(jq -r '.outbound_ss_password // empty' "$metadata_file")
+        name=$(jq -r '.outbound_ss_name // ""' "$metadata_file")
+        if [[ $server && $port =~ ^[0-9]+$ && $method && $password ]] &&
+            ss_method_supported "$method" &&
+            ((10#$port >= 1 && 10#$port <= 65535)) &&
+            ss_password_valid_for_method "$method" "$password"; then
+            outbound_proxy_config_json=$(jq -cn \
+                --arg server "$server" --argjson server_port "$((10#$port))" \
+                --arg method "$method" --arg password "$password" \
+                '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
+            outbound_proxy_name=$name
+            outbound_proxy_json=$(jq -cn --arg name "$name" --argjson config "$outbound_proxy_config_json" '{name:$name,config:$config}') || return 1
+            return 0
+        fi
+        [[ $mode == 'SS 出站' ]] && return 1
+    fi
+    [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
+    return 0
 }
 
 resolve_entry_addr_for_listen() {
@@ -920,7 +1551,7 @@ create() {
         [[ $preserved_outbound_ss_name && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_name "$preserved_outbound_ss_name"
         [[ $is_config_name ]] && is_config_file=$is_config_name
         [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
-        sync_runtime_node_outbound_modes
+        sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
         if [[ $is_new_install ]]; then
             # config.json
             create config.json
@@ -964,7 +1595,7 @@ create() {
         is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
         cat <<<$is_server_config_json >$is_config_json
-        sync_runtime_node_outbound_modes
+        sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
         manage restart &
         ;;
     esac
@@ -1266,21 +1897,7 @@ change() {
         info
         ;;
     14)
-        ask set_outbound_mode
-        if [[ $is_outbound_mode == 'SS 出站' ]]; then
-            ask string is_outbound_ss_uri "请输入 SS 节点链接:"
-            parse_ss_uri_for_outbound "$is_outbound_ss_uri" || err "SS 节点链接格式无效, 目前仅支持 ss://BASE64(method:password)@host:port#name"
-            meta_set "$is_config_file" outbound_ss_server "$is_outbound_ss_server"
-            meta_set "$is_config_file" outbound_ss_port "$is_outbound_ss_port"
-            meta_set "$is_config_file" outbound_ss_method "$is_outbound_ss_method"
-            meta_set "$is_config_file" outbound_ss_password "$is_outbound_ss_password"
-            meta_set "$is_config_file" outbound_ss_name "$is_outbound_ss_name"
-        fi
-        meta_set "$is_config_file" outbound_mode "$is_outbound_mode"
-        [[ -f "$is_config_json" ]] || create config.json
-        sync_runtime_node_outbound_modes
-        manage restart &
-        msg "\n已更新出站方式为: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
+        edit_node_outbound_mode
         ;;
     15)
         is_new_entry_addr=$3
@@ -1365,21 +1982,7 @@ change() {
         # mode
         if [[ $is_protocol != snell ]]; then
             # backward compatibility for non-snell outbound mode
-            ask set_outbound_mode
-            if [[ $is_outbound_mode == 'SS 出站' ]]; then
-                ask string is_outbound_ss_uri "请输入 SS 节点链接:"
-                parse_ss_uri_for_outbound "$is_outbound_ss_uri" || err "SS 节点链接格式无效, 目前仅支持 ss://BASE64(method:password)@host:port#name"
-                meta_set "$is_config_file" outbound_ss_server "$is_outbound_ss_server"
-                meta_set "$is_config_file" outbound_ss_port "$is_outbound_ss_port"
-                meta_set "$is_config_file" outbound_ss_method "$is_outbound_ss_method"
-                meta_set "$is_config_file" outbound_ss_password "$is_outbound_ss_password"
-                meta_set "$is_config_file" outbound_ss_name "$is_outbound_ss_name"
-            fi
-            meta_set "$is_config_file" outbound_mode "$is_outbound_mode"
-            [[ -f "$is_config_json" ]] || create config.json
-            sync_runtime_node_outbound_modes
-            manage restart &
-            msg "\n已更新出站方式为: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
+            edit_node_outbound_mode
             return
         fi
         if [[ $snell_version == 5 ]]; then
@@ -1432,7 +2035,9 @@ del() {
         fi
         rm -rf $is_conf_dir/"$is_config_file"
         meta_rm "$is_config_file"
-        [[ -f "$is_config_json" ]] && sync_runtime_node_outbound_modes
+        [[ -f "$is_config_json" ]] && sync_runtime_node_outbound_modes || {
+            [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+        }
         [[ ! $is_new_json ]] && manage restart &
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
@@ -2710,7 +3315,9 @@ relay_delete() {
         fi
     fi
     rm -f "$backup_file"
-    [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes
+    [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
+        [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+    }
     manage restart &
     _green "\n已删除中转配置: relay-${local_port}.json\n"
 }

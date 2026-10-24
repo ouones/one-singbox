@@ -60,7 +60,7 @@ dns_set() {
             cat <<<$(jq '.dns.servers=[{address:"'$is_dns_use'",address_resolver:"local"},{tag:"local",address:"local"}]' $is_config_json) >$is_config_json
         fi
     fi
-    sync_runtime_node_outbound_modes
+    sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
     manage restart &
     msg "\n已更新 DNS 为: $(_green $is_dns_use_bak)\n"
 }
