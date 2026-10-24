@@ -24,14 +24,17 @@ if [[ $1 == check ]]; then
         *) shift ;;
         esac
     done
-    [[ $config && -f $config && $conf_dir && -d $conf_dir ]] || exit 2
+    [[ $config && -f $config ]] || exit 2
+    [[ ! $conf_dir || -d $conf_dir ]] || exit 2
     [[ $config != "$is_config_json" ]] || exit 3
     [[ ${TEST_REJECT_CHECK:-0} != 1 ]] || exit 1
-    jq -e '.outbounds | type == "array"' "$config" >/dev/null || exit 4
-    shopt -s nullglob
-    for file in "$conf_dir"/*.json; do
-        jq -e . "$file" >/dev/null || exit 5
-    done
+    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.inbounds // []) | type == "array")' "$config" >/dev/null || exit 4
+    if [[ $conf_dir ]]; then
+        shopt -s nullglob
+        for file in "$conf_dir"/*.json; do
+            jq -e . "$file" >/dev/null || exit 5
+        done
+    fi
 fi
 FAKE_CORE
 chmod +x "$fake_bin/sing-box"
@@ -594,11 +597,143 @@ openrc-success|openrc-fail-recovered)
 sync-failure-no-restart)
     jq '.outbound_mode="SS 出站" | .outbound_proxy={name:"broken",config:{type:"vless",server:"bad",server_port:443,uuid:"bad"}}' "$meta_file" >"$case_dir/meta.bad"
     mv "$case_dir/meta.bad" "$meta_file"
+    cp "$is_config_json" "$case_dir/config.before"
     if change_output=$(create config.json 2>&1); then
         fail "config rebuild with a broken active cache should fail"
     fi
     [[ $change_output == *"节点代理路由同步失败"* ]] || fail "config rebuild should surface the synchronization failure: $change_output"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "failed config rebuild must preserve the public config"
     [[ $(restart_count) == 0 ]] || fail "sync failure must stop the caller before service restart"
+    exit 0
+    ;;
+dns-sync-fail)
+    jq '.outbound_mode="SS 出站" | .outbound_proxy={name:"broken",config:{type:"vless",server:"bad",server_port:443,uuid:"bad"}}' "$meta_file" >"$case_dir/meta.bad"
+    mv "$case_dir/meta.bad" "$meta_file"
+    cp "$is_config_json" "$case_dir/config.before"
+    dns_script="$(dirname "$CORE_FILE")/src/dns.sh"
+    [[ -f $dns_script ]] || dns_script="$(dirname "$CORE_FILE")/dns.sh"
+    source "$dns_script"
+    if change_output=$(dns_set none 2>&1); then
+        fail "DNS update with a broken active cache should fail"
+    fi
+    [[ $change_output == *"节点代理路由同步失败"* ]] || fail "DNS update should surface synchronization failure: $change_output"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "failed DNS update must preserve the public config"
+    [[ $(restart_count) == 0 ]] || fail "DNS sync failure must stop before service restart"
+    exit 0
+    ;;
+lifecycle-port-migration|lifecycle-migration-check-fail|lifecycle-migration-restart-fail)
+    proxy_config='{"type":"vless","server":"upstream.example.com","server_port":443,"uuid":"11111111-1111-4111-8111-111111111111","packet_encoding":"packetaddr","tls":{"enabled":true,"server_name":"sni.example.com","alpn":["h2","http/1.1"],"utls":{"enabled":true,"fingerprint":"chrome"}}}'
+    jq --argjson config "$proxy_config" '.outbound_mode="VLESS 出站" | .outbound_proxy={name:"Extended cache",config:$config} | .custom="keep"' "$meta_file" >"$case_dir/meta.with-proxy"
+    mv "$case_dir/meta.with-proxy" "$meta_file"
+    sync_runtime_node_outbound_modes || fail "initial proxy sync failed: $runtime_sync_error"
+    cp "$is_conf_dir/node-one.json" "$case_dir/node.before"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    [[ $TEST_SCENARIO != lifecycle-migration-check-fail ]] || export TEST_REJECT_CHECK=1
+    [[ $TEST_SCENARIO != lifecycle-migration-restart-fail ]] || export RESTART_FAIL_AT=1
+    if [[ $TEST_SCENARIO == lifecycle-port-migration ]]; then
+        change_output=$(change node-one.json port 12346 2>&1)
+        [[ $change_output == *"配置已应用"* ]] || fail "port migration should apply and confirm restart: $change_output"
+        new_node=$(find "$is_conf_dir" -maxdepth 1 -name '*-12346.json' -print -quit)
+        [[ $new_node && -f $new_node ]] || fail "port migration should install the new node config"
+        new_cfg=${new_node##*/}
+        new_meta="$is_conf_dir/.quan-meta/$new_cfg.meta.json"
+        [[ ! -e "$is_conf_dir/node-one.json" && ! -e "$is_conf_dir/.quan-meta/node-one.json.meta.json" ]] || fail "port migration should remove the old node association"
+        jq -e --argjson expected "$proxy_config" '.outbound_mode == "VLESS 出站" and .outbound_proxy.config == $expected and .custom == "keep"' "$new_meta" >/dev/null || fail "port migration must preserve the complete native proxy cache and unrelated metadata"
+        jq -e --arg cfg "$new_cfg" --argjson expected "$proxy_config" '.outbounds | any(.tag == ("managed_node_vless_" + ($cfg | gsub("[^A-Za-z0-9_-]";"_"))) and .server == $expected.server and .tls == $expected.tls and .packet_encoding == $expected.packet_encoding)' "$is_config_json" >/dev/null || { jq -c '{outbounds:[.outbounds[]?|select((.tag//"")|startswith("managed_node_vless_"))|{tag,server,packet_encoding,tls}],rules:[.route.rules[]?|select((.outbound//"")|startswith("managed_node_vless_"))]}' "$is_config_json"; fail "port migration must bind the complete outbound to the new node name: $new_cfg"; }
+        jq -e --arg cfg "$new_cfg" '.route.rules | any(.inbound == [$cfg] and .outbound == ("managed_node_vless_" + ($cfg | gsub("[^A-Za-z0-9_-]";"_"))))' "$is_config_json" >/dev/null || fail "port migration must bind the route to the new actual inbound tag"
+        [[ $(restart_count) == 1 ]] || fail "successful port migration should restart once"
+    else
+        if change_output=$(change node-one.json port 12346 2>&1); then
+            fail "$TEST_SCENARIO should fail the migration"
+        fi
+        cmp -s "$case_dir/node.before" "$is_conf_dir/node-one.json" || fail "$TEST_SCENARIO must restore the original node config"
+        cmp -s "$case_dir/meta.before" "$meta_file" || fail "$TEST_SCENARIO must restore the original metadata"
+        cmp -s "$case_dir/config.before" "$is_config_json" || fail "$TEST_SCENARIO must restore the original public config"
+        [[ ! -e "$is_conf_dir/Shadowsocks-12346.json" ]] || fail "$TEST_SCENARIO must remove the candidate node config"
+        if [[ $TEST_SCENARIO == lifecycle-migration-check-fail ]]; then
+            [[ $(restart_count) == 0 ]] || fail "candidate check failure must stop before restart"
+        else
+            [[ $(restart_count) == 2 ]] || fail "restart failure should attempt exactly one recovery restart"
+            [[ $change_output == *"已恢复原配置并恢复服务"* ]] || fail "restart rollback should be reported accurately: $change_output"
+        fi
+    fi
+    exit 0
+    ;;
+delete-proxy)
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* ]] || fail "proxy setup failed: $change_output"
+    change_output=$(change node-one.json port 12346 2>&1)
+    [[ $change_output == *"节点配置已应用"* ]] || fail "SS menu configuration should survive port migration: $change_output"
+    new_node=$(find "$is_conf_dir" -maxdepth 1 -name '*-12346.json' -print -quit)
+    [[ $new_node && -f $new_node ]] || fail "SS port migration should install the new node config"
+    new_cfg=${new_node##*/}
+    outbound_tag=$(runtime_node_ss_outbound_tag "$new_cfg")
+    meta_file="$is_conf_dir/.quan-meta/$new_cfg.meta.json"
+    jq -e '.outbound_mode == "SS 出站" and .outbound_proxy.config.password == "secret"' "$meta_file" >/dev/null || fail "SS port migration must preserve the imported cache"
+    jq '.outbounds += [{tag:"custom-preserve",type:"direct"}]' "$is_config_json" >"$case_dir/config.custom"
+    mv "$case_dir/config.custom" "$is_config_json"
+    sync_runtime_node_outbound_modes || fail "pre-delete sync failed: $runtime_sync_error"
+    del "$new_cfg" >/dev/null 2>&1
+    wait
+    [[ ! -e "$new_node" && ! -e "$meta_file" && ! -e "$is_conf_dir/node-one.json" ]] || fail "node deletion must remove the migrated node and its metadata"
+    jq -e --arg tag "$outbound_tag" '(.outbounds | any(.tag == $tag) | not) and (.route.rules | any(.outbound == $tag) | not) and (.outbounds | any(.tag == "custom-preserve"))' "$is_config_json" >/dev/null || fail "node deletion must remove only its managed outbound and route"
+    [[ $(restart_count) == 3 ]] || fail "successful node deletion should restart once after the apply and migration"
+    exit 0
+    ;;
+delete-sync-fail)
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* ]] || fail "proxy setup failed: $change_output"
+    cat >"$is_conf_dir/node-two.json" <<'EOF'
+{"inbounds":[{"tag":"node-two","type":"shadowsocks"}]}
+EOF
+    jq '.outbound_mode="SS 出站" | .outbound_proxy={name:"broken",config:{type:"vless",server:"bad",server_port:443,uuid:"bad"}}' "$meta_file" >"$case_dir/meta.bad"
+    mv "$case_dir/meta.bad" "$is_conf_dir/.quan-meta/node-two.json.meta.json"
+    cp "$is_conf_dir/node-one.json" "$case_dir/node.before"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    if change_output=$(del node-one.json 2>&1); then
+        fail "delete with an invalid remaining proxy association should fail"
+    fi
+    cmp -s "$case_dir/node.before" "$is_conf_dir/node-one.json" || fail "failed deletion must restore the node config"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "failed deletion must restore the node metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "failed deletion must preserve the public config"
+    [[ $(restart_count) == 1 ]] || fail "failed deletion must not restart after the setup apply"
+    exit 0
+    ;;
+rebuild-preserves-cache)
+    change_output=$(printf '6\nvless://11111111-1111-4111-8111-111111111111@upstream.example.com:443?security=tls&sni=sni.example.com&type=tcp#VLESS\n' | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* ]] || fail "VLESS setup failed: $change_output"
+    change_output=$(change node-one.json port 12346 2>&1)
+    [[ $change_output == *"节点配置已应用"* ]] || fail "VLESS menu configuration should survive port migration: $change_output"
+    new_node=$(find "$is_conf_dir" -maxdepth 1 -name '*-12346.json' -print -quit)
+    [[ $new_node && -f $new_node ]] || fail "VLESS port migration should install the new node config"
+    new_cfg=${new_node##*/}
+    outbound_tag=$(runtime_node_vless_outbound_tag "$new_cfg")
+    meta_file="$is_conf_dir/.quan-meta/$new_cfg.meta.json"
+    cp "$meta_file" "$case_dir/meta.before"
+    if ! change_output=$(create config.json 2>&1); then
+        fail "public config rebuild should succeed with a valid VLESS cache: $change_output"
+    fi
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "public config rebuild must preserve node metadata"
+    jq -e --arg tag "$outbound_tag" '.outbounds | any(.tag == $tag and .server == "upstream.example.com")' "$is_config_json" >/dev/null || fail "public config rebuild must restore the active VLESS outbound"
+    jq -e --arg cfg "$new_cfg" --arg tag "$outbound_tag" '.route.rules | any(.inbound == [$cfg] and .outbound == $tag)' "$is_config_json" >/dev/null || fail "public config rebuild must restore the migrated node route"
+    wait
+    [[ $(restart_count) == 3 ]] || fail "rebuild should restart once after the proxy apply and node migration"
+    exit 0
+    ;;
+lifecycle-protocol-migration)
+    change_output=$(printf '6\nvless://11111111-1111-4111-8111-111111111111@upstream.example.com:443?security=tls&sni=sni.example.com&type=tcp#VLESS\n' | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* ]] || fail "VLESS setup failed: $change_output"
+    change_output=$(change node-one.json new snell 12346 abcdefghijkl 6 2>&1)
+    [[ $change_output == *"节点配置已应用"* ]] || fail "protocol migration should confirm the new node config: $change_output"
+    new_cfg=snell-12346.json
+    meta_file="$is_conf_dir/.quan-meta/$new_cfg.meta.json"
+    [[ -f "$is_conf_dir/$new_cfg" && ! -e "$is_conf_dir/node-one.json" && -f $meta_file ]] || fail "protocol migration should move the node and metadata together"
+    jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.config.type == "vless" and .outbound_proxy.config.server == "upstream.example.com"' "$meta_file" >/dev/null || fail "protocol migration must retain the VLESS cache"
+    outbound_tag=$(runtime_node_vless_outbound_tag "$new_cfg")
+    jq -e --arg cfg "$new_cfg" --arg tag "$outbound_tag" '.outbounds | any(.tag == $tag and .server == "upstream.example.com")' "$is_config_json" >/dev/null || fail "protocol migration must recreate the VLESS outbound under the new tag"
+    jq -e --arg cfg "$new_cfg" --arg tag "$outbound_tag" '.route.rules | any(.inbound == [$cfg] and .outbound == $tag)' "$is_config_json" >/dev/null || fail "protocol migration must use the new actual inbound tag"
     exit 0
     ;;
 *)
@@ -650,10 +785,10 @@ CASE
 }
 
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"

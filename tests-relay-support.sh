@@ -107,6 +107,17 @@ mkdir -p "$is_conf_dir"
 manage_log="$case_dir/manage.log"
 : >"$manage_log"
 manage() { printf "%s\n" "$*" >>"$manage_log"; }
+is_systemd=1
+is_core=sing-box
+systemctl() {
+    case ${1:-} in
+    restart) manage restart "${2:-$is_core}" ;;
+    is-active) return 0 ;;
+    show) printf '12345\n' ;;
+    *) return 1 ;;
+    esac
+}
+sleep() { :; }
 is_port_used() { [[ ${TEST_ACTIVE_PORT:-} == "$1" ]] && printf "%s\n" "$1"; }
 
 # 1. Successful relay add with explicit values

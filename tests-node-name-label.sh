@@ -11,6 +11,34 @@ trap cleanup EXIT
 
 source "$repo_root/core.sh"
 manage() { :; }
+mkdir -p "$workdir/bin"
+cat >"$workdir/bin/sing-box" <<'FAKE_CORE'
+#!/usr/bin/env bash
+[[ $1 == check ]] || exit 0
+config= conf_dir=
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -c) config=$2; shift 2 ;;
+    -C) conf_dir=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -f $config && -d $conf_dir ]] || exit 1
+jq -e . "$config" >/dev/null || exit 1
+for file in "$conf_dir"/*.json; do
+  [[ -f $file ]] || continue
+  jq -e . "$file" >/dev/null || exit 1
+done
+FAKE_CORE
+chmod +x "$workdir/bin/sing-box"
+is_core_bin="$workdir/bin/sing-box"
+systemctl() {
+  case $1 in
+    restart | is-active) return 0 ;;
+    show) echo 1234 ;;
+  esac
+}
+sleep() { :; }
 
 is_conf_dir="$workdir/conf"
 is_config_json="$workdir/config.json"
