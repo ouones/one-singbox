@@ -652,7 +652,7 @@ runtime_node_vless_outbound_tag() {
 }
 
 render_runtime_node_outbound_modes() {
-    local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-}
+    local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
     local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
     local -A used_proxy_tags=()
     runtime_sync_error=
@@ -672,11 +672,11 @@ render_runtime_node_outbound_modes() {
     direct_rules='[]'
     proxy_rules='[]'
     proxy_outbounds='[]'
-    for file in "$is_conf_dir"/*.json; do
+    for file in "$config_dir"/*.json; do
         [[ -f $file ]] || continue
         cfg=${file##*/}
         [[ $cfg =~ dynamic-port-.*-link ]] && continue
-        meta_path=$(meta_file "$cfg")
+        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
         [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
         [[ -f $meta_path ]] || continue
         jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
@@ -810,22 +810,28 @@ render_runtime_node_outbound_modes() {
 }
 
 sync_runtime_node_outbound_modes() {
-    local tmp
+    local source_config=${1:-$is_config_json} target_config=${2:-$is_config_json} config_dir=${3:-$is_conf_dir} validate=${4:-0} tmp
     runtime_sync_error=
-    [[ -f $is_config_json ]] || return 0
-    tmp=$(mktemp "$is_config_json.tmp.XXXXXX") || {
+    [[ -f $source_config ]] || return 0
+    tmp=$(mktemp "$target_config.tmp.XXXXXX") || {
         runtime_sync_error="无法创建运行时配置临时文件"
         return 1
     }
-    if ! render_runtime_node_outbound_modes "$is_config_json" "$tmp"; then
+    if ! render_runtime_node_outbound_modes "$source_config" "$tmp" '' '' "$config_dir"; then
         rm -f "$tmp"
         return 1
     fi
-    if ! mv -f "$tmp" "$is_config_json"; then
+    if [[ $validate == 1 ]] && ! "$is_core_bin" check -c "$tmp" -C "$config_dir" &>/dev/null; then
         rm -f "$tmp"
-        runtime_sync_error="无法保存运行时配置: $is_config_json"
+        runtime_sync_error="完整运行时配置校验失败"
         return 1
     fi
+    if ! mv -f "$tmp" "$target_config"; then
+        rm -f "$tmp"
+        runtime_sync_error="无法保存运行时配置: $target_config"
+        return 1
+    fi
+    return 0
 }
 
 manage_restart_confirmed() {
@@ -874,6 +880,192 @@ restore_outbound_apply_file() {
     fi
 }
 
+restore_node_config_lifecycle() {
+    local tmp_dir=$1 operation=$2 old_cfg=$3 new_cfg=${4:-} old_meta_exists=$5 old_config_exists=$6
+    local old_node="$is_conf_dir/$old_cfg" old_meta new_node new_meta stage
+    local -a errors=()
+    old_meta=$(meta_file "$old_cfg")
+    if ! restore_outbound_apply_file "$tmp_dir/original-old-node" "$old_node" 1; then errors+=("$old_node"); fi
+    if [[ $operation == replace && $old_cfg != "$new_cfg" ]]; then
+        new_node="$is_conf_dir/$new_cfg"
+        new_meta=$(meta_file "$new_cfg")
+        if ! restore_outbound_apply_file "$tmp_dir/original-new-node" "$new_node" 0; then errors+=("$new_node"); fi
+        rm -f "$new_meta" || errors+=("$new_meta")
+    fi
+    if [[ $old_meta_exists == 1 ]]; then
+        stage=$(mktemp "$old_meta.restore.XXXXXX") && cp -p "$tmp_dir/original-old-meta" "$stage" && mv -f "$stage" "$old_meta" || { rm -f "${stage:-}"; errors+=("$old_meta"); }
+    else
+        rm -f "$old_meta" || errors+=("$old_meta")
+    fi
+    if ! restore_outbound_apply_file "$tmp_dir/original-config" "$is_config_json" "$old_config_exists"; then errors+=("$is_config_json"); fi
+    node_lifecycle_restore_errors=${errors[*]}
+}
+
+apply_node_config_lifecycle() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
+    local old_node="$is_conf_dir/$old_cfg" new_node old_meta new_meta candidate_nodes candidate_config source_config tmp_dir tmp_parent
+    local original_old_node original_old_meta original_config stage old_meta_exists=0 old_config_exists=0 restart_needed=0
+    node_lifecycle_error=
+    node_lifecycle_restore_errors=
+    [[ $operation == delete || $operation == replace ]] || {
+        node_lifecycle_error="不支持的节点操作: $operation"
+        return 1
+    }
+    [[ -f $old_node ]] || {
+        node_lifecycle_error="本机节点配置不存在: $old_node"
+        return 1
+    }
+    if [[ $operation == replace ]]; then
+        new_node="$is_conf_dir/$new_cfg"
+        new_meta=$(meta_file "$new_cfg")
+        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
+            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
+            return 1
+        }
+        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
+            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
+            return 1
+        fi
+    fi
+    tmp_parent=$(dirname "$is_conf_dir")
+    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
+        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
+        return 1
+    }
+    candidate_nodes="$tmp_dir/nodes"
+    if ! mkdir -p "$candidate_nodes" || ! cp -a "$is_conf_dir/." "$candidate_nodes/"; then
+        node_lifecycle_error="无法构造候选节点集合"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    old_meta=$(meta_file "$old_cfg")
+    if [[ $operation == delete ]]; then
+        rm -f "$candidate_nodes/$old_cfg" "$candidate_nodes/.quan-meta/$old_cfg.meta.json" || {
+            node_lifecycle_error="无法构造候选删除节点集合"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    else
+        if [[ $old_cfg != "$new_cfg" ]]; then
+            if ! mv -f "$candidate_nodes/$old_cfg" "$candidate_nodes/$new_cfg"; then
+                node_lifecycle_error="无法构造候选节点迁移: $old_cfg -> $new_cfg"
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            if [[ -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" ]]; then
+                mkdir -p "$candidate_nodes/.quan-meta" && mv -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" "$candidate_nodes/.quan-meta/$new_cfg.meta.json" || {
+                    node_lifecycle_error="无法构造候选节点元数据迁移: $old_cfg -> $new_cfg"
+                    rm -rf "$tmp_dir"
+                    return 1
+                }
+            fi
+        fi
+        printf '%s\n' "$new_json" >"$candidate_nodes/$new_cfg" || {
+            node_lifecycle_error="无法写入候选节点配置: $new_cfg"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+
+    candidate_config="$tmp_dir/config.json"
+    if [[ -f $is_config_json ]]; then
+        source_config=$is_config_json
+    else
+        source_config="$tmp_dir/default-config.json"
+        default_runtime_config >"$source_config" || {
+            node_lifecycle_error="无法构造默认公共配置"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+    if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" '' '' "$candidate_nodes"; then
+        node_lifecycle_error="节点关联配置生成失败: ${runtime_sync_error:-未知错误}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! "$is_core_bin" check -c "$candidate_config" -C "$candidate_nodes" &>/dev/null; then
+        node_lifecycle_error="完整候选节点配置校验失败，原配置未改变: $old_cfg${new_cfg:+ -> $new_cfg}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    original_old_node="$tmp_dir/original-old-node"
+    original_old_meta="$tmp_dir/original-old-meta"
+    original_config="$tmp_dir/original-config"
+    cp -p "$old_node" "$original_old_node" || {
+        node_lifecycle_error="无法备份节点配置: $old_node"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if [[ -f $old_meta ]]; then
+        cp -p "$old_meta" "$original_old_meta" || {
+            node_lifecycle_error="无法备份节点元数据: $old_meta"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_meta_exists=1
+    fi
+    if [[ -f $is_config_json ]]; then
+        cp -p "$is_config_json" "$original_config" || {
+            node_lifecycle_error="无法备份公共配置: $is_config_json"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_config_exists=1
+    fi
+
+    if [[ $operation == replace ]]; then
+        stage=$(mktemp "$new_node.lifecycle.XXXXXX") || node_lifecycle_error="无法准备节点配置保存: $new_node"
+        if [[ ! $node_lifecycle_error ]] && { ! cp -p "$candidate_nodes/$new_cfg" "$stage" || ! mv -f "$stage" "$new_node"; }; then
+            rm -f "$stage"
+            node_lifecycle_error="保存节点配置失败: $new_node"
+        fi
+        if [[ ! $node_lifecycle_error && $old_cfg != "$new_cfg" ]]; then
+            if [[ -f $old_meta ]] && ! meta_move "$old_cfg" "$new_cfg"; then
+                node_lifecycle_error="迁移节点元数据失败: $old_meta -> $new_meta"
+            elif ! rm -f "$old_node"; then
+                node_lifecycle_error="移除旧节点配置失败: $old_node"
+            fi
+        fi
+    else
+        rm -f "$old_node" || node_lifecycle_error="删除节点配置失败: $old_node"
+        if [[ ! $node_lifecycle_error && -f $old_meta ]] && ! meta_rm "$old_cfg"; then
+            node_lifecycle_error="删除节点元数据失败: $old_meta"
+        fi
+    fi
+    if [[ ! $node_lifecycle_error && ( $old_config_exists == 1 || $operation == replace ) ]]; then
+        stage=$(mktemp "$is_config_json.lifecycle.XXXXXX") || node_lifecycle_error="无法准备公共配置保存: $is_config_json"
+        if [[ ! $node_lifecycle_error ]] && { ! cp -p "$candidate_config" "$stage" || ! mv -f "$stage" "$is_config_json"; }; then
+            rm -f "$stage"
+            node_lifecycle_error="保存公共配置失败: $is_config_json"
+        fi
+        [[ ! $node_lifecycle_error ]] && restart_needed=1
+    fi
+    if [[ $node_lifecycle_error ]]; then
+        restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
+        [[ $node_lifecycle_restore_errors ]] && node_lifecycle_error+="；恢复文件失败: $node_lifecycle_restore_errors"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if [[ $restart_needed == 1 ]] && ! manage_restart_confirmed; then
+        restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
+        if manage_restart_confirmed; then
+            if [[ $node_lifecycle_restore_errors ]]; then
+                node_lifecycle_error="节点变更重启失败，文件恢复失败: $node_lifecycle_restore_errors；原配置恢复重启已完成"
+            else
+                node_lifecycle_error="节点变更重启失败，已恢复原配置并恢复服务"
+            fi
+        elif [[ $node_lifecycle_restore_errors ]]; then
+            node_lifecycle_error="节点变更重启失败，文件恢复和恢复重启均失败: $node_lifecycle_restore_errors"
+        else
+            node_lifecycle_error="节点变更重启失败，原配置已恢复但服务恢复失败"
+        fi
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    rm -rf "$tmp_dir"
+    return 0
+}
 apply_node_outbound_mode() {
     local cfg=$1 mode=$2 proxy_config=${3:-} proxy_name=${4:-}
     local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
@@ -2012,7 +2204,7 @@ sync_entry_addr_config() {
 create() {
     case $1 in
     server)
-        local preserved_node_name preserved_entry_addr preserved_outbound_mode preserved_outbound_ss_server preserved_outbound_ss_port preserved_outbound_ss_method preserved_outbound_ss_password preserved_outbound_ss_name previous_config_file is_snell_tmp_file
+        local previous_config_file is_snell_tmp_file node_migration_applied
         is_tls=none
         get new
         # listen
@@ -2064,49 +2256,42 @@ create() {
             msg
             return
         }
-        [[ $is_change && $is_config_file ]] && preserved_node_name=$(meta_get "$is_config_file" '.node_name')
-        [[ $is_change && $is_config_file ]] && preserved_entry_addr=$(meta_get "$is_config_file" '.entry_addr')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_mode=$(meta_get "$is_config_file" '.outbound_mode')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_server=$(meta_get "$is_config_file" '.outbound_ss_server')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_port=$(meta_get "$is_config_file" '.outbound_ss_port')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_method=$(meta_get "$is_config_file" '.outbound_ss_method')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_password=$(meta_get "$is_config_file" '.outbound_ss_password')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_name=$(meta_get "$is_config_file" '.outbound_ss_name')
         previous_config_file=$is_config_file
-        if [[ ${2,,} == snell ]]; then
+        node_migration_applied=
+        if [[ $is_change && $previous_config_file ]]; then
+            [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
+            apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$node_lifecycle_error"
+            node_migration_applied=1
+            is_config_file=$is_config_name
+            msg "\n节点配置已应用: $(_green $is_config_name)\n"
+            if [[ $is_caddy && $is_change && $old_host ]]; then
+                is_del_host=$old_host
+                [[ $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+            fi
+        elif [[ ${2,,} == snell ]]; then
             if ! mv -f "$is_snell_tmp_file" "$is_json_file"; then
                 rm -f "$is_snell_tmp_file"
                 err "保存 Snell 配置失败, 原有配置未改变."
-            fi
-            if [[ $previous_config_file && $previous_config_file != "$is_config_name" ]]; then
-                rm -f "$is_conf_dir/$previous_config_file"
-                meta_move "$previous_config_file" "$is_config_name"
             fi
         else
             [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
             cat <<<$is_new_json >"$is_json_file"
         fi
-        [[ $preserved_node_name && $is_config_name ]] && meta_set "$is_config_name" node_name "$preserved_node_name"
-        [[ $preserved_entry_addr && $is_config_name ]] && meta_set "$is_config_name" entry_addr "$preserved_entry_addr"
-        [[ $preserved_outbound_mode && $is_config_name ]] && meta_set "$is_config_name" outbound_mode "$preserved_outbound_mode"
-        [[ $preserved_outbound_ss_server && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_server "$preserved_outbound_ss_server"
-        [[ $preserved_outbound_ss_port && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_port "$preserved_outbound_ss_port"
-        [[ $preserved_outbound_ss_method && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_method "$preserved_outbound_ss_method"
-        [[ $preserved_outbound_ss_password && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_password "$preserved_outbound_ss_password"
-        [[ $preserved_outbound_ss_name && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_name "$preserved_outbound_ss_name"
         [[ $is_config_name ]] && is_config_file=$is_config_name
         [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
-        sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
-        if [[ $is_new_install ]]; then
-            # config.json
-            create config.json
+        if [[ ! $node_migration_applied ]]; then
+            sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            if [[ $is_new_install ]]; then
+                # config.json
+                create config.json
+            fi
         fi
         # caddy auto tls
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
             create caddy $net
         }
         # restart core
-        manage restart &
+        [[ ! $node_migration_applied ]] && manage restart &
         ;;
     client)
         is_tls=tls
@@ -2129,6 +2314,7 @@ create() {
         manage restart caddy &
         ;;
     config.json)
+        local candidate_config
         is_log='log:{output:"/var/log/'$is_core'/access.log",level:"info","timestamp":true}'
         is_dns='dns:{}'
         is_ntp='ntp:{"enabled":true,"server":"time.apple.com"},'
@@ -2139,8 +2325,13 @@ create() {
         fi
         is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
-        cat <<<$is_server_config_json >$is_config_json
-        sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || err "无法创建候选公共配置"
+        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法写入候选公共配置"; }
+        if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
+            rm -f "$candidate_config"
+            err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+        fi
+        rm -f "$candidate_config"
         manage restart &
         ;;
     esac
@@ -2570,6 +2761,7 @@ change() {
 del() {
     # dont get ip
     is_dont_get_ip=1
+    local deleted_config_file
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
     [[ ! $is_config_file ]] && get info $1
@@ -2578,12 +2770,8 @@ del() {
             msg "\n是否删除配置文件?: $is_config_file"
             pause
         fi
-        rm -rf $is_conf_dir/"$is_config_file"
-        meta_rm "$is_config_file"
-        [[ -f "$is_config_json" ]] && sync_runtime_node_outbound_modes || {
-            [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
-        }
-        [[ ! $is_new_json ]] && manage restart &
+        deleted_config_file=$is_config_file
+        apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {

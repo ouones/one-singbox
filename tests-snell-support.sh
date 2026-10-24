@@ -18,10 +18,15 @@ version)
     ;;
 check)
     config=
+    conf_dir=
     while [[ $# -gt 0 ]]; do
         case $1 in
         -c)
             config=$2
+            shift 2
+            ;;
+        -C)
+            conf_dir=$2
             shift 2
             ;;
         *)
@@ -30,6 +35,15 @@ check)
         esac
     done
     [[ -f $config ]] || exit 1
+    if [[ $conf_dir ]]; then
+        [[ -d $conf_dir ]] || exit 1
+        jq -e '(.outbounds // []) | type == "array"' "$config" >/dev/null || exit 1
+        for file in "$conf_dir"/*.json; do
+            [[ -f $file ]] || continue
+            jq -e . "$file" >/dev/null || exit 1
+        done
+        exit 0
+    fi
     jq -e '
         (.inbounds | length == 1)
         and (.inbounds[0].type == "snell")
@@ -84,6 +98,13 @@ cleanup() {
 trap cleanup EXIT
 
 source "$CORE_FILE"
+systemctl() {
+    case $1 in
+        restart | is-active) return 0 ;;
+        show) echo 4321 ;;
+    esac
+}
+sleep() { :; }
 
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
