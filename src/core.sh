@@ -1391,13 +1391,203 @@ uri_query_alias_value() {
     uri_alias_present=$selected_set
 }
 
+normalize_vless_ws_early_data() {
+    local value=$1 normalized=$1
+    [[ $value =~ ^[0-9]+$ ]] || {
+        outbound_proxy_parse_error="VLESS WebSocket ed 必须为非负十进制整数"
+        return 1
+    }
+    while [[ ${#normalized} -gt 1 && ${normalized:0:1} == 0 ]]; do
+        normalized=${normalized:1}
+    done
+    [[ ${#normalized} -le 10 ]] && ((10#$normalized <= 4294967295)) || {
+        outbound_proxy_parse_error="VLESS WebSocket ed 超出 sing-box uint32 范围"
+        return 1
+    }
+    uri_vless_ws_early_data_normalized=$normalized
+}
+
+is_valid_vless_ws_header_name() {
+    local header=$1 token_pattern='^[!#$%&'\''*+.^_`|~0-9A-Za-z-]+$'
+    [[ $header =~ $token_pattern ]]
+}
+
+parse_vless_ws_early_data() {
+    local path=$1 outer_ed_present=$2 outer_ed=$3 outer_eh_present=$4 outer_eh=$5
+    local path_prefix=$1 query= remaining segment key raw_value has_equals more
+    local keep_query= keep_query_present=0
+    local inner_ed_present=0 inner_ed= inner_eh_present=0 inner_eh=
+    local outer_ed_normalized= outer_eh_value= selected_ed_present=0 selected_ed= selected_eh_present=0 selected_eh=
+
+    uri_vless_ws_path=$path
+    uri_vless_ws_early_data_present=0
+    uri_vless_ws_early_data=
+    uri_vless_ws_early_data_header_present=0
+    uri_vless_ws_early_data_header=
+
+    if [[ $path == *\?* ]]; then
+        path_prefix=${path%%\?*}
+        query=${path#*\?}
+        remaining=$query
+        while :; do
+            if [[ $remaining == *'&'* ]]; then
+                segment=${remaining%%&*}
+                remaining=${remaining#*&}
+                more=1
+            else
+                segment=$remaining
+                remaining=
+                more=0
+            fi
+            if [[ $segment == *=* ]]; then
+                key=${segment%%=*}
+                raw_value=${segment#*=}
+                has_equals=1
+            else
+                key=$segment
+                raw_value=
+                has_equals=0
+            fi
+            case $key in
+            ed)
+                [[ $has_equals == 1 && $inner_ed_present == 0 ]] || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 ed 格式无效或重复"
+                    return 1
+                }
+                inner_ed=$(url_percent_decode "$raw_value") || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 ed 编码无效"
+                    return 1
+                }
+                normalize_vless_ws_early_data "$inner_ed" || return 1
+                inner_ed=$uri_vless_ws_early_data_normalized
+                inner_ed_present=1
+                ;;
+            eh)
+                [[ $has_equals == 1 && $inner_eh_present == 0 ]] || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 eh 格式无效或重复"
+                    return 1
+                }
+                inner_eh=$(url_percent_decode "$raw_value") || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 eh 编码无效"
+                    return 1
+                }
+                is_valid_vless_ws_header_name "$inner_eh" || {
+                    outbound_proxy_parse_error="VLESS WebSocket early-data header 名无效"
+                    return 1
+                }
+                inner_eh_present=1
+                ;;
+            *)
+                if ((keep_query_present)); then keep_query+='&'; fi
+                keep_query+=$segment
+                keep_query_present=1
+                ;;
+            esac
+            ((more)) || break
+        done
+    fi
+
+    if [[ $outer_ed_present == 1 ]]; then
+        normalize_vless_ws_early_data "$outer_ed" || return 1
+        outer_ed_normalized=$uri_vless_ws_early_data_normalized
+    fi
+    if [[ $outer_eh_present == 1 ]]; then
+        outer_eh_value=$outer_eh
+        is_valid_vless_ws_header_name "$outer_eh_value" || {
+            outbound_proxy_parse_error="VLESS WebSocket early-data header 名无效"
+            return 1
+        }
+    fi
+    if [[ $outer_ed_present == 1 && $inner_ed_present == 1 && $outer_ed_normalized != "$inner_ed" ]]; then
+        outbound_proxy_parse_error="VLESS WebSocket 外层与 path query 的 ed 值冲突"
+        return 1
+    fi
+    if [[ $outer_eh_present == 1 && $inner_eh_present == 1 && $outer_eh_value != "$inner_eh" ]]; then
+        outbound_proxy_parse_error="VLESS WebSocket 外层与 path query 的 eh 值冲突"
+        return 1
+    fi
+
+    if [[ $outer_ed_present == 1 ]]; then
+        selected_ed_present=1
+        selected_ed=$outer_ed_normalized
+    elif [[ $inner_ed_present == 1 ]]; then
+        selected_ed_present=1
+        selected_ed=$inner_ed
+    fi
+    if [[ $outer_eh_present == 1 ]]; then
+        selected_eh_present=1
+        selected_eh=$outer_eh_value
+    elif [[ $inner_eh_present == 1 ]]; then
+        selected_eh_present=1
+        selected_eh=$inner_eh
+    fi
+    if [[ $selected_eh_present == 1 && $selected_ed_present != 1 ]]; then
+        outbound_proxy_parse_error="VLESS WebSocket eh 需要非零 ed"
+        return 1
+    fi
+    if [[ $selected_ed_present == 1 ]]; then
+        [[ $selected_ed != 0 || $selected_eh_present != 1 ]] || {
+            outbound_proxy_parse_error="VLESS WebSocket ed=0 时不能设置 eh"
+            return 1
+        }
+        uri_vless_ws_early_data_present=1
+        uri_vless_ws_early_data=$selected_ed
+        if [[ $selected_ed != 0 && $selected_eh_present != 1 ]]; then
+            selected_eh_present=1
+            selected_eh=Sec-WebSocket-Protocol
+        fi
+    fi
+    if ((inner_ed_present || inner_eh_present)); then
+        uri_vless_ws_path=$path_prefix
+        if ((keep_query_present)); then uri_vless_ws_path+="?$keep_query"; fi
+    fi
+    uri_vless_ws_early_data_header_present=$selected_eh_present
+    uri_vless_ws_early_data_header=$selected_eh
+    return 0
+}
+
+vless_grpc_default_authority() {
+    local server=$1 server_port=$2 security=$3 server_name=$4 version_output version tags tag_count authority_host
+    vless_grpc_default_authority_value=
+    [[ $is_core_bin ]] || return 1
+    version_output=$("$is_core_bin" version 2>/dev/null) || return 1
+    version=$(awk 'NR == 1 { print $3 }' <<<"$version_output")
+    [[ ${version#v} == 1.14.0 ]] || return 1
+    tag_count=$(grep -c '^Tags:' <<<"$version_output" || true)
+    [[ $tag_count == 1 ]] || return 1
+    tags=$(sed -n 's/^Tags:[[:space:]]*//p' <<<"$version_output")
+    tags=${tags//[[:space:]]/}
+
+    if [[ ,$tags, == *,with_grpc,* ]]; then
+        tag=full
+    else
+        tag=lite
+    fi
+    if [[ ($security == tls || $security == reality) && $server_name ]]; then
+        authority_host=$server_name
+    else
+        authority_host=$server
+    fi
+    if [[ $authority_host == *:* && $authority_host != \[*\] ]]; then
+        authority_host="[$authority_host]"
+    fi
+    if [[ $tag == full && ($security == tls || $security == reality) && $server_name ]]; then
+        vless_grpc_default_authority_value=$authority_host
+    else
+        vless_grpc_default_authority_value="$authority_host:$server_port"
+    fi
+}
+
 parse_vless_uri() {
     local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
     local fragment_present=0 remark_name key encryption transport security flow
     local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
     local public_key public_key_present short_id short_id_present insecure=false insecure_present
     local packet_encoding packet_encoding_present utls_enabled=false
-    local canonical_public_key public_key_length
+    local canonical_public_key public_key_length path host ed eh mode grpc_authority header_type
+    local path_present host_present ed_present eh_present mode_present authority_present header_type_present
+    local ws_path=/ ws_host= ws_host_present=0 ws_early_data= ws_early_data_present=0 ws_early_data_header= ws_early_data_header_present=0
+    local grpc_service_name= grpc_service_name_present=0 grpc_default_authority
 
     outbound_proxy_parse_error="VLESS 链接格式或参数无效"
     outbound_proxy_name=
@@ -1460,7 +1650,7 @@ parse_vless_uri() {
 
     while IFS= read -r key; do
         case $key in
-        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding) ;;
+        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | ed | eh | serviceName | service_name | mode | authority | headerType) ;;
         *)
             outbound_proxy_parse_error="VLESS 暂不支持连接参数: $key"
             return 1
@@ -1474,8 +1664,8 @@ parse_vless_uri() {
         return 1
     }
     transport=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
-    [[ $transport == tcp || $transport == raw ]] || {
-        outbound_proxy_parse_error="VLESS type=$transport 传输暂不支持，本票仅支持 TCP/raw"
+    [[ $transport == tcp || $transport == raw || $transport == ws || $transport == grpc ]] || {
+        outbound_proxy_parse_error="VLESS type=$transport 传输暂不支持，本票支持 TCP/raw、WebSocket 和 gRPC"
         return 1
     }
     security=$(jq -r '.security // "none"' <<<"$uri_query_json")
@@ -1489,6 +1679,82 @@ parse_vless_uri() {
         outbound_proxy_parse_error="VLESS flow=$flow 暂不支持"
         return 1
     }
+    if [[ $flow && ($transport == ws || $transport == grpc) ]]; then
+        outbound_proxy_parse_error="VLESS Vision 仅支持 TCP/raw，不能用于 WebSocket 或 gRPC"
+        return 1
+    fi
+
+    path=$(jq -r '.path // ""' <<<"$uri_query_json")
+    path_present=$(jq -r 'has("path") | if . then 1 else 0 end' <<<"$uri_query_json")
+    host=$(jq -r '.host // ""' <<<"$uri_query_json")
+    host_present=$(jq -r 'has("host") | if . then 1 else 0 end' <<<"$uri_query_json")
+    ed=$(jq -r '.ed // ""' <<<"$uri_query_json")
+    ed_present=$(jq -r 'has("ed") | if . then 1 else 0 end' <<<"$uri_query_json")
+    eh=$(jq -r '.eh // ""' <<<"$uri_query_json")
+    eh_present=$(jq -r 'has("eh") | if . then 1 else 0 end' <<<"$uri_query_json")
+    uri_query_alias_value "$uri_query_json" raw serviceName service_name || return 1
+    grpc_service_name=$uri_alias_value
+    grpc_service_name_present=$uri_alias_present
+    mode=$(jq -r '.mode // ""' <<<"$uri_query_json")
+    mode_present=$(jq -r 'has("mode")' <<<"$uri_query_json")
+    grpc_authority=$(jq -r '.authority // ""' <<<"$uri_query_json")
+    authority_present=$(jq -r 'has("authority")' <<<"$uri_query_json")
+    header_type=$(jq -r '.headerType // "none"' <<<"$uri_query_json")
+    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
+    if [[ $header_type_present == true && $header_type != none ]]; then
+        if [[ $header_type == http ]]; then
+            outbound_proxy_parse_error="VLESS headerType=http 的 TCP HTTP 伪装与 sing-box 原生传输不等价"
+        else
+            outbound_proxy_parse_error="VLESS headerType=$header_type 暂不支持"
+        fi
+        return 1
+    fi
+    case $transport in
+    ws)
+        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+            outbound_proxy_parse_error="VLESS WebSocket 不能使用 gRPC 参数 serviceName、mode 或 authority"
+            return 1
+        fi
+        [[ $path_present != 1 || $path ]] || {
+            outbound_proxy_parse_error="VLESS WebSocket path 不能为空"
+            return 1
+        }
+        if [[ $host_present == 1 ]]; then
+            [[ $host && $host != *,* && ! $host =~ [[:space:]] ]] || {
+                outbound_proxy_parse_error="VLESS WebSocket host 必须是单个非空值且不能包含空白字符"
+                return 1
+            }
+            ws_host=$host
+            ws_host_present=1
+        fi
+        [[ $path_present == 1 ]] && ws_path=$path
+        parse_vless_ws_early_data "$ws_path" "$ed_present" "$ed" "$eh_present" "$eh" || return 1
+        ws_path=$uri_vless_ws_path
+        ws_early_data=$uri_vless_ws_early_data
+        ws_early_data_present=$uri_vless_ws_early_data_present
+        ws_early_data_header=$uri_vless_ws_early_data_header
+        ws_early_data_header_present=$uri_vless_ws_early_data_header_present
+        ;;
+    grpc)
+        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 ]]; then
+            outbound_proxy_parse_error="VLESS gRPC 不能使用 WebSocket 参数 path、host、ed 或 eh"
+            return 1
+        fi
+        if [[ $mode_present == true && $mode != gun ]]; then
+            case $mode in
+            multi | guna) outbound_proxy_parse_error="VLESS gRPC mode=$mode 与 sing-box 原生 gRPC 不等价" ;;
+            *) outbound_proxy_parse_error="VLESS gRPC mode=$mode 仅支持 gun" ;;
+            esac
+            return 1
+        fi
+        ;;
+    tcp | raw)
+        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 || $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+            outbound_proxy_parse_error="VLESS type=$transport 不能使用 WebSocket 或 gRPC 专属参数"
+            return 1
+        fi
+        ;;
+    esac
 
     uri_query_alias_value "$uri_query_json" raw sni serverName || return 1
     sni=$uri_alias_value
@@ -1590,6 +1856,17 @@ parse_vless_uri() {
             return 1
         fi
     fi
+    if [[ $transport == grpc && $authority_present == true && $grpc_authority ]]; then
+        vless_grpc_default_authority "$uri_server" "$uri_port_number" "$security" "$sni" || {
+            outbound_proxy_parse_error="VLESS gRPC authority 默认值无法根据当前 sing-box 版本和构建确认"
+            return 1
+        }
+        grpc_default_authority=$vless_grpc_default_authority_value
+        [[ $grpc_authority == "$grpc_default_authority" ]] || {
+            outbound_proxy_parse_error="VLESS gRPC authority 不能独立覆盖，当前构建默认值为 $grpc_default_authority"
+            return 1
+        }
+    fi
     [[ ! $packet_encoding || $packet_encoding == xudp || $packet_encoding == packetaddr ]] || {
         outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
         return 1
@@ -1620,6 +1897,16 @@ parse_vless_uri() {
         --arg flow "$flow" \
         --arg packet_encoding "$packet_encoding" \
         --argjson packet_encoding_present "${packet_encoding_present:-0}" \
+        --arg transport_type "$transport" \
+        --arg ws_path "$ws_path" \
+        --arg ws_host "$ws_host" \
+        --argjson ws_host_present "$ws_host_present" \
+        --arg ws_early_data "$ws_early_data" \
+        --argjson ws_early_data_present "$ws_early_data_present" \
+        --arg ws_early_data_header "$ws_early_data_header" \
+        --argjson ws_early_data_header_present "$ws_early_data_header_present" \
+        --arg grpc_service_name "$grpc_service_name" \
+        --argjson grpc_service_name_present "$grpc_service_name_present" \
         '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
         + if $security == "none" then {} else
             {tls:({enabled:true,server_name:$sni,insecure:$insecure}
@@ -1628,7 +1915,18 @@ parse_vless_uri() {
                 + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end)}
           end
         + if $flow == "" then {} else {flow:$flow} end
-        + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end') || {
+        + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end
+        + if $transport_type == "ws" then
+            {transport:({type:"ws",path:$ws_path}
+                + if $ws_host_present == 1 then {headers:{Host:$ws_host}} else {} end
+                + if $ws_early_data_present == 1 then
+                    {max_early_data:($ws_early_data|tonumber)}
+                    + if $ws_early_data_header_present == 1 then {early_data_header_name:$ws_early_data_header} else {} end
+                  else {} end)}
+          elif $transport_type == "grpc" then
+            {transport:({type:"grpc"}
+                + if $grpc_service_name_present == 1 then {service_name:$grpc_service_name} else {} end)}
+          else {} end') || {
         outbound_proxy_parse_error="无法构造 VLESS 原生出站参数"
         return 1
     }
