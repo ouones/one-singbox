@@ -176,6 +176,96 @@ parser-ss-encoding)
     fi
     exit 0
     ;;
+vless-menu)
+    vless_uuid=550e8400-e29b-41d4-a716-446655440000
+    vless_pbk=$(printf '%s' '01234567890123456789012345678901' | base64 | tr '+/' '-_' | tr -d '=\n')
+    [[ ${TEST_VLESS_PUBLIC_KEY:-} ]] && vless_pbk=$TEST_VLESS_PUBLIC_KEY
+    parse_proxy_uri vless "vless://$vless_uuid@default.example.com:443/" || fail "VLESS defaults should accept TCP, no encryption, and no security"
+    jq -e '.type == "vless" and .server == "default.example.com" and .server_port == 443 and .tls == null and .transport == null and .network == null and .packet_encoding == null' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS omitted parameters should use native defaults without adding transport or a TCP-only restriction"
+    parse_proxy_uri vless "vless://$vless_uuid@default.example.com:443?remark=Query+Name&remarks=Query+Name#Fragment+Name" || fail "VLESS display remark aliases should parse"
+    [[ $outbound_proxy_name == 'Fragment+Name' ]] || fail "VLESS fragment should take precedence and plus should remain literal"
+    parse_proxy_uri vless "vless://$vless_uuid@default.example.com:443?remarks=Query+Name" || fail "VLESS remarks should provide a display name when no fragment is present"
+    [[ $outbound_proxy_name == 'Query+Name' ]] || fail "VLESS query remark should preserve plus instead of decoding it as a space"
+    parse_proxy_uri vless "vless://$vless_uuid@[2001:db8::2]:443?encryption=none&type=raw&security=none&packetEncoding=none#VLESS%20%E8%8A%82%E7%82%B9" || fail "VLESS TCP/raw with encryption=none and packetEncoding=none should parse"
+    jq -e '.type == "vless" and .server == "2001:db8::2" and .server_port == 443 and (.server_port | type == "number") and .uuid == "'"$vless_uuid"'" and .packet_encoding == "" and (has("transport") | not) and (has("network") | not) and (has("tls") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS raw should normalize to an unwrapped VLESS outbound without a TCP-only restriction"
+    [[ $outbound_proxy_name == 'VLESS 节点' ]] || fail "VLESS fragment should decode UTF-8 and preserve the display name"
+    parse_proxy_uri vless "vless://$vless_uuid@[2001:db8::2]:443?security=none&packetEncoding=none&packet_encoding=#PacketAliases" || fail "packetEncoding none and an empty alias should normalize to the same explicit empty value"
+    [[ $(jq -r '.packet_encoding' <<<"$outbound_proxy_config_json") == '' ]] || fail "explicitly disabled packet encoding should remain an empty native string"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-none.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@[2001:db8::2]:443?security=none&packetEncoding=packetaddr#PacketAddress" || fail "VLESS packetaddr encoding should parse"
+    [[ $(jq -r '.packet_encoding' <<<"$outbound_proxy_config_json") == packetaddr ]] || fail "packetaddr should map to the native packet_encoding field"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-packetaddr.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&serverName=front.example.com&alpn=h2%2Chttp%2F1.1&fp=firefox&fingerprint=firefox&allowInsecure=1&insecure=true&packet_encoding=xudp#TLS" || fail "VLESS TLS aliases and boolean aliases with equal meaning should parse"
+    jq -e '.tls.enabled == true and .tls.server_name == "front.example.com" and .tls.alpn == ["h2","http/1.1"] and .tls.utls.enabled == true and .tls.utls.fingerprint == "firefox" and .tls.insecure == true and .packet_encoding == "xudp" and .flow == null' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS TLS fields should use native JSON types and preserve ALPN order"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-tls-insecure.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&flow=xtls-rprx-vision#TLSVision" || fail "VLESS Vision should be accepted with TCP + TLS"
+    jq -e '.flow == "xtls-rprx-vision" and .tls.enabled == true' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS TLS + Vision should retain flow and TLS fields"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-tls-vision.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@vless.example.com:443?security=tls&sni=front.example.com&fp=none#TLSDefault" || fail "TLS default certificate validation should parse"
+    jq -e '.tls.enabled == true and .tls.insecure == false and (.tls | has("utls") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "TLS should validate certificates by default and fp=none should omit uTLS"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-tls.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@reality.example.com:443?security=reality&flow=xtls-rprx-vision&publicKey=$vless_pbk&pbk=$vless_pbk&sid=&shortId=&skip-cert-verify=1&insecure=true#Reality" || fail "VLESS Reality aliases, empty short ID, and Vision should parse"
+    jq -e '.flow == "xtls-rprx-vision" and .tls.enabled == true and .tls.server_name == "reality.example.com" and .tls.utls.enabled == true and .tls.utls.fingerprint == "chrome" and .tls.insecure == true and .tls.reality.enabled == true and .tls.reality.public_key == "'"$vless_pbk"'" and .tls.reality.short_id == ""' <<<"$outbound_proxy_config_json" >/dev/null || fail "VLESS Reality should retain the public-key authentication and default short ID"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/vless-reality-vision.json"; fi
+    for bad_uri in \
+        "vless://not-a-uuid@vless.example.com:443" \
+        "vless://$vless_uuid@vless.example.com:443?encryption=aes-128-gcm" \
+        "vless://$vless_uuid@vless.example.com:443?type=ws&security=tls" \
+        "vless://$vless_uuid@vless.example.com:443?security=none&sni=front.example.com" \
+        "vless://$vless_uuid@vless.example.com:443?security=none&flow=xtls-rprx-vision" \
+        "vless://$vless_uuid@vless.example.com:443?security=reality" \
+        "vless://$vless_uuid@vless.example.com:443?security=reality&pbk=invalid" \
+        "vless://$vless_uuid@vless.example.com:443?security=reality&pbk=$vless_pbk&sid=abc" \
+        "vless://$vless_uuid@vless.example.com:443?security=reality&pbk=$vless_pbk&sid=0123456789abcdef0" \
+        "vless://$vless_uuid:password@vless.example.com:443" \
+        "vless://$vless_uuid@vless.example.com:0" \
+        "vless://$vless_uuid@vless.example.com:65536" \
+        "https://$vless_uuid@vless.example.com:443" \
+        "vless://$vless_uuid@vless.example.com:443#Bad%" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&fp=unknown" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&allowInsecure=yes" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&packetEncoding=other" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&sni=a&serverName=b" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&sni=a&sni=b" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&allowInsecure=0&insecure=true" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&path=%2Fws" \
+        "vless://$vless_uuid@vless.example.com:443?security=tls&sni=%00bad"; do
+        if parse_proxy_uri vless "$bad_uri"; then
+            fail "unsupported or invalid VLESS URI should be rejected: $bad_uri"
+        fi
+    done
+    vless_uri="vless://$vless_uuid@reality.example.com:443?type=raw&security=reality&flow=xtls-rprx-vision&pbk=$vless_pbk&sid=01020304#VLESS%20%E8%8A%82%E7%82%B9"
+    if change_output=$(printf '6\n%s\n' "$vless_uri" | change node-one.json outbound 2>&1); then :; else fail "VLESS Reality menu entry should apply: $change_output"; fi
+    [[ $change_output == *"配置已应用"* && $change_output == *"VLESS 节点"* ]] || fail "VLESS menu success should show the applied upstream name: $change_output"
+    [[ $change_output != *"$vless_uuid"* && $change_output != *"$vless_pbk"* && $change_output != *"vless://"* ]] || fail "VLESS menu output must not expose credentials or the share link"
+    jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "VLESS 节点" and .outbound_proxy.config.type == "vless" and .outbound_proxy.config.uuid == "'"$vless_uuid"'" and .outbound_proxy.config.tls.reality.public_key == "'"$vless_pbk"'"' "$meta_file" >/dev/null || fail "VLESS normalized config should be saved in the shared per-node proxy cache"
+    jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .type == "vless" and .flow == "xtls-rprx-vision" and .tls.reality.public_key == "'"$vless_pbk"'" and (has("network") | not) and (has("transport") | not)' "$is_config_json" >/dev/null || fail "runtime VLESS outbound should carry native Reality/Vision fields without restricting proxied traffic to TCP"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (VLESS 节点)' ]] || fail "VLESS renderer should display the upstream name"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    restart_before=$(restart_count)
+    if change_output=$(printf '6\nvless://%s@vless.example.com:443?type=ws\n' "$vless_uuid" | change node-one.json outbound 2>&1); then
+        fail "invalid VLESS replacement should fail"
+    fi
+    [[ $change_output == *"VLESS"* && $change_output == *"type"* ]] || fail "invalid VLESS input should name the rejected field or capability: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "invalid VLESS replacement must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid VLESS replacement must preserve the public config"
+    [[ $(restart_count) == "$restart_before" ]] || fail "invalid VLESS replacement must not restart the service"
+
+    change_output=$(printf '6\n\n' | change node-one.json outbound 2>&1) || fail "cached VLESS config should be reusable: $change_output"
+    change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "switching VLESS to direct should succeed: $change_output"
+    jq -e '.outbound_mode == "仅V4" and .outbound_proxy.config.type == "vless"' "$meta_file" >/dev/null || fail "switching to direct should retain the VLESS cache"
+    jq -e '[.outbounds[] | select(.tag | startswith("managed_node_vless_"))] | length == 0' "$is_config_json" >/dev/null || fail "switching to direct should remove the active VLESS outbound"
+    change_output=$(printf '6\n\n' | change node-one.json outbound 2>&1) || fail "VLESS cache should remain reusable after switching direct: $change_output"
+    ss_auth=$(printf '%s' 'aes-128-gcm:secret' | base64 | tr -d '\n')
+    ss_uri="ss://${ss_auth}@127.0.0.1:8388#SS-Replacement"
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1) || fail "VLESS to SS replacement should succeed: $change_output"
+    jq -e '.outbound_mode == "SS 出站" and .outbound_proxy.config.type == "shadowsocks"' "$meta_file" >/dev/null || fail "SS replacement should replace the VLESS cache"
+    change_output=$(printf '6\n%s\n' "$vless_uri" | change node-one.json outbound 2>&1) || fail "SS to VLESS replacement should succeed: $change_output"
+    jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.config.type == "vless"' "$meta_file" >/dev/null || fail "VLESS replacement should replace the SS cache"
+    change_output=$(printf '6\n\n' | change node-one.json mode 2>&1) || fail "non-Snell mode compatibility entry should reuse VLESS: $change_output"
+    exit 0
+    ;;
 reject-check)
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
@@ -490,10 +580,10 @@ CASE
 }
 
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 parser-ss-encoding reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in parser-ss2022 parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 parser-ss-encoding reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in happy parser-ss2022 parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"

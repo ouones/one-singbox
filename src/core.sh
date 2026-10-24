@@ -182,6 +182,7 @@ outbound_mode_list=(
     "仅V4"
     "仅V6"
     "SS 出站"
+    "VLESS 出站"
 )
 servername_list=(
     www.amazon.com
@@ -605,21 +606,25 @@ current_outbound_mode_display() {
         echo 未设置
         return
     }
-    if [[ $mode == 'SS 出站' ]]; then
+    if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
         name=$(meta_get "$cfg" '.outbound_proxy.name')
         [[ $name ]] && {
             echo "$mode ($name)"
             return
         }
-        name=$(meta_get "$cfg" '.outbound_ss_name')
-        [[ $name ]] && {
-            echo "$mode ($name)"
-            return
-        }
+        if [[ $mode == 'SS 出站' ]]; then
+            name=$(meta_get "$cfg" '.outbound_ss_name')
+            [[ $name ]] && {
+                echo "$mode ($name)"
+                return
+            }
+        fi
         server=$(meta_get "$cfg" '.outbound_proxy.config.server')
         port=$(meta_get "$cfg" '.outbound_proxy.config.server_port')
-        [[ ! $server ]] && server=$(meta_get "$cfg" '.outbound_ss_server')
-        [[ ! $port ]] && port=$(meta_get "$cfg" '.outbound_ss_port')
+        if [[ $mode == 'SS 出站' ]]; then
+            [[ ! $server ]] && server=$(meta_get "$cfg" '.outbound_ss_server')
+            [[ ! $port ]] && port=$(meta_get "$cfg" '.outbound_ss_port')
+        fi
         [[ $server == *:* && $server != \[*\] ]] && server="[$server]"
         [[ $server && $port ]] && {
             echo "$mode ($server:$port)"
@@ -1122,6 +1127,26 @@ edit_node_outbound_mode() {
             proxy_config=
             proxy_name=
         fi
+    elif [[ $is_outbound_mode == 'VLESS 出站' ]]; then
+        if outbound_proxy_from_metadata "$is_config_file" "$metadata_file"; then
+            proxy_json=$outbound_proxy_json
+        fi
+        current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
+        if [[ $current_proxy_type == vless ]]; then
+            echo -ne "请输入 VLESS 分享链接 (直接回车复用当前配置):"
+        else
+            echo -ne "请输入 VLESS 分享链接:"
+        fi
+        IFS= read -r is_outbound_vless_uri
+        if [[ $is_outbound_vless_uri ]]; then
+            parse_proxy_uri vless "$is_outbound_vless_uri" || err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"
+            proxy_config=$outbound_proxy_config_json
+            proxy_name=$outbound_proxy_name
+        else
+            [[ $current_proxy_type == vless ]] || err "没有可复用的 VLESS 配置，请粘贴 VLESS 分享链接."
+            proxy_config=
+            proxy_name=
+        fi
     fi
     apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || err "$outbound_apply_error"
     msg "\n配置已应用: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
@@ -1296,9 +1321,292 @@ parse_uri_authority() {
     ((uri_port_number >= 1 && uri_port_number <= 65535))
 }
 
+uri_query_alias_value() {
+    local query=$1 normalize=$2 key value selected= selected_key= selected_set=0
+    shift 2
+    uri_alias_value=
+    uri_alias_present=0
+    for key in "$@"; do
+        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$query") == true ]] || continue
+        value=$(jq -r --arg key "$key" '.[$key]' <<<"$query") || return 1
+        case $normalize in
+        boolean)
+            case $value in
+            1 | true) value=true ;;
+            0 | false) value=false ;;
+            *)
+                outbound_proxy_parse_error="VLESS 参数 $key 必须为 1、0、true 或 false"
+                return 1
+                ;;
+            esac
+            ;;
+        packet_encoding)
+            [[ $value == none ]] && value=
+            ;;
+        esac
+        if ((selected_set)) && [[ $value != "$selected" ]]; then
+            outbound_proxy_parse_error="VLESS 参数别名冲突: $selected_key / $key"
+            return 1
+        fi
+        selected=$value
+        selected_key=$key
+        selected_set=1
+    done
+    uri_alias_value=$selected
+    uri_alias_present=$selected_set
+}
+
+parse_vless_uri() {
+    local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
+    local fragment_present=0 remark_name key encryption transport security flow
+    local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
+    local public_key public_key_present short_id short_id_present insecure=false insecure_present
+    local packet_encoding packet_encoding_present utls_enabled=false
+    local canonical_public_key public_key_length
+
+    outbound_proxy_parse_error="VLESS 链接格式或参数无效"
+    outbound_proxy_name=
+    outbound_proxy_config_json=
+    uri_query_json='{}'
+    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
+    [[ ! $uri =~ [[:cntrl:]] && $uri == vless://* ]] || return 1
+    uri=${uri#vless://}
+    if [[ $uri == *#* ]]; then
+        fragment_present=1
+        raw_name=${uri#*#}
+        uri=${uri%%#*}
+        [[ $raw_name != *#* ]] || {
+            outbound_proxy_parse_error="VLESS 链接名称格式无效"
+            return 1
+        }
+    fi
+    if [[ $uri == *\?* ]]; then
+        raw_query=${uri#*\?}
+        uri=${uri%%\?*}
+        parse_uri_query "$raw_query" || {
+            outbound_proxy_parse_error="VLESS 查询参数格式无效"
+            return 1
+        }
+    else
+        uri_query_json='{}'
+    fi
+    [[ $uri == *@* ]] || {
+        outbound_proxy_parse_error="VLESS 链接缺少 UUID 或服务器地址"
+        return 1
+    }
+    auth=${uri%@*}
+    authority=${uri#*@}
+    [[ $auth && $auth != *@* && $authority != *@* && $auth != *:* ]] || {
+        outbound_proxy_parse_error="VLESS userinfo 必须是 UUID，不能包含密码"
+        return 1
+    }
+    decoded_auth=$(url_percent_decode "$auth") || {
+        outbound_proxy_parse_error="VLESS UUID 编码无效"
+        return 1
+    }
+    [[ $decoded_auth =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
+        outbound_proxy_parse_error="VLESS UUID 无效"
+        return 1
+    }
+    [[ $authority == */ ]] && authority=${authority%/}
+    [[ $authority != */* ]] || {
+        outbound_proxy_parse_error="VLESS authority 不支持路径"
+        return 1
+    }
+    raw_port=${authority##*:}
+    [[ $raw_port =~ ^[0-9]{1,5}$ ]] || {
+        outbound_proxy_parse_error="VLESS 端口必须为 1–65535 的十进制整数"
+        return 1
+    }
+    parse_uri_authority "$authority" || {
+        outbound_proxy_parse_error="VLESS 服务器地址或端口无效"
+        return 1
+    }
+
+    while IFS= read -r key; do
+        case $key in
+        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding) ;;
+        *)
+            outbound_proxy_parse_error="VLESS 暂不支持连接参数: $key"
+            return 1
+            ;;
+        esac
+    done < <(jq -r 'keys[]' <<<"$uri_query_json")
+
+    encryption=$(jq -r '.encryption // "none"' <<<"$uri_query_json")
+    [[ ! $encryption || $encryption == none ]] || {
+        outbound_proxy_parse_error="VLESS encryption 仅支持 none"
+        return 1
+    }
+    transport=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
+    [[ $transport == tcp || $transport == raw ]] || {
+        outbound_proxy_parse_error="VLESS type=$transport 传输暂不支持，本票仅支持 TCP/raw"
+        return 1
+    }
+    security=$(jq -r '.security // "none"' <<<"$uri_query_json")
+    [[ ! $security ]] && security=none
+    [[ $security == none || $security == tls || $security == reality ]] || {
+        outbound_proxy_parse_error="VLESS security=$security 暂不支持"
+        return 1
+    }
+    flow=$(jq -r '.flow // ""' <<<"$uri_query_json")
+    [[ ! $flow || $flow == xtls-rprx-vision ]] || {
+        outbound_proxy_parse_error="VLESS flow=$flow 暂不支持"
+        return 1
+    }
+
+    uri_query_alias_value "$uri_query_json" raw sni serverName || return 1
+    sni=$uri_alias_value
+    sni_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw alpn || return 1
+    alpn=$uri_alias_value
+    alpn_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw fp fingerprint || return 1
+    fingerprint=$uri_alias_value
+    fingerprint_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw pbk publicKey || return 1
+    public_key=$uri_alias_value
+    public_key_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw sid shortId || return 1
+    short_id=$uri_alias_value
+    short_id_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" boolean allowInsecure insecure skip-cert-verify || return 1
+    insecure=$uri_alias_value
+    insecure_present=$uri_alias_present
+    [[ $insecure_present == 1 ]] || insecure=false
+    uri_query_alias_value "$uri_query_json" packet_encoding packetEncoding packet_encoding || return 1
+    packet_encoding=$uri_alias_value
+    packet_encoding_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw remark remarks || return 1
+    remark_name=$uri_alias_value
+
+    if [[ $security == none ]]; then
+        if [[ ($sni_present == 1 && $sni) || ($alpn_present == 1 && $alpn) || ($fingerprint_present == 1 && $fingerprint) || ($insecure_present == 1 && $insecure) || ($public_key_present == 1 && $public_key) || ($short_id_present == 1 && $short_id) ]]; then
+            outbound_proxy_parse_error="VLESS security=none 不能包含 TLS/Reality 参数"
+            return 1
+        fi
+        [[ ! $flow ]] || {
+            outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
+            return 1
+        }
+    else
+        [[ $sni ]] || sni=$uri_server
+        if [[ $alpn_present == 1 ]]; then
+            [[ $alpn ]] || {
+                outbound_proxy_parse_error="VLESS alpn 不能为空"
+                return 1
+            }
+            alpn_json=$(jq -cn --arg alpn "$alpn" '$alpn | split(",")') || return 1
+            jq -e 'length > 0 and all(.[]; type == "string" and length > 0)' <<<"$alpn_json" >/dev/null || {
+                outbound_proxy_parse_error="VLESS alpn 必须是逗号分隔的非空协议列表"
+                return 1
+            }
+        else
+            alpn_json='[]'
+        fi
+        if [[ $fingerprint_present == 1 && $fingerprint != none ]]; then
+            case $fingerprint in
+            chrome | firefox | edge | safari | 360 | qq | ios | android | random | randomized) ;;
+            *)
+                outbound_proxy_parse_error="VLESS fingerprint=$fingerprint 不受支持"
+                return 1
+                ;;
+            esac
+            utls_enabled=true
+        elif [[ $security == reality ]]; then
+            [[ $fingerprint != none ]] || {
+                outbound_proxy_parse_error="VLESS Reality 需要 uTLS fingerprint"
+                return 1
+            }
+            fingerprint=chrome
+            utls_enabled=true
+        fi
+        [[ $fingerprint_present != 1 || $fingerprint ]] || {
+            outbound_proxy_parse_error="VLESS fingerprint 不能为空"
+            return 1
+        }
+        if [[ $security == reality ]]; then
+            [[ $public_key_present == 1 && $public_key ]] || {
+                outbound_proxy_parse_error="VLESS Reality 需要 pbk/publicKey"
+                return 1
+            }
+            public_key=${public_key%=}
+            [[ $public_key =~ ^[A-Za-z0-9_-]{43}$ ]] || {
+                outbound_proxy_parse_error="VLESS Reality public key 必须是 32 字节 Base64URL"
+                return 1
+            }
+            canonical_public_key=$(printf '%s=' "$public_key" | tr '_-' '/+' | base64 -d 2>/dev/null | base64 -w 0 | tr '+/' '-_' | sed 's/=*$//')
+            public_key_length=$(printf '%s' "$public_key" | tr '_-' '/+' | sed 's/$/=/' | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]')
+            [[ $canonical_public_key == "$public_key" && $public_key_length == 32 ]] || {
+                outbound_proxy_parse_error="VLESS Reality public key 必须解码为 32 字节 Base64URL"
+                return 1
+            }
+            if [[ $short_id_present == 1 && $short_id && ! $short_id =~ ^([0-9A-Fa-f]{2}){1,8}$ ]]; then
+                outbound_proxy_parse_error="VLESS Reality short ID 必须是偶数位十六进制且不超过 16 位"
+                return 1
+            fi
+            [[ $short_id_present == 1 ]] || short_id=
+        elif [[ $public_key_present == 1 || $short_id_present == 1 ]]; then
+            outbound_proxy_parse_error="VLESS pbk/publicKey 和 sid/shortId 仅用于 Reality"
+            return 1
+        fi
+        if [[ $flow && $security != tls && $security != reality ]]; then
+            outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
+            return 1
+        fi
+    fi
+    [[ ! $packet_encoding || $packet_encoding == xudp || $packet_encoding == packetaddr ]] || {
+        outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
+        return 1
+    }
+
+    outbound_proxy_name=
+    if [[ $fragment_present == 1 ]]; then
+        outbound_proxy_name=$(url_percent_decode "$raw_name") || {
+            outbound_proxy_parse_error="VLESS 链接名称编码无效"
+            return 1
+        }
+    elif [[ $remark_name ]]; then
+        outbound_proxy_name=$remark_name
+    fi
+    outbound_proxy_config_json=$(jq -cn \
+        --arg server "$uri_server" \
+        --argjson server_port "$uri_port_number" \
+        --arg uuid "$decoded_auth" \
+        --arg security "$security" \
+        --arg sni "$sni" \
+        --argjson insecure "$insecure" \
+        --argjson alpn "$alpn_json" \
+        --argjson alpn_present "${alpn_present:-0}" \
+        --argjson utls_enabled "$utls_enabled" \
+        --arg fingerprint "$fingerprint" \
+        --arg public_key "$public_key" \
+        --arg short_id "$short_id" \
+        --arg flow "$flow" \
+        --arg packet_encoding "$packet_encoding" \
+        --argjson packet_encoding_present "${packet_encoding_present:-0}" \
+        '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
+        + if $security == "none" then {} else
+            {tls:({enabled:true,server_name:$sni,insecure:$insecure}
+                + if $alpn_present == 1 then {alpn:$alpn} else {} end
+                + if $utls_enabled then {utls:{enabled:true,fingerprint:$fingerprint}} else {} end
+                + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end)}
+          end
+        + if $flow == "" then {} else {flow:$flow} end
+        + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end') || {
+        outbound_proxy_parse_error="无法构造 VLESS 原生出站参数"
+        return 1
+    }
+    return 0
+}
+
 parse_proxy_uri() {
     local expected=$1 uri=$2 raw_name= raw_query= auth authority decoded_auth
     local fragment_present=0 remark_name remarks_name plugin key
+    [[ $expected == vless ]] && {
+        parse_vless_uri "$uri"
+        return $?
+    }
     uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
     [[ ! $uri =~ [[:cntrl:]] ]] || return 1
     [[ $expected == ss && $uri == ss://* ]] || return 1
