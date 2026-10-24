@@ -25,7 +25,7 @@ show_help() {
             "   url [name]                                      URL 信息"
             "   Snell 提供 sing-box URI 与 Surge 配置双格式导出 (不支持二维码)"
             "   log                                             查看日志"
-            "   节点出站方式在节点编辑的“更改出站方式”中设置，支持四种直连及 SS 上游；切回直连会保留 SS 缓存\n"
+            "   节点出站方式在节点编辑的“更改出站方式”中设置；SS 支持 SIP002 Base64／Base64URL 或百分号编码凭据，插件和未知参数不受支持；切回直连后选择 SS 并回车可复用缓存\n"
             # "   logerr                                          查看错误日志\n"
             "更改:"
             # "   dp, dynamicport [name] [start | auto] [end]     更改动态端口"

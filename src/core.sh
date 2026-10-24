@@ -1114,7 +1114,7 @@ edit_node_outbound_mode() {
         fi
         IFS= read -r is_outbound_ss_uri
         if [[ $is_outbound_ss_uri ]]; then
-            parse_proxy_uri ss "$is_outbound_ss_uri" || err "SS 链接格式或参数无效，请检查地址、端口、加密方式和插件参数."
+            parse_proxy_uri ss "$is_outbound_ss_uri" || err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"
             proxy_config=$outbound_proxy_config_json
             proxy_name=$outbound_proxy_name
         else
@@ -1201,7 +1201,7 @@ ss_password_for_method() {
 }
 
 ss_password_valid_for_method() {
-    local method=$1 password=$2 expected_len decoded_len key
+    local method=$1 password=$2 expected_len decoded_len key normalized padding mod
     local -a keys
     [[ $method != *2022* ]] && return 0
     [[ $password ]] || return 1
@@ -1209,20 +1209,55 @@ ss_password_valid_for_method() {
     [[ $password != :* && $password != *: && $password != *::* ]] || return 1
     IFS=: read -r -a keys <<<"$password"
     for key in "${keys[@]}"; do
-        decoded_len=$(printf '%s' "$key" | base64 -d 2>/dev/null | wc -c)
+        ss_base64_shape_valid "$key" || return 1
+        [[ $key != *[-_]* || ( $key != *+* && $key != */* ) ]] || return 1
+        normalized=${key%%=*}
+        padding=${key#"$normalized"}
+        normalized=${normalized//-/+}
+        normalized=${normalized//_/\/}
+        mod=$((${#normalized} % 4))
+        if [[ ! $padding ]]; then
+            [[ $mod != 1 ]] || return 1
+            [[ $mod == 2 ]] && padding='=='
+            [[ $mod == 3 ]] && padding='='
+        fi
+        decoded_len=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null | wc -c)
         [[ ${decoded_len// /} -eq $expected_len ]] || return 1
     done
 }
 
+ss_base64_shape_valid() {
+    local input=$1 raw padding mod
+    [[ $input =~ ^[A-Za-z0-9+/_-]+={0,2}$ ]] || return 1
+    raw=${input%%=*}
+    padding=${input#"$raw"}
+    mod=$((${#raw} % 4))
+    if [[ $padding ]]; then
+        [[ $((${#input} % 4)) == 0 ]] || return 1
+        [[ ($padding == '==' && $mod == 2) || ($padding == '=' && $mod == 3) ]]
+    else
+        [[ $mod != 1 ]]
+    fi
+}
+
 ss_base64_decode() {
-    local input=$1 mod
-    input=${input//-/+}
-    input=${input//_/\/}
-    mod=$((${#input} % 4))
-    [[ $mod == 1 ]] && return 1
-    [[ $mod == 2 ]] && input+="=="
-    [[ $mod == 3 ]] && input+="="
-    printf '%s' "$input" | base64 -d 2>/dev/null
+    local input=$1 raw padding normalized decoded canonical mod
+    ss_base64_shape_valid "$input" || return 1
+    [[ $input != *[-_]* || ( $input != *+* && $input != */* ) ]] || return 1
+    raw=${input%%=*}
+    padding=${input#"$raw"}
+    normalized=${raw//-/+}
+    normalized=${normalized//_/\/}
+    mod=$((${#normalized} % 4))
+    if [[ ! $padding ]]; then
+        [[ $mod != 1 ]] || return 1
+        [[ $mod == 2 ]] && padding='=='
+        [[ $mod == 3 ]] && padding='='
+    fi
+    decoded=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null) 2>/dev/null || return 1
+    canonical=$(printf '%s' "$decoded" | base64 | tr -d '=\n') || return 1
+    [[ $canonical == "$normalized" ]] || return 1
+    printf '%s' "$decoded"
 }
 
 ss_method_supported() {
@@ -1297,11 +1332,36 @@ parse_uri_authority() {
 }
 
 parse_proxy_uri() {
-    local expected=$1 uri=$2 raw_name= raw_query= auth authority decoded_auth
-    local fragment_present=0 remark_name remarks_name plugin key
+    local expected=$1 uri=$2
+    outbound_proxy_parse_error=
+    if [[ $expected != ss || $uri != ss://* ]]; then
+        outbound_proxy_parse_error="仅支持单条 ss:// Shadowsocks 分享链接"
+        return 1
+    fi
+    parse_ss_uri "$uri"
+}
+
+parse_ss_uri() {
+    local uri=$1 raw_name= raw_query= auth authority decoded_auth
+    local fragment_present=0 fragment_name remark_name remarks_name remark_present remarks_present plugin key
+    outbound_proxy_parse_error=
+    outbound_proxy_json=
+    outbound_proxy_config_json=
+    outbound_proxy_name=
+    is_outbound_ss_name=
+    is_outbound_ss_server=
+    is_outbound_ss_port=
+    is_outbound_ss_method=
+    is_outbound_ss_password=
     uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
-    [[ ! $uri =~ [[:cntrl:]] ]] || return 1
-    [[ $expected == ss && $uri == ss://* ]] || return 1
+    if [[ $uri =~ [[:cntrl:]] ]]; then
+        outbound_proxy_parse_error="SS 分享链接含控制字符"
+        return 1
+    fi
+    if [[ $uri != ss://* ]]; then
+        outbound_proxy_parse_error="仅支持单条 ss:// Shadowsocks 分享链接"
+        return 1
+    fi
     uri=${uri#ss://}
     if [[ $uri == *#* ]]; then
         fragment_present=1
@@ -1311,49 +1371,94 @@ parse_proxy_uri() {
     if [[ $uri == *\?* ]]; then
         raw_query=${uri#*\?}
         uri=${uri%%\?*}
-        parse_uri_query "$raw_query" || return 1
+        if ! parse_uri_query "$raw_query"; then
+            outbound_proxy_parse_error="SS 查询参数格式、重复项或百分号编码无效"
+            return 1
+        fi
     else
         uri_query_json='{}'
     fi
-    [[ $uri == *@* ]] || return 1
+    if [[ $uri != *@* ]]; then
+        outbound_proxy_parse_error="SS 分享链接缺少凭据或服务器地址"
+        return 1
+    fi
     auth=${uri%@*}
     authority=${uri#*@}
-    [[ $auth && $auth != *@* && $authority != *@* ]] || return 1
-    [[ $authority == */ ]] && authority=${authority%/}
-    [[ $authority != */* ]] || return 1
-    parse_uri_authority "$authority" || return 1
-
-    decoded_auth=$(url_percent_decode "$auth") || return 1
-    if [[ $decoded_auth != *:* ]]; then
-        decoded_auth=$(ss_base64_decode "$decoded_auth") || return 1
+    if [[ ! $auth || $auth == *@* || $authority == *@* ]]; then
+        outbound_proxy_parse_error="SS 分享链接凭据或服务器地址格式无效"
+        return 1
     fi
-    [[ $decoded_auth == *:* ]] || return 1
+    [[ $authority == */ ]] && authority=${authority%/}
+    if [[ $authority == */* ]] || ! parse_uri_authority "$authority"; then
+        outbound_proxy_parse_error="SS 服务器地址或端口无效"
+        return 1
+    fi
+
+    if ! decoded_auth=$(url_percent_decode "$auth"); then
+        outbound_proxy_parse_error="SS 凭据含无效百分号编码或控制字符"
+        return 1
+    fi
+    if [[ $decoded_auth != *:* ]]; then
+        if ! decoded_auth=$(ss_base64_decode "$decoded_auth" 2>/dev/null) 2>/dev/null; then
+            outbound_proxy_parse_error="SS 凭据 Base64 编码无效"
+            return 1
+        fi
+    fi
+    if [[ $decoded_auth != *:* ]]; then
+        outbound_proxy_parse_error="SS 凭据必须包含加密方式和密码"
+        return 1
+    fi
     is_outbound_ss_method=${decoded_auth%%:*}
     is_outbound_ss_password=${decoded_auth#*:}
     is_outbound_ss_server=$uri_server
     is_outbound_ss_port=$uri_port_number
-    ss_method_supported "$is_outbound_ss_method" || return 1
-    [[ $is_outbound_ss_password && ! $decoded_auth =~ [[:cntrl:]] ]] || return 1
-    ss_password_valid_for_method "$is_outbound_ss_method" "$is_outbound_ss_password" || return 1
+    if ! ss_method_supported "$is_outbound_ss_method"; then
+        outbound_proxy_parse_error="SS 加密方式不受支持"
+        return 1
+    fi
+    if [[ ! $is_outbound_ss_password || $decoded_auth =~ [[:cntrl:]] ]]; then
+        outbound_proxy_parse_error="SS 密码为空或含控制字符"
+        return 1
+    fi
+    if ! ss_password_valid_for_method "$is_outbound_ss_method" "$is_outbound_ss_password"; then
+        outbound_proxy_parse_error="SS2022 密钥 Base64 格式或长度无效"
+        return 1
+    fi
 
     while IFS= read -r key; do
         case $key in
         remark | remarks | plugin) ;;
-        *) return 1 ;;
+        *)
+            outbound_proxy_parse_error="SS 分享链接包含不支持的参数: $key"
+            return 1
+            ;;
         esac
     done < <(jq -r 'keys[]' <<<"$uri_query_json")
     plugin=$(jq -r '.plugin // empty' <<<"$uri_query_json")
-    [[ ! $plugin ]] || return 1
+    if [[ $plugin ]]; then
+        outbound_proxy_parse_error="SS 插件暂不支持 (plugin)"
+        return 1
+    fi
     remarks_name=$(jq -r '.remarks // empty' <<<"$uri_query_json")
     remark_name=$(jq -r '.remark // empty' <<<"$uri_query_json")
-    [[ ! $remarks_name || ! $remark_name || $remarks_name == "$remark_name" ]] || return 1
-    is_outbound_ss_name=
+    remarks_present=$(jq -r 'has("remarks")' <<<"$uri_query_json")
+    remark_present=$(jq -r 'has("remark")' <<<"$uri_query_json")
+    if [[ $remarks_present == true && $remark_present == true && $remarks_name != "$remark_name" ]]; then
+        outbound_proxy_parse_error="remark 和 remarks 参数值冲突"
+        return 1
+    fi
     if [[ $fragment_present == 1 ]]; then
-        is_outbound_ss_name=$(url_percent_decode "$raw_name") || return 1
-    elif [[ $remarks_name ]]; then
+        if ! fragment_name=$(url_percent_decode "$raw_name"); then
+            outbound_proxy_parse_error="SS 分享名称含无效百分号编码或控制字符"
+            return 1
+        fi
+        is_outbound_ss_name=$fragment_name
+    elif [[ $remarks_present == true ]]; then
         is_outbound_ss_name=$remarks_name
-    else
+    elif [[ $remark_present == true ]]; then
         is_outbound_ss_name=$remark_name
+    else
+        is_outbound_ss_name=
     fi
     outbound_proxy_name=$is_outbound_ss_name
     outbound_proxy_config_json=$(jq -cn \
