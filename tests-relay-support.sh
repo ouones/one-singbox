@@ -242,6 +242,28 @@ menu_out=$(
 [[ $menu_out == *"中转列表"* ]] || fail "relay_menu option 2 should output relay list"
 [[ $menu_out != *"请输入要查看的中转本地端口"* ]] || fail "relay_menu option 2 should not prompt for local port"
 
+# 13.2. Interactive deletion must accept a relay port that is actively listening
+TEST_ACTIVE_PORT=10001
+restart_count_before=$(grep -c "restart" "$manage_log" || true)
+delete_out=$(printf "3\n0\n65536\ninvalid\n10001\n" | (
+    show_list() { :; }
+    read() { builtin read "$@" || exit 99; }
+    main relay || exit 1
+    [[ $(is_test port_used 10001) ]] || fail "relay delete must not disable port conflict checks for later operations"
+    if (main relay add 10001 203.0.113.10 20000) >/dev/null 2>&1; then
+        fail "active port conflict should still prevent relay add after deletion"
+    fi
+) 2>&1)
+delete_status=$?
+[[ $delete_out != *"无法使用 (10001) 端口"* ]] || fail "interactive relay delete must accept its active port: $delete_out"
+[[ $delete_status == 0 ]] || fail "interactive relay delete should succeed: $delete_out"
+[[ $delete_out == *"请输入正确的端口"* ]] || fail "interactive relay delete must still validate port format"
+[[ ! -f "$is_conf_dir/relay-10001.json" ]] || fail "interactive relay delete should remove relay-10001.json"
+[[ -f "$is_conf_dir/relay-10003.json" ]] || fail "interactive relay delete must preserve other relays"
+restart_count_after=$(grep -c "restart" "$manage_log" || true)
+(( restart_count_after > restart_count_before )) || fail "interactive relay delete should restart the service"
+unset TEST_ACTIVE_PORT
+
 
 CASE
 }

@@ -2695,6 +2695,8 @@ relay_delete() {
     local local_port=$1 relay_file backup_file
     if [[ ! $local_port ]]; then
         relay_list
+        # Existing relays may be listening; only validate the port format here.
+        local is_cant_test_port=1
         ask string local_port "请输入要删除的中转本地端口:"
     fi
     local_port=${local_port#relay-}
