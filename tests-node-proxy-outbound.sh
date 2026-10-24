@@ -156,6 +156,72 @@ parser-ss2022)
     if parse_proxy_uri ss "ss://${invalid_auth}@127.0.0.1:8388#InvalidKey"; then
         fail "SS2022 key with invalid trailing Base64 must be rejected"
     fi
+    ss_uri="ss://${valid_auth}@127.0.0.1:8388#TwoKeys"
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* ]] || fail "SS2022 multi-key link should apply through the menu: $change_output"
+    jq -e --arg password "$multi_password" '.outbound_proxy.config.method == "2022-blake3-aes-128-gcm" and .outbound_proxy.config.password == $password' "$meta_file" >/dev/null || fail "SS2022 multi-key password should be stored without truncation"
+    jq -e --arg password "$multi_password" '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .method == "2022-blake3-aes-128-gcm" and .password == $password' "$is_config_json" >/dev/null || fail "SS2022 multi-key password should reach the runtime outbound"
+    [[ $change_output != *"$multi_password"* && $change_output != *"ss://"* ]] || fail "SS2022 link credentials must not be echoed"
+    exit 0
+    ;;
+ss-import-encoding)
+    auth=$(printf '%s' 'aes-128-gcm:💩' | base64 | tr '+/' '-_' | tr -d '=\n')
+    ss_uri="ss://${auth}@node.example:8388/#中文+Name%20one"
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* && $change_output == *"SS 出站 (中文+Name one)"* ]] || fail "Base64URL credentials and an encoded display name should import: $change_output"
+    jq -e '.outbound_proxy.name == "中文+Name one" and .outbound_proxy.config.server == "node.example" and .outbound_proxy.config.server_port == 8388 and .outbound_proxy.config.password == "💩"' "$meta_file" >/dev/null || fail "Base64URL credentials should preserve the decoded SS fields"
+    jq -e '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .server == "node.example" and .server_port == 8388 and .password == "💩"' "$is_config_json" >/dev/null || fail "Base64URL credentials should reach the runtime outbound"
+    ss_uri='ss://aes-256-gcm:p%3Aass%2B%2525%26%3D@127.0.0.1:443/?plugin=&remarks=R%2B%20%26%3DName'
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* && $change_output == *"SS 出站 (R+ &=Name)"* ]] || fail "percent-encoded plaintext credentials and remarks should import: $change_output"
+    jq -e '.outbound_proxy.name == "R+ &=Name" and .outbound_proxy.config.server == "127.0.0.1" and .outbound_proxy.config.server_port == 443 and .outbound_proxy.config.password == "p:ass+%25&="' "$meta_file" >/dev/null || fail "plaintext credentials should split at the first colon and decode exactly once"
+    jq -e '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .password == "p:ass+%25&="' "$is_config_json" >/dev/null || fail "plaintext credentials should be saved to runtime JSON"
+    [[ $change_output != *"p:ass"* && $change_output != *"ss://"* ]] || fail "SS credentials must not be echoed"
+    ss_uri='ss://aes-128-gcm:ipv6-secret@[2001:db8::1]:8388/'
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* && $change_output == *"SS 出站 ([2001:db8::1]:8388)"* ]] || fail "unnamed IPv6 SS should display a bracketed endpoint: $change_output"
+    [[ $change_output != *"ipv6-secret"* && $change_output != *"ss://"* ]] || fail "IPv6 SS credentials must not be echoed"
+    exit 0
+    ;;
+ss-import-invalid)
+    change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
+    [[ $change_output == *"配置已应用"* ]] || fail "setup SS application failed: $change_output"
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    nul_auth=$(printf 'aes-128-gcm:bad\000secret' | base64 | tr -d '\n')
+    invalid_auth=$(printf '%s' 'aes-128-gcm:bad-secret' | base64 | tr -d '\n')!
+    for bad_uri in \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?plugin=obfs-local' \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?unknown=1' \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:65536' \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?plugin=&plugin=' \
+        'ss://aes-128-gcm:bad%GGsecret@127.0.0.1:8388' \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?remarks=%00' \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?remark=&remarks=Name' \
+        "ss://${invalid_auth}@127.0.0.1:8388" \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388#Bad%' \
+        'ss://aes-128-gcm:bad%00secret@127.0.0.1:8388' \
+        'ss://aes-128-gcm:bad-secret@127.0.0.1:8388#Bad%00Name' \
+        "ss://${nul_auth}@127.0.0.1:8388" \
+        'vless://bad-secret@127.0.0.1:8388'; do
+        if change_output=$(printf '5\n%s\n' "$bad_uri" | change node-one.json outbound 2>&1); then
+            fail "invalid SS URI should be rejected: $bad_uri"
+        fi
+        [[ $change_output != *"bad-secret"* && $change_output != *"bad%00secret"* ]] || fail "invalid SS credentials must not be echoed"
+        cmp -s "$case_dir/meta.before" "$meta_file" || fail "invalid SS URI must preserve metadata"
+        cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid SS URI must preserve runtime config"
+    done
+    [[ $change_output == *"仅支持单条 ss://"* ]] || fail "wrong scheme should be explained: $change_output"
+    [[ $(restart_count) == 1 ]] || fail "invalid SS URIs must not restart the service"
+    change_output=$(printf '5\n%s\n' 'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?unknown=1' | change node-one.json outbound 2>&1 || true)
+    [[ $change_output == *"不支持的参数: unknown"* ]] || fail "unknown SS query parameter should be identified: $change_output"
+    change_output=$(printf '5\n%s\n' 'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?plugin=obfs-local' | change node-one.json outbound 2>&1 || true)
+    [[ $change_output == *"plugin"* && $change_output == *"暂不支持"* ]] || fail "unsupported SS plugin should be identified: $change_output"
+    change_output=$(printf '5\n%s\n' 'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?remark=&remarks=Name' | change node-one.json outbound 2>&1 || true)
+    [[ $change_output == *"remark 和 remarks 参数值冲突"* ]] || fail "conflicting display aliases should be identified: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "SS parameter errors must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "SS parameter errors must preserve runtime config"
+    [[ $(restart_count) == 1 ]] || fail "SS parameter errors must not restart the service"
     exit 0
     ;;
 parser-ss-encoding)
@@ -165,6 +231,8 @@ parser-ss-encoding)
     jq -cn --arg name "$outbound_proxy_name" --argjson config "$outbound_proxy_config_json" '{outbound_mode:"SS 出站",outbound_proxy:{name:$name,config:$config}}' >"$meta_file"
     sync_runtime_node_outbound_modes || fail "IPv6 upstream should synchronize: $runtime_sync_error"
     jq -e '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .server == "2001:db8::1" and (has("domain_resolver") | not)' "$is_config_json" >/dev/null || fail "IPv6 upstream should be emitted without a domain resolver"
+    parse_ss_uri_for_outbound 'ss://aes-128-gcm:compatibility-secret@127.0.0.1:8388#LegacyWrapper' || fail "parse_ss_uri_for_outbound compatibility wrapper should keep working"
+    [[ $outbound_proxy_name == 'LegacyWrapper' && $(jq -r '.password' <<<"$outbound_proxy_config_json") == 'compatibility-secret' ]] || fail "legacy SS parser wrapper should return the same normalized result"
     if parse_proxy_uri ss 'ss://aes-128-gcm:secret@[1:2:3:4:5:6:7:8:9]:8388'; then
         fail "SS parser must reject IPv6 addresses with too many groups"
     fi
@@ -397,6 +465,8 @@ direct-switches)
     done
     change_output=$(printf '5\n\n' | change node-one.json outbound 2>&1)
     [[ $change_output == *"配置已应用"* ]] || fail "cached SS should be reusable after direct mode switches: $change_output"
+    jq -e '.outbound_mode == "SS 出站" and .outbound_proxy.config.password == "secret"' "$meta_file" >/dev/null || fail "reusing the cache should reactivate the same SS configuration"
+    jq -e '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .password == "secret"' "$is_config_json" >/dev/null || fail "reusing the cache should restore the SS runtime outbound"
     exit 0
     ;;
 compatibility-aliases)
@@ -490,10 +560,10 @@ CASE
 }
 
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 parser-ss-encoding reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 parser-ss-encoding reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"
