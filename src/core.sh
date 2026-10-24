@@ -1486,8 +1486,14 @@ ss_method_supported() {
 }
 
 url_percent_decode() {
-    local input=$1 output= prefix hex char code
-    [[ ! $input =~ [[:cntrl:]] ]] || return 1
+    local input=$1 allow_newlines=${2:-0} output= prefix hex char code control_check
+    if [[ $allow_newlines == 1 ]]; then
+        control_check=${input//$'\r'/}
+        control_check=${control_check//$'\n'/}
+        [[ ! $control_check =~ [[:cntrl:]] ]] || return 1
+    else
+        [[ ! $input =~ [[:cntrl:]] ]] || return 1
+    fi
     while [[ $input == *%* ]]; do
         prefix=${input%%\%*}
         output+=$prefix
@@ -1496,17 +1502,27 @@ url_percent_decode() {
         hex=${BASH_REMATCH[1]}
         input=${BASH_REMATCH[2]}
         code=$((16#$hex))
-        ((code > 0 && code >= 32 && code != 127)) || return 1
+        if [[ $allow_newlines == 1 && ( $code == 10 || $code == 13 ) ]]; then
+            :
+        else
+            ((code > 0 && code >= 32 && code != 127)) || return 1
+        fi
         printf -v char '%b' "\\x$hex"
         output+=$char
     done
     output+=$input
-    [[ ! $output =~ [[:cntrl:]] ]] || return 1
+    if [[ $allow_newlines == 1 ]]; then
+        control_check=${output//$'\r'/}
+        control_check=${control_check//$'\n'/}
+        [[ ! $control_check =~ [[:cntrl:]] ]] || return 1
+    else
+        [[ ! $output =~ [[:cntrl:]] ]] || return 1
+    fi
     printf '%s' "$output"
 }
 
 parse_uri_query() {
-    local query=$1 pair key raw_value value
+    local query=$1 allow_ech_pem=${2:-0} pair key raw_value value
     uri_query_json='{}'
     [[ $query ]] || return 0
     while :; do
@@ -1521,7 +1537,12 @@ parse_uri_query() {
         key=${pair%%=*}
         raw_value=${pair#*=}
         [[ $key && ! $key =~ [^A-Za-z0-9_-] ]] || return 1
-        value=$(url_percent_decode "$raw_value") || return 1
+        if [[ $allow_ech_pem == 1 && $key == ech ]]; then
+            value=$(url_percent_decode "$raw_value" 1 && printf '\001') || return 1
+            value=${value%$'\001'}
+        else
+            value=$(url_percent_decode "$raw_value") || return 1
+        fi
         [[ $(jq -r --arg key "$key" 'has($key)' <<<"$uri_query_json") != true ]] || return 1
         uri_query_json=$(jq -c --arg key "$key" --arg value "$value" '. + {($key):$value}' <<<"$uri_query_json") || return 1
         [[ $query ]] || break
@@ -1770,12 +1791,94 @@ vless_grpc_default_authority() {
     fi
 }
 
+normalize_vless_ech_config() {
+    local input=$1 normalized begin end body raw padding mod canonical encoded decoded_len
+    vless_ech_config=
+    [[ $input ]] || return 0
+    begin='-----BEGIN ECH CONFIGS-----'
+    end='-----END ECH CONFIGS-----'
+    if [[ $input == "$begin"* ]]; then
+        normalized=${input//$'\r\n'/$'\n'}
+        [[ $normalized != *$'\r'* ]] || return 1
+        [[ $normalized == "$begin"$'\n'* ]] || return 1
+        if [[ $normalized == *$'\n' ]]; then normalized=${normalized%$'\n'}; fi
+        [[ $normalized == "$begin"$'\n'*$'\n'"$end" ]] || return 1
+        body=${normalized#"$begin"$'\n'}
+        body=${body%$'\n'"$end"}
+        body=${body//$'\n'/}
+    else
+        [[ $input != *$'\r'* && $input != *$'\n'* ]] || return 1
+        body=$input
+    fi
+    [[ $body =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+    raw=${body%%=*}
+    padding=${body#"$raw"}
+    mod=$((${#raw} % 4))
+    if [[ $padding ]]; then
+        [[ $((${#body} % 4)) == 0 ]] || return 1
+        [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
+    else
+        [[ $mod != 1 ]] || return 1
+        [[ $mod == 2 ]] && padding='=='
+        [[ $mod == 3 ]] && padding='='
+    fi
+    canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
+    [[ $canonical == "$raw$padding" ]] || return 1
+    decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
+    [[ $decoded_len != 0 ]] || return 1
+    encoded=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | base64) || return 1
+    vless_ech_config="$begin"$'\n'"$encoded"$'\n'"$end"
+}
+
+normalize_vless_certificate_sha256() {
+    local input=$1 pin raw padding mod decoded_len canonical normalized
+    local -a pins=()
+    vless_certificate_sha256_json='[]'
+    [[ $input ]] || return 0
+    [[ $input != ,* && $input != *, && $input != *,,* ]] || return 1
+    IFS=, read -r -a pins <<<"$input"
+    for pin in "${pins[@]}"; do
+        if [[ $pin =~ ^[[:xdigit:]]{64}$ ]]; then
+            normalized=$(printf '%b' "${pin//??/\\x&}" | base64 -w 0) || return 1
+        else
+            [[ $pin =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+            raw=${pin%%=*}
+            padding=${pin#"$raw"}
+            mod=$((${#raw} % 4))
+            if [[ $padding ]]; then
+                [[ $((${#pin} % 4)) == 0 ]] || return 1
+                [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
+            else
+                [[ $mod != 1 ]] || return 1
+                [[ $mod == 2 ]] && padding='=='
+                [[ $mod == 3 ]] && padding='='
+            fi
+            canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
+            [[ $canonical == "$raw$padding" ]] || return 1
+            decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
+            [[ $decoded_len == 32 ]] || return 1
+            normalized=$canonical
+        fi
+        vless_certificate_sha256_json=$(jq -cn --argjson current "$vless_certificate_sha256_json" --arg value "$normalized" '$current + [$value]') || return 1
+    done
+}
+
+vless_core_supports_certificate_sha256() {
+    local version=${is_core_ver:-} major minor
+    [[ $version =~ ([0-9]+)\.([0-9]+)\.[0-9]+ ]] || return 0
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    ((major > 1 || (major == 1 && minor >= 15)))
+}
+
 parse_vless_uri() {
     local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
     local fragment_present=0 remark_name key encryption transport transport_original transport_type security flow
     local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
     local public_key public_key_present short_id short_id_present insecure=false insecure_present
     local packet_encoding packet_encoding_present utls_enabled=false
+    local ech ech_present ech_config= ech_enabled=0 pcs pcs_enabled=0 vcn spx
+    local vless_certificate_sha256_json='[]'
     local transport_config_json='{}' path path_present host host_present host_json
     local header_type header_type_present quic_security quic_security_present quic_key quic_key_present
     local canonical_public_key public_key_length ed eh mode grpc_authority
@@ -1788,7 +1891,7 @@ parse_vless_uri() {
     outbound_proxy_config_json=
     uri_query_json='{}'
     uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
-    [[ ! $uri =~ [[:cntrl:]] && $uri == vless://* ]] || return 1
+    [[ $uri == vless://* ]] || return 1
     uri=${uri#vless://}
     if [[ $uri == *#* ]]; then
         fragment_present=1
@@ -1802,7 +1905,7 @@ parse_vless_uri() {
     if [[ $uri == *\?* ]]; then
         raw_query=${uri#*\?}
         uri=${uri%%\?*}
-        parse_uri_query "$raw_query" || {
+        parse_uri_query "$raw_query" 1 || {
             outbound_proxy_parse_error="VLESS 查询参数格式无效"
             return 1
         }
@@ -1844,7 +1947,7 @@ parse_vless_uri() {
 
     while IFS= read -r key; do
         case $key in
-        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | ed | eh | serviceName | service_name | mode | authority | headerType | quicSecurity | key) ;;
+        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | ed | eh | serviceName | service_name | mode | authority | headerType | quicSecurity | key | ech | pcs | vcn | spx | spiderX) ;;
         *)
             outbound_proxy_parse_error="VLESS 暂不支持连接参数: $key"
             return 1
@@ -2000,6 +2103,13 @@ parse_vless_uri() {
     uri_query_alias_value "$uri_query_json" packet_encoding packetEncoding packet_encoding || return 1
     packet_encoding=$uri_alias_value
     packet_encoding_present=$uri_alias_present
+    ech_present=$(jq -r 'has("ech")' <<<"$uri_query_json")
+    ech=$(jq -r '.ech // ""' <<<"$uri_query_json")
+    [[ $ech_present == true ]] && ech_enabled=1
+    pcs=$(jq -r '.pcs // ""' <<<"$uri_query_json")
+    vcn=$(jq -r '.vcn // ""' <<<"$uri_query_json")
+    uri_query_alias_value "$uri_query_json" raw spx spiderX || return 1
+    spx=$uri_alias_value
     uri_query_alias_value "$uri_query_json" raw remark remarks || return 1
     remark_name=$uri_alias_value
     path_present=$(jq -r 'has("path")' <<<"$uri_query_json")
@@ -2199,6 +2309,48 @@ parse_vless_uri() {
             return 1
         }
     fi
+    if [[ $ech_enabled == 1 ]]; then
+        [[ $security == tls ]] || {
+            outbound_proxy_parse_error="VLESS ECH 仅支持 TLS，不能与 security=$security 组合"
+            return 1
+        }
+        if [[ $fingerprint && $fingerprint != none ]]; then
+            outbound_proxy_parse_error="VLESS ECH 与 uTLS fingerprint 组合不兼容"
+            return 1
+        fi
+        if [[ $ech ]]; then
+            normalize_vless_ech_config "$ech" || {
+                outbound_proxy_parse_error="VLESS ECH 必须是 ECH CONFIGS PEM 或静态 ECHConfigList Base64"
+                return 1
+            }
+            ech_config=$vless_ech_config
+        fi
+    fi
+    if [[ $pcs ]]; then
+        [[ $security == tls ]] || {
+            outbound_proxy_parse_error="VLESS pcs 整张证书 SHA-256 固定需要 TLS"
+            return 1
+        }
+        vless_core_supports_certificate_sha256 || {
+            outbound_proxy_parse_error="VLESS pcs 整张证书 SHA-256 固定需要 sing-box 1.15.0+，当前版本 ${is_core_ver:-未知} 不支持"
+            return 1
+        }
+        normalize_vless_certificate_sha256 "$pcs" || {
+            outbound_proxy_parse_error="VLESS pcs 必须是逗号分隔的 32 字节整张证书 SHA-256 十六进制或 Base64 摘要"
+            return 1
+        }
+        pcs_enabled=1
+    fi
+    if [[ $vcn ]]; then
+        [[ $security == tls && $vcn == "$sni" ]] || {
+            outbound_proxy_parse_error="VLESS vcn 仅支持空值或与 TLS SNI 相同的证书校验名"
+            return 1
+        }
+    fi
+    if [[ $spx ]]; then
+        outbound_proxy_parse_error="VLESS spx/spiderX 非空值与 sing-box Reality 参数不等价，暂不支持"
+        return 1
+    fi
     [[ ! $packet_encoding || $packet_encoding == xudp || $packet_encoding == packetaddr ]] || {
         outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
         return 1
@@ -2241,12 +2393,18 @@ parse_vless_uri() {
         --argjson ws_early_data_header_present "$ws_early_data_header_present" \
         --arg grpc_service_name "$grpc_service_name" \
         --argjson grpc_service_name_present "$grpc_service_name_present" \
+        --arg ech_config "$ech_config" \
+        --argjson ech_enabled "$ech_enabled" \
+        --argjson certificate_sha256 "$vless_certificate_sha256_json" \
+        --argjson pcs_enabled "$pcs_enabled" \
         '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
         + if $security == "none" then {} else
             {tls:({enabled:true,server_name:$sni,insecure:$insecure}
                 + if $alpn_present == 1 then {alpn:$alpn} else {} end
                 + if $utls_enabled then {utls:{enabled:true,fingerprint:$fingerprint}} else {} end
-                + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end)}
+                + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end
+                + if $ech_enabled == 1 then {ech:({enabled:true} + if $ech_config == "" then {} else {config:$ech_config} end)} else {} end
+                + if $pcs_enabled == 1 then {certificate_sha256:$certificate_sha256} else {} end)}
           end
         + if $flow == "" then {} else {flow:$flow} end
         + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end
