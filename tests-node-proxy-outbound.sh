@@ -278,7 +278,6 @@ vless-menu)
     for bad_uri in \
         "vless://not-a-uuid@vless.example.com:443" \
         "vless://$vless_uuid@vless.example.com:443?encryption=aes-128-gcm" \
-        "vless://$vless_uuid@vless.example.com:443?type=ws&security=tls" \
         "vless://$vless_uuid@vless.example.com:443?security=none&sni=front.example.com" \
         "vless://$vless_uuid@vless.example.com:443?security=none&flow=xtls-rprx-vision" \
         "vless://$vless_uuid@vless.example.com:443?security=reality" \
@@ -312,7 +311,7 @@ vless-menu)
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
     restart_before=$(restart_count)
-    if change_output=$(printf '6\nvless://%s@vless.example.com:443?type=ws\n' "$vless_uuid" | change node-one.json outbound 2>&1); then
+    if change_output=$(printf '6\nvless://%s@vless.example.com:443?type=xhttp&security=tls\n' "$vless_uuid" | change node-one.json outbound 2>&1); then
         fail "invalid VLESS replacement should fail"
     fi
     [[ $change_output == *"VLESS"* && $change_output == *"type"* ]] || fail "invalid VLESS input should name the rejected field or capability: $change_output"
@@ -332,6 +331,109 @@ vless-menu)
     change_output=$(printf '6\n%s\n' "$vless_uri" | change node-one.json outbound 2>&1) || fail "SS to VLESS replacement should succeed: $change_output"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.config.type == "vless"' "$meta_file" >/dev/null || fail "VLESS replacement should replace the SS cache"
     change_output=$(printf '6\n\n' | change node-one.json mode 2>&1) || fail "non-Snell mode compatibility entry should reuse VLESS: $change_output"
+    exit 0
+    ;;
+vless-http-quic)
+    vless_uuid=550e8400-e29b-41d4-a716-446655440000
+    vless_pbk=$(printf '%s' '01234567890123456789012345678901' | base64 | tr '+/' '-_' | tr -d '=\n')
+    [[ ${TEST_VLESS_PUBLIC_KEY:-} ]] && vless_pbk=$TEST_VLESS_PUBLIC_KEY
+
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=http&path=%2Fapi%3Fv%3D1%26x%3D2&host=a.example.com%2Cb.example.com%2C%E4%BE%8B%E5%AD%90.com" || fail "HTTP transport should accept encoded path and host list"
+    jq -e '.transport == {type:"http",path:"/api?v=1&x=2",host:["a.example.com","b.example.com","例子.com"]} and (.tls | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "HTTP should split its native host list and decode the path once"
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=http&host=one.example.com" || fail "HTTP without path should use its native default path"
+    jq -e '.transport.path == "/" and .transport.host == ["one.example.com"]' <<<"$outbound_proxy_config_json" >/dev/null || fail "HTTP defaults and one-item host lists should remain explicit"
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=http&path=%2Fnative-lab&host=localhost" || fail "plain HTTP fixture should parse"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/http-none.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=h2&security=tls&path=%2Fnative-lab&host=localhost" || fail "h2 with TLS should map to native HTTP"
+    jq -e '.transport == {type:"http",path:"/native-lab",host:["localhost"]} and .tls.enabled == true' <<<"$outbound_proxy_config_json" >/dev/null || fail "h2 should normalize to native HTTP without losing TLS"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/h2-tls.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=http&security=tls&allowInsecure=1&path=%2Fnative-lab&host=localhost" || fail "HTTP TLS fixture should parse"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/http-tls.json"; fi
+    if parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=h2"; then
+        fail "h2 without TLS or Reality must be rejected"
+    fi
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=h2&security=reality&pbk=$vless_pbk&sni=localhost&path=%2Fnative-lab&host=localhost" || fail "h2 with Reality should use the native HTTP transport"
+    jq -e '.transport.type == "http" and .tls.reality.enabled == true' <<<"$outbound_proxy_config_json" >/dev/null || fail "h2 with Reality should preserve the security fields"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/h2-reality.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@http.example.com:443?type=http&security=reality&pbk=$vless_pbk&sni=localhost&path=%2Fnative-lab&host=localhost" || fail "HTTP with Reality should retain the supported security combination"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/http-reality.json"; fi
+
+    parse_proxy_uri vless "vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&security=tls&path=%2Fupgrade&host=upgrade.example.com" || fail "HTTPUpgrade with TLS should parse"
+    jq -e '.transport == {type:"httpupgrade",path:"/upgrade",host:"upgrade.example.com"} and .tls.enabled == true' <<<"$outbound_proxy_config_json" >/dev/null || fail "HTTPUpgrade should keep host as one native string"
+    parse_proxy_uri vless "vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&path=%2Fnative-lab&host=localhost" || fail "plain HTTPUpgrade fixture should parse"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/httpupgrade-none.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&security=tls&allowInsecure=1&path=%2Fnative-lab&host=localhost" || fail "HTTPUpgrade TLS fixture should parse"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/httpupgrade-tls.json"; fi
+    parse_proxy_uri vless "vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&host=localhost" || fail "HTTPUpgrade without path should use its native default"
+    jq -e '.transport.path == "/" and .transport.host == "localhost" and (.tls | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "HTTPUpgrade defaults should keep the host as one string"
+    if parse_proxy_uri vless "vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&host=one.example.com%2Ctwo.example.com"; then
+        fail "HTTPUpgrade must reject a host list instead of truncating it"
+    fi
+    parse_proxy_uri vless "vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&security=reality&pbk=$vless_pbk&sni=localhost&path=%2Fnative-lab&host=localhost" || fail "HTTPUpgrade with Reality should retain the supported security combination"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/httpupgrade-reality.json"; fi
+
+    parse_proxy_uri vless "vless://$vless_uuid@quic.example.com:443?type=quic&security=tls&allowInsecure=true&quicSecurity=none&key=" || fail "QUIC with TLS and no extra encryption should parse"
+    jq -e '.transport == {type:"quic"} and .tls.enabled == true and .tls.insecure == true and (.transport | has("key") | not)' <<<"$outbound_proxy_config_json" >/dev/null || fail "QUIC should omit unsupported extra-encryption fields"
+    if [[ ${TEST_VLESS_EXPORT_DIR:-} ]]; then printf '%s\n' "$outbound_proxy_config_json" >"$TEST_VLESS_EXPORT_DIR/quic-tls.json"; fi
+    for bad_uri in \
+        "vless://$vless_uuid@quic.example.com:443?type=quic" \
+        "vless://$vless_uuid@quic.example.com:443?type=quic&security=reality&pbk=$vless_pbk" \
+        "vless://$vless_uuid@quic.example.com:443?type=quic&security=tls&quicSecurity=chacha20-poly1305&key=secret" \
+        "vless://$vless_uuid@quic.example.com:443?type=quic&security=tls&key=secret" \
+        "vless://$vless_uuid@http.example.com:443?type=http&path=" \
+        "vless://$vless_uuid@http.example.com:443?type=http&host=a.example.com%2C%2Cb.example.com" \
+        "vless://$vless_uuid@http.example.com:443?type=tcp&path=%2Fapi" \
+        "vless://$vless_uuid@http.example.com:443?type=tcp&host=front.example.com" \
+        "vless://$vless_uuid@http.example.com:443?type=tcp&headerType=http" \
+        "vless://$vless_uuid@http.example.com:443?type=http&security=tls&flow=xtls-rprx-vision" \
+        "vless://$vless_uuid@http.example.com:443?type=http&quicSecurity=none"; do
+        if parse_proxy_uri vless "$bad_uri"; then
+            fail "unsupported or invalid VLESS transport parameters should be rejected: $bad_uri"
+        fi
+    done
+    parse_proxy_uri vless "vless://$vless_uuid@tcp.example.com:443?type=tcp&headerType=none" || fail "TCP headerType=none should remain a valid no-camouflage default"
+
+    http_menu_uri="vless://$vless_uuid@http.example.com:443?type=h2&security=tls&allowInsecure=1&path=%2Fmenu&host=front.example.com#HTTP+Menu"
+    change_output=$(printf '6\n%s\n' "$http_menu_uri" | change node-one.json outbound 2>&1) || fail "HTTP/h2 menu import should apply: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"HTTP+Menu"* ]] || fail "HTTP/h2 menu success should display its name: $change_output"
+    jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.config.transport == {type:"http",path:"/menu",host:["front.example.com"]}' "$meta_file" >/dev/null || fail "HTTP/h2 normalized config should be cached"
+    jq -e '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .transport == {type:"http",path:"/menu",host:["front.example.com"]}' "$is_config_json" >/dev/null || fail "HTTP/h2 transport should reach the runtime outbound"
+    jq -e '.route.rules[0].outbound == "managed_node_vless_node-one_json"' "$is_config_json" >/dev/null || fail "HTTP/h2 should retain the node proxy route"
+
+    upgrade_menu_uri="vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&security=tls&allowInsecure=1&path=%2Fmenu&host=upgrade.example.com#HTTPUpgrade"
+    change_output=$(printf '6\n%s\n' "$upgrade_menu_uri" | change node-one.json outbound 2>&1) || fail "HTTPUpgrade menu import should apply: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"HTTPUpgrade"* ]] || fail "HTTPUpgrade menu success should display its name: $change_output"
+    jq -e '.outbound_proxy.config.transport == {type:"httpupgrade",path:"/menu",host:"upgrade.example.com"}' "$meta_file" >/dev/null || fail "HTTPUpgrade transport and single host should be cached"
+    jq -e '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .transport == {type:"httpupgrade",path:"/menu",host:"upgrade.example.com"}' "$is_config_json" >/dev/null || fail "HTTPUpgrade transport should reach the runtime outbound"
+    jq -e '.route.rules[0].outbound == "managed_node_vless_node-one_json"' "$is_config_json" >/dev/null || fail "HTTPUpgrade should retain the node proxy route"
+
+    quic_menu_uri="vless://$vless_uuid@quic.example.com:443?type=quic&security=tls&allowInsecure=1&quicSecurity=none#QUIC"
+    change_output=$(printf '6\n%s\n' "$quic_menu_uri" | change node-one.json outbound 2>&1) || fail "QUIC TLS menu import should apply: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"QUIC"* ]] || fail "QUIC menu success should display its name: $change_output"
+    jq -e '.outbound_proxy.config.transport == {type:"quic"} and .outbound_proxy.config.tls.enabled == true' "$meta_file" >/dev/null || fail "QUIC TLS transport should be cached"
+    jq -e '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .transport == {type:"quic"} and .tls.enabled == true' "$is_config_json" >/dev/null || fail "QUIC TLS transport should reach the runtime outbound"
+    jq -e '.route.rules[0].outbound == "managed_node_vless_node-one_json"' "$is_config_json" >/dev/null || fail "QUIC should retain the node proxy route"
+    [[ $(restart_count) == 3 ]] || fail "each valid transport import should restart the service exactly once"
+
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    export TEST_REJECT_CHECK=1
+    if change_output=$(printf '6\n%s\n' "$quic_menu_uri" | change node-one.json outbound 2>&1); then
+        fail "a QUIC candidate rejected by the complete config check must not apply"
+    fi
+    unset TEST_REJECT_CHECK
+    [[ $change_output == *"完整配置校验失败"* ]] || fail "QUIC candidate check failure should be reported by complete config validation: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "QUIC candidate check failure must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "QUIC candidate check failure must preserve runtime config"
+    [[ $(restart_count) == 3 ]] || fail "QUIC candidate check failure must not restart the service"
+
+    if change_output=$(printf '6\nvless://%s@quic.example.com:443?type=quic&security=reality&pbk=%s\n' "$vless_uuid" "$vless_pbk" | change node-one.json outbound 2>&1); then
+        fail "QUIC Reality replacement must be rejected"
+    fi
+    [[ $change_output == *"QUIC"* && $change_output == *"Reality"* ]] || fail "QUIC Reality rejection should identify the incompatible security: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "invalid QUIC replacement must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid QUIC replacement must preserve runtime config"
+    [[ $(restart_count) == 3 ]] || fail "invalid transport combinations must not restart the service"
     exit 0
     ;;
 reject-check)
@@ -650,10 +752,10 @@ CASE
 }
 
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"
