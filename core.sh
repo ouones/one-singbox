@@ -1250,7 +1250,7 @@ apply_node_outbound_mode() {
     fi
     if ! "$is_core_bin" check -c "$candidate_config" -C "$is_conf_dir" >"$tmp_dir/check.log" 2>&1; then
         outbound_apply_error="完整配置校验失败，原配置未改变"
-        check_error=$(sed -n '/[^[:space:]]/{s/\\/\\\\/g;s/[[:cntrl:]]//g;p;q;}' "$tmp_dir/check.log")
+        check_error=$(sed -n '/[^[:space:]]/{s/\\/\\\\/g;s/[[:cntrl:]]//g;p;}' "$tmp_dir/check.log")
         [[ ! $check_error ]] || outbound_apply_error+="：$check_error"
         rm -rf "$tmp_dir"
         return 1

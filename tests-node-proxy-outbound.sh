@@ -284,7 +284,7 @@ vless-check-diagnostics)
     cmp -s "$case_dir/config.before" "$is_config_json" || fail "missing gRPC support must preserve runtime config"
 
     quic_uri='vless://550e8400-e29b-41d4-a716-446655440000@quic.example.com:443?type=quic&security=tls'
-    export TEST_REJECT_CHECK=1 TEST_CHECK_ERROR='missing QUIC transport capability'
+    export TEST_REJECT_CHECK=1 TEST_CHECK_ERROR=$'warning: experimental QUIC support\nmissing QUIC transport capability'
     if change_output=$(printf '6\n%s\n' "$quic_uri" | change node-one.json outbound 2>&1); then
         fail "a core without QUIC support should reject the candidate"
     fi
