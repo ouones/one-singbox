@@ -8,6 +8,7 @@ is_dns_list=(
     none
 )
 dns_set() {
+    local candidate_config
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
     fi
@@ -50,17 +51,22 @@ dns_set() {
         fi
     fi
     is_dns_use_bak=$is_dns_use
+    candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || err "无法创建 DNS 候选配置"
     if [[ $is_dns_use == "none" ]]; then
-        cat <<<$(jq '.|.dns={}|del(.route.default_domain_resolver)' $is_config_json) >$is_config_json
+        jq '.|.dns={}|del(.route.default_domain_resolver)' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
     else
         if [[ $is_dns_new ]]; then
             dns_set_server $is_dns_use
-            cat <<<$(jq '.|.dns.servers=[{tag:"dns",type:"'$is_dns_type'",server:"'$is_dns_use'",domain_resolver:"local"},{tag:"local",type:"local"}]|.route.default_domain_resolver="dns"' $is_config_json) >$is_config_json
+            jq '.|.dns.servers=[{tag:"dns",type:"'$is_dns_type'",server:"'$is_dns_use'",domain_resolver:"local"},{tag:"local",type:"local"}]|.route.default_domain_resolver="dns"' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
         else
-            cat <<<$(jq '.dns.servers=[{address:"'$is_dns_use'",address_resolver:"local"},{tag:"local",address:"local"}]' $is_config_json) >$is_config_json
+            jq '.dns.servers=[{address:"'$is_dns_use'",address_resolver:"local"},{tag:"local",address:"local"}]' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
         fi
     fi
-    sync_runtime_node_outbound_modes
+    if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
+        rm -f "$candidate_config"
+        err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+    fi
+    rm -f "$candidate_config"
     manage restart &
     msg "\n已更新 DNS 为: $(_green $is_dns_use_bak)\n"
 }

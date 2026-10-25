@@ -25,6 +25,7 @@ show_help() {
             "   url [name]                                      URL 信息"
             "   Snell 提供 sing-box URI 与 Surge 配置双格式导出 (不支持二维码)"
             "   log                                             查看日志"
+            "   节点出站方式在节点编辑的“更改出站方式”中设置，支持四种直连、SS SIP002、VLESS TCP/raw、WebSocket、gRPC、HTTP/h2、HTTPUpgrade 与 QUIC；WebSocket、gRPC、HTTP/HTTPUpgrade 支持 none/TLS/Reality；WebSocket 映射 path、Host、early data，gRPC 映射 serviceName 且仅支持默认/gun mode，非空 authority 仅接受可识别 v1.14.0 构建的默认值；h2 需要 TLS/Reality，QUIC 仅支持无额外加密的 sing-box 原生 TLS；HTTP host 为列表，HTTPUpgrade host 为单值；TLS 支持 ECH PEM/Base64 和空值 DNS 获取，整张证书 SHA-256 `pcs` 需 sing-box 1.15.0+（1.14.0 拒绝），`vcn` 仅可为空或等于 SNI；Vision 只支持 TCP/raw；拒绝非空 `spx`/`spiderX`、XHTTP、mKCP、VLESS Encryption、`mux`/`smux`、QUIC Reality、跨内核额外 QUIC 加密、TCP headerType=http 伪装、插件和未知连接参数；切回直连保留代理缓存，同类代理回车可复用；改名保留关联，端口或协议变更迁移关联，删除节点清除关联；应用失败会恢复相关配置并尝试恢复服务；“配置已应用”不代表上游连通性已检测\n"
             # "   logerr                                          查看错误日志\n"
             "更改:"
             # "   dp, dynamicport [name] [start | auto] [end]     更改动态端口"

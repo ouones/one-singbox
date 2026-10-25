@@ -182,6 +182,7 @@ outbound_mode_list=(
     "仅V4"
     "仅V6"
     "SS 出站"
+    "VLESS 出站"
 )
 servername_list=(
     www.amazon.com
@@ -371,7 +372,7 @@ get_pbk() {
 show_list() {
     PS3=''
     COLUMNS=1
-    select i in "$@"; do echo; done &
+    select i in "$@"; do echo; done </dev/null &
     wait
     # i=0
     # for v in "$@"; do
@@ -426,6 +427,7 @@ is_port_used() {
 
 # ask input a string or pick a option for list.
 ask() {
+    local outbound_display=
     case $1 in
     set_ss_method)
         is_tmp_list=(${ss_method_list[@]})
@@ -456,7 +458,7 @@ ask() {
         ;;
     set_outbound_mode)
         is_tmp_list=("${outbound_mode_list[@]}")
-        is_opt_msg="\n当前出站方式: $(current_outbound_mode_display "$is_config_file")\n\n请选择出站方式:\n"
+        outbound_display=$(current_outbound_mode_display "$is_config_file")
         is_ask_set=is_outbound_mode
         ;;
     string)
@@ -480,7 +482,11 @@ ask() {
         is_emtpy_exit=1
         ;;
     esac
-    msg $is_opt_msg
+    if [[ $is_ask_set == is_outbound_mode ]]; then
+        printf '\n当前出站方式: %s\n\n请选择出站方式:\n' "$outbound_display"
+    else
+        msg $is_opt_msg
+    fi
     [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请选择 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
     [[ $is_tmp_list ]] && show_list "${is_tmp_list[@]}"
     while :; do
@@ -595,30 +601,59 @@ outbound_mode_to_direct_tag() {
 }
 
 current_outbound_mode_display() {
-    local cfg=$1 mode name server port
+    local cfg=$1 mode name server port tls_enabled insecure tls_status=
     [[ $cfg ]] || {
-        echo 未设置
+        printf '%s\n' 未设置
         return
     }
     mode=$(meta_get "$cfg" '.outbound_mode')
     [[ $mode ]] || {
-        echo 未设置
+        printf '%s\n' 未设置
         return
     }
-    if [[ $mode == 'SS 出站' ]]; then
-        name=$(meta_get "$cfg" '.outbound_ss_name')
+    if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
+        if [[ $mode == 'VLESS 出站' ]]; then
+            tls_enabled=$(meta_get "$cfg" '.outbound_proxy.config.tls.enabled')
+            if [[ $tls_enabled == true ]]; then
+                insecure=$(meta_get "$cfg" '.outbound_proxy.config.tls.insecure')
+                if [[ $insecure == true ]]; then
+                    tls_status='，跳过 TLS 证书校验'
+                else
+                    tls_status='，校验 TLS 证书'
+                fi
+            fi
+        fi
+        name=$(meta_get "$cfg" '.outbound_proxy.name')
         [[ $name ]] && {
-            echo "$mode ($name)"
+            printf '%s\n' "$mode ($name)$tls_status"
             return
         }
-        server=$(meta_get "$cfg" '.outbound_ss_server')
-        port=$(meta_get "$cfg" '.outbound_ss_port')
+        if [[ $mode == 'SS 出站' ]]; then
+            name=$(meta_get "$cfg" '.outbound_ss_name')
+            [[ $name ]] && {
+                printf '%s\n' "$mode ($name)"
+                return
+            }
+        fi
+        server=$(meta_get "$cfg" '.outbound_proxy.config.server')
+        port=$(meta_get "$cfg" '.outbound_proxy.config.server_port')
+        if [[ $mode == 'SS 出站' ]]; then
+            [[ ! $server ]] && server=$(meta_get "$cfg" '.outbound_ss_server')
+            [[ ! $port ]] && port=$(meta_get "$cfg" '.outbound_ss_port')
+        fi
+        [[ $server == *:* && $server != \[*\] ]] && server="[$server]"
         [[ $server && $port ]] && {
-            echo "$mode ($server:$port)"
+            printf '%s\n' "$mode ($server:$port)$tls_status"
             return
         }
     fi
-    echo "$mode"
+    printf '%s\n' "$mode${tls_status:-}"
+}
+
+msg_outbound_mode_display() {
+    local prefix=$1 cfg=$2 display
+    display=$(current_outbound_mode_display "$cfg")
+    printf '\n%s %b%s%b\n' "$prefix" "$green" "$display" "$none"
 }
 
 runtime_node_ss_outbound_tag() {
@@ -628,55 +663,137 @@ runtime_node_ss_outbound_tag() {
 }
 
 runtime_domain_resolver_tag() {
-    jq -r 'if (.route.default_domain_resolver | type) == "string" then .route.default_domain_resolver elif (.route.default_domain_resolver | type) == "object" then (.route.default_domain_resolver.server // "local") else "local" end' "$is_config_json" 2>/dev/null
+    local config_file=${1:-$is_config_json}
+    jq -r 'if (.route.default_domain_resolver | type) == "string" then .route.default_domain_resolver elif (.route.default_domain_resolver | type) == "object" then (.route.default_domain_resolver.server // "local") else "local" end' "$config_file" 2>/dev/null
 }
 
-sync_runtime_node_outbound_modes() {
-    local resolver rules ss_outbounds tmp file cfg mode outbound server port method password
-    [[ -f "$is_config_json" ]] || return
+runtime_node_vless_outbound_tag() {
+    local cfg=$1 safe
+    safe=${cfg//[^[:alnum:]_-]/_}
+    echo "managed_node_vless_$safe"
+}
 
-    resolver=$(runtime_domain_resolver_tag)
+render_runtime_node_outbound_modes() {
+    local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
+    local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
+    local -A used_proxy_tags=()
+    runtime_sync_error=
+    [[ -f $source_config && $output ]] || {
+        runtime_sync_error="公共配置文件不存在"
+        return 1
+    }
+    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.route // {}) | type == "object") and ((.route.rules // []) | type == "array")' "$source_config" >/dev/null 2>&1 || {
+        runtime_sync_error="公共配置格式无效"
+        return 1
+    }
+    resolver=$(runtime_domain_resolver_tag "$source_config") || {
+        runtime_sync_error="无法读取上游域名解析器"
+        return 1
+    }
     [[ $resolver ]] || resolver=local
-    rules='[]'
-    ss_outbounds='[]'
-    shopt -s nullglob
-    for file in "$is_conf_dir"/*.json; do
+    direct_rules='[]'
+    proxy_rules='[]'
+    proxy_outbounds='[]'
+    for file in "$config_dir"/*.json; do
+        [[ -f $file ]] || continue
         cfg=${file##*/}
         [[ $cfg =~ dynamic-port-.*-link ]] && continue
-        mode=$(meta_get "$cfg" '.outbound_mode')
+        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
+        [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
+        [[ -f $meta_path ]] || continue
+        jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
+            runtime_sync_error="节点元数据格式无效: $cfg"
+            return 1
+        }
+        mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
+            runtime_sync_error="无法读取节点出站方式: $cfg"
+            return 1
+        }
         [[ $mode ]] || continue
         outbound=$(outbound_mode_to_direct_tag "$mode")
         if [[ $outbound ]]; then
-            rules=$(jq --arg inbound "$cfg" --arg outbound "$outbound" '. += [{inbound:[$inbound],action:"route",outbound:$outbound}]' <<<"$rules")
+            tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
+                runtime_sync_error="无法读取节点入站 tag: $cfg"
+                return 1
+            }
+            [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
+                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+                return 1
+            }
+            direct_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$direct_rules") || {
+                runtime_sync_error="生成直连路由失败: $cfg"
+                return 1
+            }
             continue
         fi
-        [[ $mode == 'SS 出站' ]] || continue
-        server=$(meta_get "$cfg" '.outbound_ss_server')
-        port=$(meta_get "$cfg" '.outbound_ss_port')
-        method=$(meta_get "$cfg" '.outbound_ss_method')
-        password=$(meta_get "$cfg" '.outbound_ss_password')
-        [[ $server && $port && $method && $password ]] || continue
-        ss_method_supported "$method" || continue
-        [[ $(is_test port "$port") ]] || continue
-        ss_password_valid_for_method "$method" "$password" || continue
-        outbound=$(runtime_node_ss_outbound_tag "$cfg")
-        ss_outbounds=$(jq --arg tag "$outbound" --arg server "$server" --argjson port "$port" --arg method "$method" --arg password "$password" '. += [{tag:$tag,type:"shadowsocks",server:$server,server_port:$port,method:$method,password:$password}]' <<<"$ss_outbounds")
-        rules=$(jq --arg inbound "$cfg" --arg outbound "$outbound" '. += [{inbound:[$inbound],action:"route",outbound:$outbound}]' <<<"$rules")
+        [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] || continue
+        outbound_proxy_from_metadata "$cfg" "$meta_path" || {
+            runtime_sync_error="节点代理配置无效: $cfg"
+            return 1
+        }
+        [[ $outbound_proxy_json ]] || {
+            runtime_sync_error="节点代理配置缺失: $cfg"
+            return 1
+        }
+        config_type=$(jq -r '.config.type' <<<"$outbound_proxy_json")
+        if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
+            tag=$(runtime_node_ss_outbound_tag "$cfg")
+        elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
+            tag=$(runtime_node_vless_outbound_tag "$cfg")
+        else
+            runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
+            return 1
+        fi
+        [[ ! ${used_proxy_tags[$tag]+exists} ]] || {
+            runtime_sync_error="受管出站 tag 冲突: $tag"
+            return 1
+        }
+        used_proxy_tags[$tag]=$cfg
+        tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
+            runtime_sync_error="无法读取节点入站 tag: $cfg"
+            return 1
+        }
+        [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
+            runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+            return 1
+        }
+        server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
+        if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
+            config=$(jq -c --arg tag "$tag" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
+                runtime_sync_error="生成代理出站失败: $cfg"
+                return 1
+            }
+        else
+            config=$(jq -c --arg tag "$tag" '.config + {tag:$tag}' <<<"$outbound_proxy_json") || {
+                runtime_sync_error="生成代理出站失败: $cfg"
+                return 1
+            }
+        fi
+        proxy_outbounds=$(jq -c --argjson config "$config" '. + [$config]' <<<"$proxy_outbounds") || {
+            runtime_sync_error="生成代理出站列表失败"
+            return 1
+        }
+        proxy_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$tag" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$proxy_rules") || {
+            runtime_sync_error="生成代理路由失败: $cfg"
+            return 1
+        }
     done
-    shopt -u nullglob
 
-    tmp="$is_config_json.tmp"
-    jq --arg resolver "$resolver" --argjson rules "$rules" --argjson ss_outbounds "$ss_outbounds" '
-        def managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
-        def managed_outbounds($r): [
+    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" '
+        def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
+        def is_managed_tag($tag):
+            ((direct_managed_tags | index($tag)) != null)
+            or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
+        def is_broad_direct_rule:
+            .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
+        def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
             {tag:"direct_v4_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv4"}},
             {tag:"direct_v4_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv4_only"}},
             {tag:"direct_v6_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv6_only"}}
         ];
-        def is_managed_ss_tag($tag): $tag | startswith("managed_node_ss_");
         .dns = (.dns // {})
-        | if (($rules | length) > 0 and $resolver == "local") then
+        | if (((($direct_rules | length) + ($proxy_rules | length)) > 0) and $resolver == "local") then
             .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end)
             | if any(.dns.servers[]?; .tag == "local") then . else .dns.servers += [{tag:"local",type:"local"}] end
           else . end
@@ -691,10 +808,565 @@ sync_runtime_node_outbound_modes() {
           elif (.route.default_domain_resolver | type) == "string" and ((.route.default_domain_resolver // "") | length) == 0 then
             del(.route.default_domain_resolver)
           else . end
-        | .outbounds = ((.outbounds // []) | map(select(((.tag // "") as $tag | (managed_tags | index($tag) | not) and (is_managed_ss_tag($tag) | not)))))
-        | if (($rules | length) > 0) then .outbounds += managed_outbounds($resolver) + $ss_outbounds else . end
-        | .route.rules = ((.route.rules // []) | map(select(((.outbound // "") as $outbound | (managed_tags | index($outbound) | not) and (is_managed_ss_tag($outbound) | not))))) + $rules
-    ' "$is_config_json" >"$tmp" && mv -f "$tmp" "$is_config_json"
+        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_tag($tag)) | not))))
+        | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
+        | .outbounds += $proxy_outbounds
+        | (.route.rules // [] | map(select((((.outbound // "") as $tag | is_managed_tag($tag)) | not)))) as $existing_rules
+        | .route.rules = (
+            if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
+            else
+                ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
+                | if $direct_fallback == null then
+                    $proxy_rules + $existing_rules + $direct_rules
+                  else
+                    $proxy_rules + $existing_rules[:$direct_fallback] + $direct_rules + $existing_rules[$direct_fallback:]
+                  end
+            end
+          )
+    ' "$source_config" >"$output" || {
+        rm -f "$output"
+        runtime_sync_error="运行时出站配置生成失败"
+        return 1
+    }
+    return 0
+}
+
+sync_runtime_node_outbound_modes() {
+    local source_config=${1:-$is_config_json} target_config=${2:-$is_config_json} config_dir=${3:-$is_conf_dir} validate=${4:-0} tmp
+    runtime_sync_error=
+    [[ -f $source_config ]] || return 0
+    tmp=$(mktemp "$target_config.tmp.XXXXXX") || {
+        runtime_sync_error="无法创建运行时配置临时文件"
+        return 1
+    }
+    if ! render_runtime_node_outbound_modes "$source_config" "$tmp" '' '' "$config_dir"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ $validate == 1 ]] && ! "$is_core_bin" check -c "$tmp" -C "$config_dir" &>/dev/null; then
+        rm -f "$tmp"
+        runtime_sync_error="完整运行时配置校验失败"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$target_config"; then
+        rm -f "$tmp"
+        runtime_sync_error="无法保存运行时配置: $target_config"
+        return 1
+    fi
+    return 0
+}
+
+manage_restart_confirmed() {
+    local pid
+    if [[ $is_systemd ]]; then
+        systemctl restart "$is_core" || return 1
+        sleep 2
+        systemctl is-active --quiet "$is_core" || return 1
+        pid=$(systemctl show -p MainPID --value "$is_core" 2>/dev/null) || return 1
+        [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+        return 0
+    fi
+    if [[ $is_openrc ]]; then
+        rc-service "$is_core" restart || return 1
+        sleep 2
+        rc-service "$is_core" status >/dev/null 2>&1 || return 1
+        return 0
+    fi
+    return 1
+}
+
+default_runtime_config() {
+    local log_path="/var/log/$is_core/access.log" ntp=
+    [[ $is_ntp_on ]] && ntp=1
+    jq -cn --arg log_path "$log_path" --arg ntp "$ntp" '
+        {log:{output:$log_path,level:"info",timestamp:true},dns:{},outbounds:[{tag:"direct",type:"direct"}]}
+        + (if $ntp == "1" then {ntp:{enabled:true,server:"time.apple.com"}} else {} end)
+    '
+}
+
+restore_outbound_apply_file() {
+    local backup=$1 target=$2 existed=$3 stage
+    if [[ $existed == 1 ]]; then
+        [[ -f $backup ]] || return 1
+        stage=$(mktemp "$target.restore.XXXXXX") || return 1
+        if ! cp -p "$backup" "$stage"; then
+            rm -f "$stage"
+            return 1
+        fi
+        if ! mv -f "$stage" "$target"; then
+            rm -f "$stage"
+            return 1
+        fi
+    else
+        rm -f "$target" || return 1
+    fi
+}
+
+restore_node_config_lifecycle() {
+    local tmp_dir=$1 operation=$2 old_cfg=$3 new_cfg=${4:-} old_meta_exists=$5 old_config_exists=$6
+    local old_node="$is_conf_dir/$old_cfg" old_meta new_node new_meta stage
+    local -a errors=()
+    old_meta=$(meta_file "$old_cfg")
+    if ! restore_outbound_apply_file "$tmp_dir/original-old-node" "$old_node" 1; then errors+=("$old_node"); fi
+    if [[ $operation == replace && $old_cfg != "$new_cfg" ]]; then
+        new_node="$is_conf_dir/$new_cfg"
+        new_meta=$(meta_file "$new_cfg")
+        if ! restore_outbound_apply_file "$tmp_dir/original-new-node" "$new_node" 0; then errors+=("$new_node"); fi
+        rm -f "$new_meta" || errors+=("$new_meta")
+    fi
+    if [[ $old_meta_exists == 1 ]]; then
+        stage=$(mktemp "$old_meta.restore.XXXXXX") && cp -p "$tmp_dir/original-old-meta" "$stage" && mv -f "$stage" "$old_meta" || { rm -f "${stage:-}"; errors+=("$old_meta"); }
+    else
+        rm -f "$old_meta" || errors+=("$old_meta")
+    fi
+    if ! restore_outbound_apply_file "$tmp_dir/original-config" "$is_config_json" "$old_config_exists"; then errors+=("$is_config_json"); fi
+    node_lifecycle_restore_errors=${errors[*]}
+}
+
+apply_node_config_lifecycle() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
+    local old_node="$is_conf_dir/$old_cfg" new_node old_meta new_meta candidate_nodes candidate_config source_config tmp_dir tmp_parent
+    local original_old_node original_old_meta original_config stage old_meta_exists=0 old_config_exists=0 restart_needed=0
+    node_lifecycle_error=
+    node_lifecycle_restore_errors=
+    [[ $operation == delete || $operation == replace ]] || {
+        node_lifecycle_error="不支持的节点操作: $operation"
+        return 1
+    }
+    [[ -f $old_node ]] || {
+        node_lifecycle_error="本机节点配置不存在: $old_node"
+        return 1
+    }
+    if [[ $operation == replace ]]; then
+        new_node="$is_conf_dir/$new_cfg"
+        new_meta=$(meta_file "$new_cfg")
+        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
+            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
+            return 1
+        }
+        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
+            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
+            return 1
+        fi
+    fi
+    tmp_parent=$(dirname "$is_conf_dir")
+    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
+        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
+        return 1
+    }
+    candidate_nodes="$tmp_dir/nodes"
+    if ! mkdir -p "$candidate_nodes" || ! cp -a "$is_conf_dir/." "$candidate_nodes/"; then
+        node_lifecycle_error="无法构造候选节点集合"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    old_meta=$(meta_file "$old_cfg")
+    if [[ $operation == delete ]]; then
+        rm -f "$candidate_nodes/$old_cfg" "$candidate_nodes/.quan-meta/$old_cfg.meta.json" || {
+            node_lifecycle_error="无法构造候选删除节点集合"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    else
+        if [[ $old_cfg != "$new_cfg" ]]; then
+            if ! mv -f "$candidate_nodes/$old_cfg" "$candidate_nodes/$new_cfg"; then
+                node_lifecycle_error="无法构造候选节点迁移: $old_cfg -> $new_cfg"
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            if [[ -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" ]]; then
+                mkdir -p "$candidate_nodes/.quan-meta" && mv -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" "$candidate_nodes/.quan-meta/$new_cfg.meta.json" || {
+                    node_lifecycle_error="无法构造候选节点元数据迁移: $old_cfg -> $new_cfg"
+                    rm -rf "$tmp_dir"
+                    return 1
+                }
+            fi
+        fi
+        printf '%s\n' "$new_json" >"$candidate_nodes/$new_cfg" || {
+            node_lifecycle_error="无法写入候选节点配置: $new_cfg"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+
+    candidate_config="$tmp_dir/config.json"
+    if [[ -f $is_config_json ]]; then
+        source_config=$is_config_json
+    else
+        source_config="$tmp_dir/default-config.json"
+        default_runtime_config >"$source_config" || {
+            node_lifecycle_error="无法构造默认公共配置"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+    if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" '' '' "$candidate_nodes"; then
+        node_lifecycle_error="节点关联配置生成失败: ${runtime_sync_error:-未知错误}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! "$is_core_bin" check -c "$candidate_config" -C "$candidate_nodes" &>/dev/null; then
+        node_lifecycle_error="完整候选节点配置校验失败，原配置未改变: $old_cfg${new_cfg:+ -> $new_cfg}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    original_old_node="$tmp_dir/original-old-node"
+    original_old_meta="$tmp_dir/original-old-meta"
+    original_config="$tmp_dir/original-config"
+    cp -p "$old_node" "$original_old_node" || {
+        node_lifecycle_error="无法备份节点配置: $old_node"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if [[ -f $old_meta ]]; then
+        cp -p "$old_meta" "$original_old_meta" || {
+            node_lifecycle_error="无法备份节点元数据: $old_meta"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_meta_exists=1
+    fi
+    if [[ -f $is_config_json ]]; then
+        cp -p "$is_config_json" "$original_config" || {
+            node_lifecycle_error="无法备份公共配置: $is_config_json"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_config_exists=1
+    fi
+
+    if [[ $operation == replace ]]; then
+        stage=$(mktemp "$new_node.lifecycle.XXXXXX") || node_lifecycle_error="无法准备节点配置保存: $new_node"
+        if [[ ! $node_lifecycle_error ]] && { ! cp -p "$candidate_nodes/$new_cfg" "$stage" || ! mv -f "$stage" "$new_node"; }; then
+            rm -f "$stage"
+            node_lifecycle_error="保存节点配置失败: $new_node"
+        fi
+        if [[ ! $node_lifecycle_error && $old_cfg != "$new_cfg" ]]; then
+            if [[ -f $old_meta ]] && ! meta_move "$old_cfg" "$new_cfg"; then
+                node_lifecycle_error="迁移节点元数据失败: $old_meta -> $new_meta"
+            elif ! rm -f "$old_node"; then
+                node_lifecycle_error="移除旧节点配置失败: $old_node"
+            fi
+        fi
+    else
+        rm -f "$old_node" || node_lifecycle_error="删除节点配置失败: $old_node"
+        if [[ ! $node_lifecycle_error && -f $old_meta ]] && ! meta_rm "$old_cfg"; then
+            node_lifecycle_error="删除节点元数据失败: $old_meta"
+        fi
+    fi
+    if [[ ! $node_lifecycle_error && ( $old_config_exists == 1 || $operation == replace ) ]]; then
+        stage=$(mktemp "$is_config_json.lifecycle.XXXXXX") || node_lifecycle_error="无法准备公共配置保存: $is_config_json"
+        if [[ ! $node_lifecycle_error ]] && { ! cp -p "$candidate_config" "$stage" || ! mv -f "$stage" "$is_config_json"; }; then
+            rm -f "$stage"
+            node_lifecycle_error="保存公共配置失败: $is_config_json"
+        fi
+        [[ ! $node_lifecycle_error ]] && restart_needed=1
+    fi
+    if [[ $node_lifecycle_error ]]; then
+        restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
+        [[ $node_lifecycle_restore_errors ]] && node_lifecycle_error+="；恢复文件失败: $node_lifecycle_restore_errors"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if [[ $restart_needed == 1 ]] && ! manage_restart_confirmed; then
+        restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
+        if manage_restart_confirmed; then
+            if [[ $node_lifecycle_restore_errors ]]; then
+                node_lifecycle_error="节点变更重启失败，文件恢复失败: $node_lifecycle_restore_errors；原配置恢复重启已完成"
+            else
+                node_lifecycle_error="节点变更重启失败，已恢复原配置并恢复服务"
+            fi
+        elif [[ $node_lifecycle_restore_errors ]]; then
+            node_lifecycle_error="节点变更重启失败，文件恢复和恢复重启均失败: $node_lifecycle_restore_errors"
+        else
+            node_lifecycle_error="节点变更重启失败，原配置已恢复但服务恢复失败"
+        fi
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    rm -rf "$tmp_dir"
+    return 0
+}
+apply_node_outbound_mode() {
+    local cfg=$1 mode=$2 proxy_config=${3:-} proxy_name=${4:-}
+    local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
+    local source_config candidate_meta candidate_config original_meta original_config
+    local candidate_meta_json proxy_json config_type method password
+    local check_error
+    local meta_install config_install old_meta_exists=0 old_config_exists=0
+    local restore_errors=()
+    outbound_apply_error=
+    case $mode in
+    "V6优先" | "V4优先" | "仅V4" | "仅V6") ;;
+    "SS 出站" | "VLESS 出站") ;;
+    *)
+        outbound_apply_error="不支持的出站方式: $mode"
+        return 1
+        ;;
+    esac
+    [[ -f $node_file ]] || {
+        outbound_apply_error="本机节点配置不存在: $node_file"
+        return 1
+    }
+    jq -e 'type == "object" and (.inbounds | type == "array")' "$node_file" >/dev/null 2>&1 || {
+        outbound_apply_error="本机节点配置格式无效: $node_file"
+        return 1
+    }
+    metadata_file=$(meta_file "$cfg")
+    if [[ -f $metadata_file ]]; then
+        jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || {
+            outbound_apply_error="节点元数据格式无效: $metadata_file"
+            return 1
+        }
+    fi
+    if [[ $proxy_config && ($mode == 'SS 出站' || $mode == 'VLESS 出站') ]]; then
+        proxy_json=
+    else
+        outbound_proxy_from_metadata "$cfg" "$metadata_file" || {
+            outbound_apply_error="当前代理缓存无效，未更改运行配置: $metadata_file"
+            return 1
+        }
+        proxy_json=$outbound_proxy_json
+    fi
+    if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
+        if [[ $proxy_config ]]; then
+            config_type=$(jq -r '.type // empty' <<<"$proxy_config" 2>/dev/null)
+            if [[ $mode == 'SS 出站' ]]; then
+                [[ $config_type == shadowsocks ]] || {
+                    outbound_apply_error="SS 出站需要 Shadowsocks 连接参数"
+                    return 1
+                }
+                jq -e '
+                    type == "object"
+                    and (.server | type == "string" and length > 0)
+                    and (.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+                    and (.method | type == "string" and length > 0)
+                    and (.password | type == "string" and length > 0)
+                    and ((has("tag") or has("detour")) | not)
+                ' <<<"$proxy_config" >/dev/null 2>&1 || {
+                    outbound_apply_error="SS 出站参数无效"
+                    return 1
+                }
+                method=$(jq -r '.method' <<<"$proxy_config")
+                password=$(jq -r '.password' <<<"$proxy_config")
+                ss_method_supported "$method" && ss_password_valid_for_method "$method" "$password" || {
+                    outbound_apply_error="SS 加密方式或密钥无效"
+                    return 1
+                }
+            else
+                jq -e '
+                    type == "object"
+                    and .type == "vless"
+                    and (.server | type == "string" and length > 0)
+                    and (.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+                    and (.uuid | type == "string" and length > 0)
+                    and ((has("tag") or has("detour")) | not)
+                ' <<<"$proxy_config" >/dev/null 2>&1 || {
+                    outbound_apply_error="VLESS 出站参数无效"
+                    return 1
+                }
+            fi
+            proxy_json=$(jq -cn --arg name "$proxy_name" --argjson config "$proxy_config" '{name:$name,config:$config}') || {
+                outbound_apply_error="无法构造代理缓存"
+                return 1
+            }
+        else
+            [[ $proxy_json ]] || {
+                outbound_apply_error="没有可复用的代理缓存"
+                return 1
+            }
+            config_type=$(jq -r '.config.type // empty' <<<"$proxy_json")
+            [[ ($mode == 'SS 出站' && $config_type == shadowsocks) || ($mode == 'VLESS 出站' && $config_type == vless) ]] || {
+                outbound_apply_error="当前代理缓存与所选出站方式不匹配"
+                return 1
+            }
+        fi
+    fi
+
+    tmp_parent=$(dirname "$is_config_json")
+    tmp_dir=$(mktemp -d "$tmp_parent/.outbound-apply.XXXXXX") || {
+        outbound_apply_error="无法创建候选配置目录: $tmp_parent"
+        return 1
+    }
+    source_config="$tmp_dir/config-source.json"
+    candidate_meta="$tmp_dir/metadata-candidate.json"
+    candidate_config="$tmp_dir/config-candidate.json"
+    original_meta="$tmp_dir/metadata-original"
+    original_config="$tmp_dir/config-original"
+    if [[ -f $metadata_file ]]; then
+        cp -p "$metadata_file" "$original_meta" || {
+            outbound_apply_error="无法备份节点元数据: $metadata_file"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_meta_exists=1
+        candidate_meta_json=$(jq -c --arg mode "$mode" --argjson proxy "${proxy_json:-null}" '
+            .outbound_mode = $mode
+            | if $proxy == null then . else .outbound_proxy = $proxy | del(.outbound_ss_server,.outbound_ss_port,.outbound_ss_method,.outbound_ss_password,.outbound_ss_name) end
+        ' "$metadata_file" 2>/dev/null) || {
+            outbound_apply_error="无法构造节点元数据: $metadata_file"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    else
+        candidate_meta_json=$(jq -cn --arg mode "$mode" --argjson proxy "${proxy_json:-null}" '
+            {outbound_mode:$mode}
+            | if $proxy == null then . else .outbound_proxy = $proxy end
+        ') || {
+            outbound_apply_error="无法构造节点元数据"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+    if ! printf '%s\n' "$candidate_meta_json" >"$candidate_meta"; then
+        outbound_apply_error="无法写入候选节点元数据"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if [[ -f $is_config_json ]]; then
+        cp -p "$is_config_json" "$original_config" || {
+            outbound_apply_error="无法备份公共配置: $is_config_json"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        old_config_exists=1
+        cp -p "$is_config_json" "$source_config" || {
+            outbound_apply_error="无法读取公共配置: $is_config_json"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    else
+        default_runtime_config >"$source_config" || {
+            outbound_apply_error="无法构造默认公共配置"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+    fi
+    if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" "$cfg" "$candidate_meta"; then
+        outbound_apply_error="完整配置生成失败: ${runtime_sync_error:-未知错误}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! "$is_core_bin" check -c "$candidate_config" -C "$is_conf_dir" >"$tmp_dir/check.log" 2>&1; then
+        outbound_apply_error="完整配置校验失败，原配置未改变"
+        check_error=$(sed -n '/[^[:space:]]/{s/\\/\\\\/g;s/[[:cntrl:]]//g;p;}' "$tmp_dir/check.log")
+        [[ ! $check_error ]] || outbound_apply_error+="：$check_error"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$metadata_file")" || {
+        outbound_apply_error="无法创建节点元数据目录: $(dirname "$metadata_file")"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    meta_install=$(mktemp "$metadata_file.apply.XXXXXX") || {
+        outbound_apply_error="无法准备节点元数据保存: $metadata_file"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    config_install=$(mktemp "$is_config_json.apply.XXXXXX") || {
+        outbound_apply_error="无法准备公共配置保存: $is_config_json"
+        rm -f "$meta_install"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if ! cp "$candidate_meta" "$meta_install" || ! cp "$candidate_config" "$config_install" || ! chmod 600 "$meta_install" "$config_install"; then
+        outbound_apply_error="无法暂存候选配置文件"
+        rm -f "$meta_install" "$config_install"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! mv -f "$meta_install" "$metadata_file"; then
+        outbound_apply_error="保存节点元数据失败: $metadata_file"
+        rm -f "$meta_install" "$config_install"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! mv -f "$config_install" "$is_config_json"; then
+        outbound_apply_error="保存公共配置失败: $is_config_json"
+        if ! restore_outbound_apply_file "$original_meta" "$metadata_file" "$old_meta_exists"; then
+            outbound_apply_error+="；恢复节点元数据失败: $metadata_file"
+        fi
+        rm -f "$meta_install" "$config_install"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! manage_restart_confirmed; then
+        if ! restore_outbound_apply_file "$original_meta" "$metadata_file" "$old_meta_exists"; then
+            restore_errors+=("$metadata_file")
+        fi
+        if ! restore_outbound_apply_file "$original_config" "$is_config_json" "$old_config_exists"; then
+            restore_errors+=("$is_config_json")
+        fi
+        if manage_restart_confirmed; then
+            if ((${#restore_errors[@]})); then
+                outbound_apply_error="重启失败且文件恢复失败: ${restore_errors[*]}；原配置恢复重启已完成"
+            else
+                outbound_apply_error="重启失败，已恢复原配置并恢复服务"
+            fi
+        else
+            if ((${#restore_errors[@]})); then
+                outbound_apply_error="重启失败且文件恢复失败: ${restore_errors[*]}；原配置恢复重启也失败"
+            else
+                outbound_apply_error="重启失败，原配置已恢复但服务恢复失败"
+            fi
+        fi
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    rm -rf "$tmp_dir"
+    return 0
+}
+
+edit_node_outbound_mode() {
+    local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type
+    ask set_outbound_mode
+    metadata_file=$(meta_file "$is_config_file")
+    if [[ $is_outbound_mode == 'SS 出站' ]]; then
+        if outbound_proxy_from_metadata "$is_config_file" "$metadata_file"; then
+            proxy_json=$outbound_proxy_json
+        fi
+        current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
+        if [[ $current_proxy_type == shadowsocks ]]; then
+            echo -ne "请输入 SS 分享链接 (直接回车复用当前配置):"
+        else
+            echo -ne "请输入 SS 分享链接:"
+        fi
+        IFS= read -r is_outbound_ss_uri
+        if [[ $is_outbound_ss_uri ]]; then
+            parse_proxy_uri ss "$is_outbound_ss_uri" || err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"
+            proxy_config=$outbound_proxy_config_json
+            proxy_name=$outbound_proxy_name
+        else
+            [[ $current_proxy_type == shadowsocks ]] || err "没有可复用的 Shadowsocks 配置，请粘贴 SS 分享链接."
+            proxy_config=
+            proxy_name=
+        fi
+    elif [[ $is_outbound_mode == 'VLESS 出站' ]]; then
+        if outbound_proxy_from_metadata "$is_config_file" "$metadata_file"; then
+            proxy_json=$outbound_proxy_json
+        fi
+        current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
+        if [[ $current_proxy_type == vless ]]; then
+            echo -ne "请输入 VLESS 分享链接 (直接回车复用当前配置):"
+        else
+            echo -ne "请输入 VLESS 分享链接:"
+        fi
+        IFS= read -r is_outbound_vless_uri
+        if [[ $is_outbound_vless_uri ]]; then
+            parse_proxy_uri vless "$is_outbound_vless_uri" || err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"
+            proxy_config=$outbound_proxy_config_json
+            proxy_name=$outbound_proxy_name
+        else
+            [[ $current_proxy_type == vless ]] || err "没有可复用的 VLESS 配置，请粘贴 VLESS 分享链接."
+            proxy_config=
+            proxy_name=
+        fi
+    fi
+    apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || err "$outbound_apply_error"
+    msg_outbound_mode_display "配置已应用:" "$is_config_file"
 }
 
 is_valid_ipv4_addr() {
@@ -705,6 +1377,42 @@ is_valid_ipv4_addr() {
         [[ $o -le 255 ]] || return 1
     done
     return 0
+}
+
+is_valid_ipv6_addr() {
+    local addr=$1 compressed=0 ipv4_groups=0 group_count=0 left right side part ipv4
+    local -a groups
+    [[ $addr == *:* ]] || return 1
+    if [[ $addr == *.* ]]; then
+        ipv4=${addr##*:}
+        [[ $ipv4 != "$addr" ]] && is_valid_ipv4_addr "$ipv4" || return 1
+        addr=${addr%:*}
+        ipv4_groups=2
+    fi
+    if [[ $addr == *::* ]]; then
+        compressed=1
+        left=${addr%%::*}
+        right=${addr#*::}
+        [[ $right != *::* && $left != *: && $right != :* ]] || return 1
+    else
+        left=$addr
+        right=
+    fi
+    for side in "$left" "$right"; do
+        [[ $side ]] || continue
+        [[ $side != :* && $side != *: ]] || return 1
+        IFS=: read -r -a groups <<<"$side"
+        for part in "${groups[@]}"; do
+            [[ $part =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
+            group_count=$((group_count + 1))
+        done
+    done
+    group_count=$((group_count + ipv4_groups))
+    if [[ $compressed == 1 ]]; then
+        ((group_count < 8)) || return 1
+    else
+        ((group_count == 8))
+    fi
 }
 
 is_valid_entry_addr() {
@@ -735,23 +1443,63 @@ ss_password_for_method() {
 }
 
 ss_password_valid_for_method() {
-    local method=$1 password=$2 expected_len decoded_len
+    local method=$1 password=$2 expected_len decoded_len key normalized padding mod
+    local -a keys
     [[ $method != *2022* ]] && return 0
     [[ $password ]] || return 1
     [[ $(grep 128 <<<$method) ]] && expected_len=16 || expected_len=32
-    decoded_len=$(printf '%s' "$password" | base64 -d 2>/dev/null | wc -c)
-    [[ ${decoded_len// /} -eq $expected_len ]]
+    [[ $password != :* && $password != *: && $password != *::* ]] || return 1
+    IFS=: read -r -a keys <<<"$password"
+    for key in "${keys[@]}"; do
+        ss_base64_shape_valid "$key" || return 1
+        [[ $key != *[-_]* || ( $key != *+* && $key != */* ) ]] || return 1
+        normalized=${key%%=*}
+        padding=${key#"$normalized"}
+        normalized=${normalized//-/+}
+        normalized=${normalized//_/\/}
+        mod=$((${#normalized} % 4))
+        if [[ ! $padding ]]; then
+            [[ $mod != 1 ]] || return 1
+            [[ $mod == 2 ]] && padding='=='
+            [[ $mod == 3 ]] && padding='='
+        fi
+        decoded_len=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null | wc -c)
+        [[ ${decoded_len// /} -eq $expected_len ]] || return 1
+    done
+}
+
+ss_base64_shape_valid() {
+    local input=$1 raw padding mod
+    [[ $input =~ ^[A-Za-z0-9+/_-]+={0,2}$ ]] || return 1
+    raw=${input%%=*}
+    padding=${input#"$raw"}
+    mod=$((${#raw} % 4))
+    if [[ $padding ]]; then
+        [[ $((${#input} % 4)) == 0 ]] || return 1
+        [[ ($padding == '==' && $mod == 2) || ($padding == '=' && $mod == 3) ]]
+    else
+        [[ $mod != 1 ]]
+    fi
 }
 
 ss_base64_decode() {
-    local input=$1 mod
-    input=${input//-/+}
-    input=${input//_/\/}
-    mod=$((${#input} % 4))
-    [[ $mod == 1 ]] && return 1
-    [[ $mod == 2 ]] && input+="=="
-    [[ $mod == 3 ]] && input+="="
-    printf '%s' "$input" | base64 -d 2>/dev/null
+    local input=$1 raw padding normalized decoded canonical mod
+    ss_base64_shape_valid "$input" || return 1
+    [[ $input != *[-_]* || ( $input != *+* && $input != */* ) ]] || return 1
+    raw=${input%%=*}
+    padding=${input#"$raw"}
+    normalized=${raw//-/+}
+    normalized=${normalized//_/\/}
+    mod=$((${#normalized} % 4))
+    if [[ ! $padding ]]; then
+        [[ $mod != 1 ]] || return 1
+        [[ $mod == 2 ]] && padding='=='
+        [[ $mod == 3 ]] && padding='='
+    fi
+    decoded=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null) 2>/dev/null || return 1
+    canonical=$(printf '%s' "$decoded" | base64 | tr -d '=\n') || return 1
+    [[ $canonical == "$normalized" ]] || return 1
+    printf '%s' "$decoded"
 }
 
 ss_method_supported() {
@@ -762,36 +1510,1165 @@ ss_method_supported() {
     return 1
 }
 
-url_decode() {
-    local s=${1//+/ }
-    printf '%b' "${s//%/\\x}"
+url_percent_decode() {
+    local input=$1 allow_newlines=${2:-0} output= prefix hex char code control_check
+    if [[ $allow_newlines == 1 ]]; then
+        control_check=${input//$'\r'/}
+        control_check=${control_check//$'\n'/}
+        [[ ! $control_check =~ [[:cntrl:]] ]] || return 1
+    else
+        [[ ! $input =~ [[:cntrl:]] ]] || return 1
+    fi
+    while [[ $input == *%* ]]; do
+        prefix=${input%%\%*}
+        output+=$prefix
+        input=${input#*%}
+        [[ $input =~ ^([[:xdigit:]]{2})(.*)$ ]] || return 1
+        hex=${BASH_REMATCH[1]}
+        input=${BASH_REMATCH[2]}
+        code=$((16#$hex))
+        if [[ $allow_newlines == 1 && ( $code == 10 || $code == 13 ) ]]; then
+            :
+        else
+            ((code > 0 && code >= 32 && code != 127)) || return 1
+        fi
+        printf -v char '%b' "\\x$hex"
+        output+=$char
+    done
+    output+=$input
+    if [[ $allow_newlines == 1 ]]; then
+        control_check=${output//$'\r'/}
+        control_check=${control_check//$'\n'/}
+        [[ ! $control_check =~ [[:cntrl:]] ]] || return 1
+    else
+        [[ ! $output =~ [[:cntrl:]] ]] || return 1
+    fi
+    printf '%s' "$output"
 }
 
-parse_ss_uri_for_outbound() {
-    local uri auth endpoint raw_name decoded_auth
-    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<$1)
-    [[ $uri == ss://* ]] || return 1
+parse_uri_query() {
+    local query=$1 allow_ech_pem=${2:-0} pair key raw_value value
+    uri_query_json='{}'
+    [[ $query ]] || return 0
+    while :; do
+        [[ $query == *'&'* ]] && {
+            pair=${query%%&*}
+            query=${query#*&}
+        } || {
+            pair=$query
+            query=
+        }
+        [[ $pair == *=* ]] || return 1
+        key=${pair%%=*}
+        raw_value=${pair#*=}
+        [[ $key && ! $key =~ [^A-Za-z0-9_-] ]] || return 1
+        if [[ $allow_ech_pem == 1 && $key == ech ]]; then
+            value=$(url_percent_decode "$raw_value" 1 && printf '\001') || return 1
+            value=${value%$'\001'}
+        else
+            value=$(url_percent_decode "$raw_value") || return 1
+        fi
+        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$uri_query_json") != true ]] || return 1
+        uri_query_json=$(jq -c --arg key "$key" --arg value "$value" '. + {($key):$value}' <<<"$uri_query_json") || return 1
+        [[ $query ]] || break
+    done
+}
+
+parse_uri_authority() {
+    local authority=$1 normalized_port
+    uri_server=
+    uri_port=
+    if [[ $authority =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]+)$ ]]; then
+        uri_server=${BASH_REMATCH[1]}
+        uri_port=${BASH_REMATCH[2]}
+        is_valid_ipv6_addr "$uri_server" || return 1
+    else
+        [[ $authority == *:* && $authority != *:*:* ]] || return 1
+        uri_server=${authority%:*}
+        uri_port=${authority##*:}
+        [[ $uri_server ]] || return 1
+        is_valid_ipv4_addr "$uri_server" || [[ $(is_test domain "$uri_server") ]] || return 1
+    fi
+    [[ $uri_port =~ ^[0-9]+$ ]] || return 1
+    normalized_port=${uri_port#"${uri_port%%[!0]*}"}
+    [[ $normalized_port ]] || return 1
+    (( ${#normalized_port} <= 5 )) || return 1
+    uri_port_number=$((10#$normalized_port))
+    ((uri_port_number >= 1 && uri_port_number <= 65535))
+}
+
+uri_query_alias_value() {
+    local query=$1 normalize=$2 key value selected= selected_key= selected_set=0
+    shift 2
+    uri_alias_value=
+    uri_alias_present=0
+    for key in "$@"; do
+        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$query") == true ]] || continue
+        value=$(jq -r --arg key "$key" '.[$key]' <<<"$query") || return 1
+        case $normalize in
+        boolean)
+            case $value in
+            1 | true) value=true ;;
+            0 | false) value=false ;;
+            *)
+                outbound_proxy_parse_error="VLESS 参数 $key 必须为 1、0、true 或 false"
+                return 1
+                ;;
+            esac
+            ;;
+        packet_encoding)
+            [[ $value == none ]] && value=
+            ;;
+        esac
+        if ((selected_set)) && [[ $value != "$selected" ]]; then
+            outbound_proxy_parse_error="VLESS 参数别名冲突: $selected_key / $key"
+            return 1
+        fi
+        selected=$value
+        selected_key=$key
+        selected_set=1
+    done
+    uri_alias_value=$selected
+    uri_alias_present=$selected_set
+}
+
+normalize_vless_ws_early_data() {
+    local value=$1 normalized=$1
+    [[ $value =~ ^[0-9]+$ ]] || {
+        outbound_proxy_parse_error="VLESS WebSocket ed 必须为非负十进制整数"
+        return 1
+    }
+    while [[ ${#normalized} -gt 1 && ${normalized:0:1} == 0 ]]; do
+        normalized=${normalized:1}
+    done
+    [[ ${#normalized} -le 10 ]] && ((10#$normalized <= 4294967295)) || {
+        outbound_proxy_parse_error="VLESS WebSocket ed 超出 sing-box uint32 范围"
+        return 1
+    }
+    uri_vless_ws_early_data_normalized=$normalized
+}
+
+is_valid_vless_ws_header_name() {
+    local header=$1 token_pattern='^[!#$%&'\''*+.^_`|~0-9A-Za-z-]+$'
+    [[ $header =~ $token_pattern ]]
+}
+
+parse_vless_ws_early_data() {
+    local path=$1 outer_ed_present=$2 outer_ed=$3 outer_eh_present=$4 outer_eh=$5
+    local path_prefix=$1 query= remaining segment key raw_value has_equals more
+    local keep_query= keep_query_present=0
+    local inner_ed_present=0 inner_ed= inner_eh_present=0 inner_eh=
+    local outer_ed_normalized= outer_eh_value= selected_ed_present=0 selected_ed= selected_eh_present=0 selected_eh=
+
+    uri_vless_ws_path=$path
+    uri_vless_ws_early_data_present=0
+    uri_vless_ws_early_data=
+    uri_vless_ws_early_data_header_present=0
+    uri_vless_ws_early_data_header=
+
+    if [[ $path == *\?* ]]; then
+        path_prefix=${path%%\?*}
+        query=${path#*\?}
+        remaining=$query
+        while :; do
+            if [[ $remaining == *'&'* ]]; then
+                segment=${remaining%%&*}
+                remaining=${remaining#*&}
+                more=1
+            else
+                segment=$remaining
+                remaining=
+                more=0
+            fi
+            if [[ $segment == *=* ]]; then
+                key=${segment%%=*}
+                raw_value=${segment#*=}
+                has_equals=1
+            else
+                key=$segment
+                raw_value=
+                has_equals=0
+            fi
+            case $key in
+            ed)
+                [[ $has_equals == 1 && $inner_ed_present == 0 ]] || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 ed 格式无效或重复"
+                    return 1
+                }
+                inner_ed=$(url_percent_decode "$raw_value") || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 ed 编码无效"
+                    return 1
+                }
+                normalize_vless_ws_early_data "$inner_ed" || return 1
+                inner_ed=$uri_vless_ws_early_data_normalized
+                inner_ed_present=1
+                ;;
+            eh)
+                [[ $has_equals == 1 && $inner_eh_present == 0 ]] || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 eh 格式无效或重复"
+                    return 1
+                }
+                inner_eh=$(url_percent_decode "$raw_value") || {
+                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 eh 编码无效"
+                    return 1
+                }
+                is_valid_vless_ws_header_name "$inner_eh" || {
+                    outbound_proxy_parse_error="VLESS WebSocket early-data header 名无效"
+                    return 1
+                }
+                inner_eh_present=1
+                ;;
+            *)
+                if ((keep_query_present)); then keep_query+='&'; fi
+                keep_query+=$segment
+                keep_query_present=1
+                ;;
+            esac
+            ((more)) || break
+        done
+    fi
+
+    if [[ $outer_ed_present == 1 ]]; then
+        normalize_vless_ws_early_data "$outer_ed" || return 1
+        outer_ed_normalized=$uri_vless_ws_early_data_normalized
+    fi
+    if [[ $outer_eh_present == 1 ]]; then
+        outer_eh_value=$outer_eh
+        is_valid_vless_ws_header_name "$outer_eh_value" || {
+            outbound_proxy_parse_error="VLESS WebSocket early-data header 名无效"
+            return 1
+        }
+    fi
+    if [[ $outer_ed_present == 1 && $inner_ed_present == 1 && $outer_ed_normalized != "$inner_ed" ]]; then
+        outbound_proxy_parse_error="VLESS WebSocket 外层与 path query 的 ed 值冲突"
+        return 1
+    fi
+    if [[ $outer_eh_present == 1 && $inner_eh_present == 1 && $outer_eh_value != "$inner_eh" ]]; then
+        outbound_proxy_parse_error="VLESS WebSocket 外层与 path query 的 eh 值冲突"
+        return 1
+    fi
+
+    if [[ $outer_ed_present == 1 ]]; then
+        selected_ed_present=1
+        selected_ed=$outer_ed_normalized
+    elif [[ $inner_ed_present == 1 ]]; then
+        selected_ed_present=1
+        selected_ed=$inner_ed
+    fi
+    if [[ $outer_eh_present == 1 ]]; then
+        selected_eh_present=1
+        selected_eh=$outer_eh_value
+    elif [[ $inner_eh_present == 1 ]]; then
+        selected_eh_present=1
+        selected_eh=$inner_eh
+    fi
+    if [[ $selected_eh_present == 1 && $selected_ed_present != 1 ]]; then
+        outbound_proxy_parse_error="VLESS WebSocket eh 需要非零 ed"
+        return 1
+    fi
+    if [[ $selected_ed_present == 1 ]]; then
+        [[ $selected_ed != 0 || $selected_eh_present != 1 ]] || {
+            outbound_proxy_parse_error="VLESS WebSocket ed=0 时不能设置 eh"
+            return 1
+        }
+        uri_vless_ws_early_data_present=1
+        uri_vless_ws_early_data=$selected_ed
+        if [[ $selected_ed != 0 && $selected_eh_present != 1 ]]; then
+            selected_eh_present=1
+            selected_eh=Sec-WebSocket-Protocol
+        fi
+    fi
+    if ((inner_ed_present || inner_eh_present)); then
+        uri_vless_ws_path=$path_prefix
+        if ((keep_query_present)); then uri_vless_ws_path+="?$keep_query"; fi
+    fi
+    uri_vless_ws_early_data_header_present=$selected_eh_present
+    uri_vless_ws_early_data_header=$selected_eh
+    return 0
+}
+
+vless_grpc_default_authority() {
+    local server=$1 server_port=$2 security=$3 server_name=$4 version_output version tags tag_count authority_host
+    vless_grpc_default_authority_value=
+    [[ $is_core_bin ]] || return 1
+    version_output=$("$is_core_bin" version 2>/dev/null) || return 1
+    version=$(awk 'NR == 1 { print $3 }' <<<"$version_output")
+    [[ ${version#v} == 1.14.0 ]] || return 1
+    tag_count=$(grep -c '^Tags:' <<<"$version_output" || true)
+    [[ $tag_count == 1 ]] || return 1
+    tags=$(sed -n 's/^Tags:[[:space:]]*//p' <<<"$version_output")
+    tags=${tags//[[:space:]]/}
+
+    if [[ ,$tags, == *,with_grpc,* ]]; then
+        tag=full
+    else
+        tag=lite
+    fi
+    if [[ ($security == tls || $security == reality) && $server_name ]]; then
+        authority_host=$server_name
+    else
+        authority_host=$server
+    fi
+    if [[ $authority_host == *:* && $authority_host != \[*\] ]]; then
+        authority_host="[$authority_host]"
+    fi
+    if [[ $tag == full && ($security == tls || $security == reality) && $server_name ]]; then
+        vless_grpc_default_authority_value=$authority_host
+    else
+        vless_grpc_default_authority_value="$authority_host:$server_port"
+    fi
+}
+
+normalize_vless_ech_config() {
+    local input=$1 normalized begin end body raw padding mod canonical encoded decoded_len
+    vless_ech_config=
+    [[ $input ]] || return 0
+    begin='-----BEGIN ECH CONFIGS-----'
+    end='-----END ECH CONFIGS-----'
+    if [[ $input == "$begin"* ]]; then
+        normalized=${input//$'\r\n'/$'\n'}
+        [[ $normalized != *$'\r'* ]] || return 1
+        [[ $normalized == "$begin"$'\n'* ]] || return 1
+        if [[ $normalized == *$'\n' ]]; then normalized=${normalized%$'\n'}; fi
+        [[ $normalized == "$begin"$'\n'*$'\n'"$end" ]] || return 1
+        body=${normalized#"$begin"$'\n'}
+        body=${body%$'\n'"$end"}
+        body=${body//$'\n'/}
+    else
+        [[ $input != *$'\r'* && $input != *$'\n'* ]] || return 1
+        body=$input
+    fi
+    [[ $body =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+    raw=${body%%=*}
+    padding=${body#"$raw"}
+    mod=$((${#raw} % 4))
+    if [[ $padding ]]; then
+        [[ $((${#body} % 4)) == 0 ]] || return 1
+        [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
+    else
+        [[ $mod != 1 ]] || return 1
+        [[ $mod == 2 ]] && padding='=='
+        [[ $mod == 3 ]] && padding='='
+    fi
+    canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
+    [[ $canonical == "$raw$padding" ]] || return 1
+    decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
+    [[ $decoded_len != 0 ]] || return 1
+    encoded=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | base64) || return 1
+    vless_ech_config="$begin"$'\n'"$encoded"$'\n'"$end"
+}
+
+normalize_vless_certificate_sha256() {
+    local input=$1 pin raw padding mod decoded_len canonical normalized hex_escaped i
+    local -a pins=()
+    vless_certificate_sha256_json='[]'
+    [[ $input ]] || return 0
+    [[ $input != ,* && $input != *, && $input != *,,* ]] || return 1
+    IFS=, read -r -a pins <<<"$input"
+    for pin in "${pins[@]}"; do
+        if [[ $pin =~ ^[[:xdigit:]]{64}$ ]]; then
+            hex_escaped=
+            for ((i = 0; i < ${#pin}; i += 2)); do
+                hex_escaped+="\\x${pin:i:2}"
+            done
+            normalized=$(printf '%b' "$hex_escaped" | base64 -w 0) || return 1
+        else
+            [[ $pin =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+            raw=${pin%%=*}
+            padding=${pin#"$raw"}
+            mod=$((${#raw} % 4))
+            if [[ $padding ]]; then
+                [[ $((${#pin} % 4)) == 0 ]] || return 1
+                [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
+            else
+                [[ $mod != 1 ]] || return 1
+                [[ $mod == 2 ]] && padding='=='
+                [[ $mod == 3 ]] && padding='='
+            fi
+            canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
+            [[ $canonical == "$raw$padding" ]] || return 1
+            decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
+            [[ $decoded_len == 32 ]] || return 1
+            normalized=$canonical
+        fi
+        vless_certificate_sha256_json=$(jq -cn --argjson current "$vless_certificate_sha256_json" --arg value "$normalized" '$current + [$value]') || return 1
+    done
+}
+
+vless_core_supports_certificate_sha256() {
+    local version=${is_core_ver:-} major minor
+    [[ $version =~ ([0-9]+)\.([0-9]+)\.[0-9]+ ]] || return 0
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    ((major > 1 || (major == 1 && minor >= 15)))
+}
+
+parse_vless_uri() {
+    local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
+    local fragment_present=0 remark_name key encryption transport transport_original transport_type security flow
+    local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
+    local public_key public_key_present short_id short_id_present insecure=false insecure_present
+    local packet_encoding packet_encoding_present utls_enabled=false
+    local ech ech_present ech_config= ech_enabled=0 pcs pcs_enabled=0 vcn spx
+    local vless_certificate_sha256_json='[]'
+    local transport_config_json='{}' path path_present host host_present host_json
+    local header_type header_type_present quic_security quic_security_present quic_key quic_key_present
+    local canonical_public_key public_key_length ed eh mode grpc_authority transport_parameter
+    local ed_present eh_present mode_present authority_present
+    local ws_path=/ ws_host= ws_host_present=0 ws_early_data= ws_early_data_present=0 ws_early_data_header= ws_early_data_header_present=0
+    local grpc_service_name= grpc_service_name_present=0 grpc_default_authority
+
+    outbound_proxy_parse_error="VLESS 链接格式或参数无效"
+    outbound_proxy_name=
+    outbound_proxy_config_json=
+    uri_query_json='{}'
+    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
+    [[ $uri == vless://* ]] || return 1
+    uri=${uri#vless://}
+    if [[ $uri == *#* ]]; then
+        fragment_present=1
+        raw_name=${uri#*#}
+        uri=${uri%%#*}
+        [[ $raw_name != *#* ]] || {
+            outbound_proxy_parse_error="VLESS 链接名称格式无效"
+            return 1
+        }
+    fi
+    if [[ $uri == *\?* ]]; then
+        raw_query=${uri#*\?}
+        uri=${uri%%\?*}
+        parse_uri_query "$raw_query" 1 || {
+            outbound_proxy_parse_error="VLESS 查询参数格式无效"
+            return 1
+        }
+    else
+        uri_query_json='{}'
+    fi
+    [[ $uri == *@* ]] || {
+        outbound_proxy_parse_error="VLESS 链接缺少 UUID 或服务器地址"
+        return 1
+    }
+    auth=${uri%@*}
+    authority=${uri#*@}
+    [[ $auth && $auth != *@* && $authority != *@* && $auth != *:* ]] || {
+        outbound_proxy_parse_error="VLESS userinfo 必须是 UUID，不能包含密码"
+        return 1
+    }
+    decoded_auth=$(url_percent_decode "$auth") || {
+        outbound_proxy_parse_error="VLESS UUID 编码无效"
+        return 1
+    }
+    [[ $decoded_auth =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
+        outbound_proxy_parse_error="VLESS UUID 无效"
+        return 1
+    }
+    [[ $authority == */ ]] && authority=${authority%/}
+    [[ $authority != */* ]] || {
+        outbound_proxy_parse_error="VLESS authority 不支持路径"
+        return 1
+    }
+    raw_port=${authority##*:}
+    [[ $raw_port =~ ^[0-9]{1,5}$ ]] || {
+        outbound_proxy_parse_error="VLESS 端口必须为 1–65535 的十进制整数"
+        return 1
+    }
+    parse_uri_authority "$authority" || {
+        outbound_proxy_parse_error="VLESS 服务器地址或端口无效"
+        return 1
+    }
+
+    while IFS= read -r key; do
+        case $key in
+        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | ed | eh | serviceName | service_name | mode | authority | headerType | quicSecurity | key | ech | pcs | vcn | spx | spiderX) ;;
+        *)
+            outbound_proxy_parse_error="VLESS 暂不支持连接参数: $key"
+            return 1
+            ;;
+        esac
+    done < <(jq -r 'keys[]' <<<"$uri_query_json")
+
+    encryption=$(jq -r '.encryption // "none"' <<<"$uri_query_json")
+    [[ ! $encryption || $encryption == none ]] || {
+        outbound_proxy_parse_error="VLESS encryption 仅支持 none"
+        return 1
+    }
+    transport_original=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
+    transport=$transport_original
+    case $transport in
+    tcp | raw | ws | grpc | h2 | http | httpupgrade | quic) ;;
+    *)
+        outbound_proxy_parse_error="VLESS type=$transport_original 传输暂不支持"
+        return 1
+        ;;
+    esac
+    security=$(jq -r '.security // "none"' <<<"$uri_query_json")
+    [[ ! $security ]] && security=none
+    [[ $security == none || $security == tls || $security == reality ]] || {
+        outbound_proxy_parse_error="VLESS security=$security 暂不支持"
+        return 1
+    }
+    if [[ $transport_original == h2 && $security == none ]]; then
+        outbound_proxy_parse_error="VLESS type=h2 需要 TLS 或 Reality，避免按明文 HTTP/2 处理"
+        return 1
+    fi
+    if [[ $transport == quic && $security != tls ]]; then
+        outbound_proxy_parse_error="VLESS QUIC 仅支持 sing-box 原生 TLS；无 TLS 或跨内核 Reality QUIC 不受支持"
+        return 1
+    fi
+    flow=$(jq -r '.flow // ""' <<<"$uri_query_json")
+    [[ ! $flow || $flow == xtls-rprx-vision ]] || {
+        outbound_proxy_parse_error="VLESS flow=$flow 暂不支持"
+        return 1
+    }
+    if [[ $flow && ($transport == ws || $transport == grpc) ]]; then
+        outbound_proxy_parse_error="VLESS Vision 仅支持 TCP/raw，不能用于 WebSocket 或 gRPC"
+        return 1
+    fi
+
+    path=$(jq -r '.path // ""' <<<"$uri_query_json")
+    path_present=$(jq -r 'has("path") | if . then 1 else 0 end' <<<"$uri_query_json")
+    host=$(jq -r '.host // ""' <<<"$uri_query_json")
+    host_present=$(jq -r 'has("host") | if . then 1 else 0 end' <<<"$uri_query_json")
+    ed=$(jq -r '.ed // ""' <<<"$uri_query_json")
+    ed_present=$(jq -r 'has("ed") | if . then 1 else 0 end' <<<"$uri_query_json")
+    eh=$(jq -r '.eh // ""' <<<"$uri_query_json")
+    eh_present=$(jq -r 'has("eh") | if . then 1 else 0 end' <<<"$uri_query_json")
+    uri_query_alias_value "$uri_query_json" raw serviceName service_name || return 1
+    grpc_service_name=$uri_alias_value
+    grpc_service_name_present=$uri_alias_present
+    mode=$(jq -r '.mode // ""' <<<"$uri_query_json")
+    mode_present=$(jq -r 'has("mode")' <<<"$uri_query_json")
+    grpc_authority=$(jq -r '.authority // ""' <<<"$uri_query_json")
+    authority_present=$(jq -r 'has("authority")' <<<"$uri_query_json")
+    header_type=$(jq -r '.headerType // "none"' <<<"$uri_query_json")
+    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
+    if [[ $header_type_present == true && $header_type != none ]]; then
+        if [[ $header_type == http ]]; then
+            outbound_proxy_parse_error="VLESS headerType=http 的 TCP HTTP 伪装与 sing-box 原生传输不等价"
+        else
+            outbound_proxy_parse_error="VLESS headerType=$header_type 暂不支持"
+        fi
+        return 1
+    fi
+    case $transport in
+    ws)
+        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+            outbound_proxy_parse_error="VLESS WebSocket 不能使用 gRPC 参数 serviceName、mode 或 authority"
+            return 1
+        fi
+        [[ $path_present != 1 || $path ]] || {
+            outbound_proxy_parse_error="VLESS WebSocket path 不能为空"
+            return 1
+        }
+        if [[ $host_present == 1 ]]; then
+            [[ $host && $host != *,* && ! $host =~ [[:space:]] ]] || {
+                outbound_proxy_parse_error="VLESS WebSocket host 必须是单个非空值且不能包含空白字符"
+                return 1
+            }
+            ws_host=$host
+            ws_host_present=1
+        fi
+        [[ $path_present == 1 ]] && ws_path=$path
+        parse_vless_ws_early_data "$ws_path" "$ed_present" "$ed" "$eh_present" "$eh" || return 1
+        ws_path=$uri_vless_ws_path
+        ws_early_data=$uri_vless_ws_early_data
+        ws_early_data_present=$uri_vless_ws_early_data_present
+        ws_early_data_header=$uri_vless_ws_early_data_header
+        ws_early_data_header_present=$uri_vless_ws_early_data_header_present
+        ;;
+    grpc)
+        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 ]]; then
+            outbound_proxy_parse_error="VLESS gRPC 不能使用 WebSocket 参数 path、host、ed 或 eh"
+            return 1
+        fi
+        if [[ $mode_present == true && $mode != gun ]]; then
+            case $mode in
+            multi | guna) outbound_proxy_parse_error="VLESS gRPC mode=$mode 与 sing-box 原生 gRPC 不等价" ;;
+            *) outbound_proxy_parse_error="VLESS gRPC mode=$mode 仅支持 gun" ;;
+            esac
+            return 1
+        fi
+        ;;
+    tcp | raw)
+        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 || $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+            if [[ $path_present == 1 ]]; then transport_parameter=path
+            elif [[ $host_present == 1 ]]; then transport_parameter=host
+            elif [[ $ed_present == 1 ]]; then transport_parameter=ed
+            elif [[ $eh_present == 1 ]]; then transport_parameter=eh
+            elif [[ $grpc_service_name_present == 1 ]]; then transport_parameter=serviceName
+            elif [[ $mode_present == true ]]; then transport_parameter=mode
+            else transport_parameter=authority
+            fi
+            outbound_proxy_parse_error="VLESS type=$transport 不支持参数: $transport_parameter"
+            return 1
+        fi
+        ;;
+    h2 | http | httpupgrade | quic)
+        if [[ $ed_present == 1 || $eh_present == 1 ]]; then
+            outbound_proxy_parse_error="VLESS $transport 不能使用 WebSocket 专属参数 ed 或 eh"
+            return 1
+        fi
+        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+            outbound_proxy_parse_error="VLESS $transport 不能使用 gRPC 专属参数 serviceName、mode 或 authority"
+            return 1
+        fi
+        ;;
+    esac
+
+    transport_type=$transport
+    case $transport in
+    tcp | raw) transport=tcp ;;
+    h2) transport=http ;;
+    esac
+
+    uri_query_alias_value "$uri_query_json" raw sni serverName || return 1
+    sni=$uri_alias_value
+    sni_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw alpn || return 1
+    alpn=$uri_alias_value
+    alpn_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw fp fingerprint || return 1
+    fingerprint=$uri_alias_value
+    fingerprint_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw pbk publicKey || return 1
+    public_key=$uri_alias_value
+    public_key_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" raw sid shortId || return 1
+    short_id=$uri_alias_value
+    short_id_present=$uri_alias_present
+    uri_query_alias_value "$uri_query_json" boolean allowInsecure insecure skip-cert-verify || return 1
+    insecure=$uri_alias_value
+    insecure_present=$uri_alias_present
+    [[ $insecure_present == 1 ]] || insecure=false
+    uri_query_alias_value "$uri_query_json" packet_encoding packetEncoding packet_encoding || return 1
+    packet_encoding=$uri_alias_value
+    packet_encoding_present=$uri_alias_present
+    ech_present=$(jq -r 'has("ech")' <<<"$uri_query_json")
+    ech=$(jq -r '.ech // ""' <<<"$uri_query_json")
+    [[ $ech_present == true ]] && ech_enabled=1
+    pcs=$(jq -r '.pcs // ""' <<<"$uri_query_json")
+    vcn=$(jq -r '.vcn // ""' <<<"$uri_query_json")
+    uri_query_alias_value "$uri_query_json" raw spx spiderX || return 1
+    spx=$uri_alias_value
+    uri_query_alias_value "$uri_query_json" raw remark remarks || return 1
+    remark_name=$uri_alias_value
+    path_present=$(jq -r 'has("path")' <<<"$uri_query_json")
+    path=$(jq -r '.path // ""' <<<"$uri_query_json")
+    host_present=$(jq -r 'has("host")' <<<"$uri_query_json")
+    host=$(jq -r '.host // ""' <<<"$uri_query_json")
+    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
+    header_type=$(jq -r '.headerType // ""' <<<"$uri_query_json")
+    quic_security_present=$(jq -r 'has("quicSecurity")' <<<"$uri_query_json")
+    quic_security=$(jq -r '.quicSecurity // ""' <<<"$uri_query_json")
+    quic_key_present=$(jq -r 'has("key")' <<<"$uri_query_json")
+    quic_key=$(jq -r '.key // ""' <<<"$uri_query_json")
+
+    if [[ $transport != quic && ($quic_security_present == true || $quic_key_present == true) ]]; then
+        outbound_proxy_parse_error="VLESS quicSecurity 和 key 仅用于 QUIC 传输"
+        return 1
+    fi
+    case $transport in
+    tcp)
+        if [[ $path_present == true || $host_present == true ]]; then
+            outbound_proxy_parse_error="VLESS TCP/raw 不支持 path 或 host 传输参数"
+            return 1
+        fi
+        if [[ $header_type_present == true ]]; then
+            case $header_type in
+            none) ;;
+            http)
+                outbound_proxy_parse_error="VLESS TCP headerType=http 伪装与原生 HTTP 传输不等价"
+                return 1
+                ;;
+            *)
+                outbound_proxy_parse_error="VLESS TCP headerType 仅支持 none"
+                return 1
+                ;;
+            esac
+        fi
+        ;;
+    http)
+        if [[ $header_type_present == true ]]; then
+            outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
+            return 1
+        fi
+        if [[ $path_present == true ]]; then
+            [[ $path ]] || {
+                outbound_proxy_parse_error="VLESS HTTP path 不能为空"
+                return 1
+            }
+        else
+            path=/
+        fi
+        if [[ $host_present == true ]]; then
+            [[ $host ]] || {
+                outbound_proxy_parse_error="VLESS HTTP host 不能为空"
+                return 1
+            }
+            host_json=$(jq -cn --arg host "$host" '$host | split(",")') || return 1
+            jq -e 'length > 0 and all(.[]; length > 0)' <<<"$host_json" >/dev/null || {
+                outbound_proxy_parse_error="VLESS HTTP host 必须是逗号分隔的非空列表"
+                return 1
+            }
+            transport_config_json=$(jq -cn --arg path "$path" --argjson host "$host_json" '{type:"http",path:$path,host:$host}') || return 1
+        else
+            transport_config_json=$(jq -cn --arg path "$path" '{type:"http",path:$path}') || return 1
+        fi
+        ;;
+    httpupgrade)
+        if [[ $header_type_present == true ]]; then
+            outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
+            return 1
+        fi
+        if [[ $path_present == true ]]; then
+            [[ $path ]] || {
+                outbound_proxy_parse_error="VLESS HTTPUpgrade path 不能为空"
+                return 1
+            }
+        else
+            path=/
+        fi
+        if [[ $host_present == true ]]; then
+            [[ $host ]] || {
+                outbound_proxy_parse_error="VLESS HTTPUpgrade host 不能为空"
+                return 1
+            }
+            [[ $host != *,* ]] || {
+                outbound_proxy_parse_error="VLESS HTTPUpgrade host 只支持单值，不能接收逗号分隔列表"
+                return 1
+            }
+            transport_config_json=$(jq -cn --arg path "$path" --arg host "$host" '{type:"httpupgrade",path:$path,host:$host}') || return 1
+        else
+            transport_config_json=$(jq -cn --arg path "$path" '{type:"httpupgrade",path:$path}') || return 1
+        fi
+        ;;
+    quic)
+        if [[ $path_present == true || $host_present == true || $header_type_present == true ]]; then
+            outbound_proxy_parse_error="VLESS QUIC 不支持 path、host 或 headerType 传输参数"
+            return 1
+        fi
+        if [[ $quic_security_present == true && $quic_security != none ]]; then
+            outbound_proxy_parse_error="VLESS QUIC 仅支持 quicSecurity=none；额外加密不兼容 sing-box"
+            return 1
+        fi
+        if [[ $quic_key_present == true && $quic_key ]]; then
+            outbound_proxy_parse_error="VLESS QUIC 不支持额外加密 key；跨内核 QUIC 变体不兼容"
+            return 1
+        fi
+        transport_config_json='{"type":"quic"}'
+        ;;
+    esac
+
+    if [[ $security == none ]]; then
+        if [[ ($sni_present == 1 && $sni) || ($alpn_present == 1 && $alpn) || ($fingerprint_present == 1 && $fingerprint) || ($insecure_present == 1 && $insecure) || ($public_key_present == 1 && $public_key) || ($short_id_present == 1 && $short_id) ]]; then
+            outbound_proxy_parse_error="VLESS security=none 不能包含 TLS/Reality 参数"
+            return 1
+        fi
+        [[ ! $flow ]] || {
+            outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
+            return 1
+        }
+    else
+        [[ $sni ]] || sni=$uri_server
+        if [[ $alpn_present == 1 ]]; then
+            [[ $alpn ]] || {
+                outbound_proxy_parse_error="VLESS alpn 不能为空"
+                return 1
+            }
+            alpn_json=$(jq -cn --arg alpn "$alpn" '$alpn | split(",")') || return 1
+            jq -e 'length > 0 and all(.[]; type == "string" and length > 0)' <<<"$alpn_json" >/dev/null || {
+                outbound_proxy_parse_error="VLESS alpn 必须是逗号分隔的非空协议列表"
+                return 1
+            }
+        else
+            alpn_json='[]'
+        fi
+        if [[ $fingerprint_present == 1 && $fingerprint != none ]]; then
+            case $fingerprint in
+            chrome | firefox | edge | safari | 360 | qq | ios | android | random | randomized) ;;
+            *)
+                outbound_proxy_parse_error="VLESS fingerprint=$fingerprint 不受支持"
+                return 1
+                ;;
+            esac
+            utls_enabled=true
+        elif [[ $security == reality ]]; then
+            [[ $fingerprint != none ]] || {
+                outbound_proxy_parse_error="VLESS Reality 需要 uTLS fingerprint"
+                return 1
+            }
+            fingerprint=chrome
+            utls_enabled=true
+        fi
+        [[ $fingerprint_present != 1 || $fingerprint ]] || {
+            outbound_proxy_parse_error="VLESS fingerprint 不能为空"
+            return 1
+        }
+        if [[ $security == reality ]]; then
+            [[ $public_key_present == 1 && $public_key ]] || {
+                outbound_proxy_parse_error="VLESS Reality 需要 pbk/publicKey"
+                return 1
+            }
+            public_key=${public_key%=}
+            [[ $public_key =~ ^[A-Za-z0-9_-]{43}$ ]] || {
+                outbound_proxy_parse_error="VLESS Reality public key 必须是 32 字节 Base64URL"
+                return 1
+            }
+            canonical_public_key=$(printf '%s=' "$public_key" | tr '_-' '/+' | base64 -d 2>/dev/null | base64 -w 0 | tr '+/' '-_' | sed 's/=*$//')
+            public_key_length=$(printf '%s' "$public_key" | tr '_-' '/+' | sed 's/$/=/' | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]')
+            [[ $canonical_public_key == "$public_key" && $public_key_length == 32 ]] || {
+                outbound_proxy_parse_error="VLESS Reality public key 必须解码为 32 字节 Base64URL"
+                return 1
+            }
+            if [[ $short_id_present == 1 && $short_id && ! $short_id =~ ^([0-9A-Fa-f]{2}){1,8}$ ]]; then
+                outbound_proxy_parse_error="VLESS Reality short ID 必须是偶数位十六进制且不超过 16 位"
+                return 1
+            fi
+            [[ $short_id_present == 1 ]] || short_id=
+        elif [[ $public_key_present == 1 || $short_id_present == 1 ]]; then
+            outbound_proxy_parse_error="VLESS pbk/publicKey 和 sid/shortId 仅用于 Reality"
+            return 1
+        fi
+        if [[ $flow && $security != tls && $security != reality ]]; then
+            outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
+            return 1
+        fi
+        if [[ $flow && $transport != tcp ]]; then
+            outbound_proxy_parse_error="VLESS Vision flow 仅支持 TCP/raw 传输"
+            return 1
+        fi
+    fi
+    if [[ $transport == grpc && $authority_present == true && $grpc_authority ]]; then
+        vless_grpc_default_authority "$uri_server" "$uri_port_number" "$security" "$sni" || {
+            outbound_proxy_parse_error="VLESS gRPC authority 默认值无法根据当前 sing-box 版本和构建确认"
+            return 1
+        }
+        grpc_default_authority=$vless_grpc_default_authority_value
+        [[ $grpc_authority == "$grpc_default_authority" ]] || {
+            outbound_proxy_parse_error="VLESS gRPC authority 不能独立覆盖，当前构建默认值为 $grpc_default_authority"
+            return 1
+        }
+    fi
+    if [[ $ech_enabled == 1 ]]; then
+        [[ $security == tls ]] || {
+            outbound_proxy_parse_error="VLESS ECH 仅支持 TLS，不能与 security=$security 组合"
+            return 1
+        }
+        if [[ $fingerprint && $fingerprint != none ]]; then
+            outbound_proxy_parse_error="VLESS ECH 与 uTLS fingerprint 组合不兼容"
+            return 1
+        fi
+        if [[ $ech ]]; then
+            normalize_vless_ech_config "$ech" || {
+                outbound_proxy_parse_error="VLESS ECH 必须是 ECH CONFIGS PEM 或静态 ECHConfigList Base64"
+                return 1
+            }
+            ech_config=$vless_ech_config
+        fi
+    fi
+    if [[ $pcs ]]; then
+        [[ $security == tls ]] || {
+            outbound_proxy_parse_error="VLESS pcs 整张证书 SHA-256 固定需要 TLS"
+            return 1
+        }
+        vless_core_supports_certificate_sha256 || {
+            outbound_proxy_parse_error="VLESS pcs 整张证书 SHA-256 固定需要 sing-box 1.15.0+，当前版本 ${is_core_ver:-未知} 不支持"
+            return 1
+        }
+        normalize_vless_certificate_sha256 "$pcs" || {
+            outbound_proxy_parse_error="VLESS pcs 必须是逗号分隔的 32 字节整张证书 SHA-256 十六进制或 Base64 摘要"
+            return 1
+        }
+        pcs_enabled=1
+    fi
+    if [[ $vcn ]]; then
+        [[ $security == tls && $vcn == "$sni" ]] || {
+            outbound_proxy_parse_error="VLESS vcn 仅支持空值或与 TLS SNI 相同的证书校验名"
+            return 1
+        }
+    fi
+    if [[ $spx ]]; then
+        outbound_proxy_parse_error="VLESS spx/spiderX 非空值与 sing-box Reality 参数不等价，暂不支持"
+        return 1
+    fi
+    [[ ! $packet_encoding || $packet_encoding == xudp || $packet_encoding == packetaddr ]] || {
+        outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
+        return 1
+    }
+
+    outbound_proxy_name=
+    if [[ $fragment_present == 1 ]]; then
+        outbound_proxy_name=$(url_percent_decode "$raw_name") || {
+            outbound_proxy_parse_error="VLESS 链接名称编码无效"
+            return 1
+        }
+    elif [[ $remark_name ]]; then
+        outbound_proxy_name=$remark_name
+    fi
+    outbound_proxy_config_json=$(jq -cn \
+        --arg server "$uri_server" \
+        --argjson server_port "$uri_port_number" \
+        --arg uuid "$decoded_auth" \
+        --arg security "$security" \
+        --arg sni "$sni" \
+        --argjson insecure "$insecure" \
+        --argjson alpn "$alpn_json" \
+        --argjson alpn_present "${alpn_present:-0}" \
+        --argjson utls_enabled "$utls_enabled" \
+        --arg fingerprint "$fingerprint" \
+        --arg public_key "$public_key" \
+        --arg short_id "$short_id" \
+        --arg flow "$flow" \
+        --arg transport "$transport" \
+        --argjson transport_config "$transport_config_json" \
+        --arg packet_encoding "$packet_encoding" \
+        --argjson packet_encoding_present "${packet_encoding_present:-0}" \
+        --arg transport_type "$transport_type" \
+        --arg ws_path "$ws_path" \
+        --arg ws_host "$ws_host" \
+        --argjson ws_host_present "$ws_host_present" \
+        --arg ws_early_data "$ws_early_data" \
+        --argjson ws_early_data_present "$ws_early_data_present" \
+        --arg ws_early_data_header "$ws_early_data_header" \
+        --argjson ws_early_data_header_present "$ws_early_data_header_present" \
+        --arg grpc_service_name "$grpc_service_name" \
+        --argjson grpc_service_name_present "$grpc_service_name_present" \
+        --arg ech_config "$ech_config" \
+        --argjson ech_enabled "$ech_enabled" \
+        --argjson certificate_sha256 "$vless_certificate_sha256_json" \
+        --argjson pcs_enabled "$pcs_enabled" \
+        '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
+        + if $security == "none" then {} else
+            {tls:({enabled:true,server_name:$sni,insecure:$insecure}
+                + if $alpn_present == 1 then {alpn:$alpn} else {} end
+                + if $utls_enabled then {utls:{enabled:true,fingerprint:$fingerprint}} else {} end
+                + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end
+                + if $ech_enabled == 1 then {ech:({enabled:true} + if $ech_config == "" then {} else {config:$ech_config} end)} else {} end
+                + if $pcs_enabled == 1 then {certificate_sha256:$certificate_sha256} else {} end)}
+          end
+        + if $flow == "" then {} else {flow:$flow} end
+        + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end
+        + if $transport_type == "ws" then
+            {transport:({type:"ws",path:$ws_path}
+                + if $ws_host_present == 1 then {headers:{Host:$ws_host}} else {} end
+                + if $ws_early_data_present == 1 then
+                    {max_early_data:($ws_early_data|tonumber)}
+                    + if $ws_early_data_header_present == 1 then {early_data_header_name:$ws_early_data_header} else {} end
+                  else {} end)}
+          elif $transport_type == "grpc" then
+            {transport:({type:"grpc"}
+                + if $grpc_service_name_present == 1 then {service_name:$grpc_service_name} else {} end)}
+          elif $transport == "tcp" then {} else {transport:$transport_config} end') || {
+        outbound_proxy_parse_error="无法构造 VLESS 原生出站参数"
+        return 1
+    }
+    return 0
+}
+
+parse_proxy_uri() {
+    local expected=$1 uri=$2
+    outbound_proxy_parse_error=
+    case $expected in
+    ss)
+        parse_ss_uri "$uri"
+        ;;
+    vless)
+        parse_vless_uri "$uri"
+        ;;
+    *)
+        outbound_proxy_parse_error="不支持的代理出站类型"
+        return 1
+        ;;
+    esac
+}
+
+parse_ss_uri() {
+    local uri=$1 raw_name= raw_query= auth authority decoded_auth
+    local fragment_present=0 fragment_name remark_name remarks_name remark_present remarks_present plugin key
+    outbound_proxy_parse_error=
+    outbound_proxy_json=
+    outbound_proxy_config_json=
+    outbound_proxy_name=
+    is_outbound_ss_name=
+    is_outbound_ss_server=
+    is_outbound_ss_port=
+    is_outbound_ss_method=
+    is_outbound_ss_password=
+    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
+    if [[ $uri =~ [[:cntrl:]] ]]; then
+        outbound_proxy_parse_error="SS 分享链接含控制字符"
+        return 1
+    fi
+    if [[ $uri != ss://* ]]; then
+        outbound_proxy_parse_error="仅支持单条 ss:// Shadowsocks 分享链接"
+        return 1
+    fi
     uri=${uri#ss://}
     if [[ $uri == *#* ]]; then
+        fragment_present=1
         raw_name=${uri#*#}
         uri=${uri%%#*}
     fi
-    [[ $uri == *\?* ]] && return 1
-    [[ $uri == *@* ]] || return 1
+    if [[ $uri == *\?* ]]; then
+        raw_query=${uri#*\?}
+        uri=${uri%%\?*}
+        if ! parse_uri_query "$raw_query"; then
+            outbound_proxy_parse_error="SS 查询参数格式、重复项或百分号编码无效"
+            return 1
+        fi
+    else
+        uri_query_json='{}'
+    fi
+    if [[ $uri != *@* ]]; then
+        outbound_proxy_parse_error="SS 分享链接缺少凭据或服务器地址"
+        return 1
+    fi
     auth=${uri%@*}
-    endpoint=${uri#*@}
-    decoded_auth=$(ss_base64_decode "$auth") || return 1
-    [[ $decoded_auth == *:* ]] || return 1
+    authority=${uri#*@}
+    if [[ ! $auth || $auth == *@* || $authority == *@* ]]; then
+        outbound_proxy_parse_error="SS 分享链接凭据或服务器地址格式无效"
+        return 1
+    fi
+    [[ $authority == */ ]] && authority=${authority%/}
+    if [[ $authority == */* ]] || ! parse_uri_authority "$authority"; then
+        outbound_proxy_parse_error="SS 服务器地址或端口无效"
+        return 1
+    fi
+
+    if ! decoded_auth=$(url_percent_decode "$auth"); then
+        outbound_proxy_parse_error="SS 凭据含无效百分号编码或控制字符"
+        return 1
+    fi
+    if [[ $decoded_auth != *:* ]]; then
+        if ! decoded_auth=$(ss_base64_decode "$decoded_auth" 2>/dev/null) 2>/dev/null; then
+            outbound_proxy_parse_error="SS 凭据 Base64 编码无效"
+            return 1
+        fi
+    fi
+    if [[ $decoded_auth != *:* ]]; then
+        outbound_proxy_parse_error="SS 凭据必须包含加密方式和密码"
+        return 1
+    fi
     is_outbound_ss_method=${decoded_auth%%:*}
     is_outbound_ss_password=${decoded_auth#*:}
-    is_outbound_ss_server=${endpoint%:*}
-    is_outbound_ss_port=${endpoint##*:}
-    [[ $is_outbound_ss_server && $is_outbound_ss_port && $is_outbound_ss_server != "$endpoint" ]] || return 1
-    ss_method_supported "$is_outbound_ss_method" || return 1
-    [[ $(is_test port "$is_outbound_ss_port") ]] || return 1
-    [[ $is_outbound_ss_password ]] || return 1
-    ss_password_valid_for_method "$is_outbound_ss_method" "$is_outbound_ss_password" || return 1
-    is_outbound_ss_name=$(url_decode "$raw_name")
+    is_outbound_ss_server=$uri_server
+    is_outbound_ss_port=$uri_port_number
+    if ! ss_method_supported "$is_outbound_ss_method"; then
+        outbound_proxy_parse_error="SS 加密方式不受支持"
+        return 1
+    fi
+    if [[ ! $is_outbound_ss_password || $decoded_auth =~ [[:cntrl:]] ]]; then
+        outbound_proxy_parse_error="SS 密码为空或含控制字符"
+        return 1
+    fi
+    if ! ss_password_valid_for_method "$is_outbound_ss_method" "$is_outbound_ss_password"; then
+        outbound_proxy_parse_error="SS2022 密钥 Base64 格式或长度无效"
+        return 1
+    fi
+
+    while IFS= read -r key; do
+        case $key in
+        remark | remarks | plugin) ;;
+        *)
+            outbound_proxy_parse_error="SS 分享链接包含不支持的参数: $key"
+            return 1
+            ;;
+        esac
+    done < <(jq -r 'keys[]' <<<"$uri_query_json")
+    plugin=$(jq -r '.plugin // empty' <<<"$uri_query_json")
+    if [[ $plugin ]]; then
+        outbound_proxy_parse_error="SS 插件暂不支持 (plugin)"
+        return 1
+    fi
+    remarks_name=$(jq -r '.remarks // empty' <<<"$uri_query_json")
+    remark_name=$(jq -r '.remark // empty' <<<"$uri_query_json")
+    remarks_present=$(jq -r 'has("remarks")' <<<"$uri_query_json")
+    remark_present=$(jq -r 'has("remark")' <<<"$uri_query_json")
+    if [[ $remarks_present == true && $remark_present == true && $remarks_name != "$remark_name" ]]; then
+        outbound_proxy_parse_error="remark 和 remarks 参数值冲突"
+        return 1
+    fi
+    if [[ $fragment_present == 1 ]]; then
+        if ! fragment_name=$(url_percent_decode "$raw_name"); then
+            outbound_proxy_parse_error="SS 分享名称含无效百分号编码或控制字符"
+            return 1
+        fi
+        is_outbound_ss_name=$fragment_name
+    elif [[ $remarks_present == true ]]; then
+        is_outbound_ss_name=$remarks_name
+    elif [[ $remark_present == true ]]; then
+        is_outbound_ss_name=$remark_name
+    else
+        is_outbound_ss_name=
+    fi
+    outbound_proxy_name=$is_outbound_ss_name
+    outbound_proxy_config_json=$(jq -cn \
+        --arg server "$is_outbound_ss_server" \
+        --argjson server_port "$is_outbound_ss_port" \
+        --arg method "$is_outbound_ss_method" \
+        --arg password "$is_outbound_ss_password" \
+        '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
+    return 0
+}
+
+parse_ss_uri_for_outbound() {
+    parse_proxy_uri ss "$1"
+}
+
+outbound_proxy_from_metadata() {
+    local cfg=$1 metadata_file=$2 mode server port method password name
+    outbound_proxy_json=
+    outbound_proxy_config_json=
+    outbound_proxy_name=
+    [[ -f $metadata_file ]] || return 0
+    jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || return 1
+    mode=$(jq -r '.outbound_mode // empty' "$metadata_file")
+    if jq -e 'has("outbound_proxy")' "$metadata_file" >/dev/null; then
+        outbound_proxy_json=$(jq -c '.outbound_proxy' "$metadata_file")
+        if ! jq -e '
+            (.name | type == "string")
+            and (.config | type == "object")
+            and (.config.type == "shadowsocks" or .config.type == "vless")
+            and (.config.server | type == "string" and length > 0)
+            and (.config.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+            and ((.config | has("tag") or has("detour")) | not)
+            and (.config.type != "shadowsocks" or
+                ((.config.method | type == "string" and length > 0)
+                 and (.config.password | type == "string" and length > 0)))
+            and (.config.type != "vless" or
+                (.config.uuid | type == "string" and length > 0))
+        ' <<<"$outbound_proxy_json" >/dev/null 2>&1; then
+            outbound_proxy_json=
+            [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
+            return 0
+        fi
+        outbound_proxy_name=$(jq -r '.name' <<<"$outbound_proxy_json")
+        outbound_proxy_config_json=$(jq -c '.config' <<<"$outbound_proxy_json")
+        return 0
+    fi
+
+    if [[ $mode == 'SS 出站' || $(jq -r 'has("outbound_ss_server")' "$metadata_file") == true ]]; then
+        server=$(jq -r '.outbound_ss_server // empty' "$metadata_file")
+        port=$(jq -r '.outbound_ss_port // empty' "$metadata_file")
+        method=$(jq -r '.outbound_ss_method // empty' "$metadata_file")
+        password=$(jq -r '.outbound_ss_password // empty' "$metadata_file")
+        name=$(jq -r '.outbound_ss_name // ""' "$metadata_file")
+        if [[ $server && $port =~ ^[0-9]+$ && $method && $password ]] &&
+            ss_method_supported "$method" &&
+            ((10#$port >= 1 && 10#$port <= 65535)) &&
+            ss_password_valid_for_method "$method" "$password"; then
+            outbound_proxy_config_json=$(jq -cn \
+                --arg server "$server" --argjson server_port "$((10#$port))" \
+                --arg method "$method" --arg password "$password" \
+                '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
+            outbound_proxy_name=$name
+            outbound_proxy_json=$(jq -cn --arg name "$name" --argjson config "$outbound_proxy_config_json" '{name:$name,config:$config}') || return 1
+            return 0
+        fi
+        [[ $mode == 'SS 出站' ]] && return 1
+    fi
+    [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
+    return 0
 }
 
 resolve_entry_addr_for_listen() {
@@ -836,7 +2713,7 @@ sync_entry_addr_config() {
 create() {
     case $1 in
     server)
-        local preserved_node_name preserved_entry_addr preserved_outbound_mode preserved_outbound_ss_server preserved_outbound_ss_port preserved_outbound_ss_method preserved_outbound_ss_password preserved_outbound_ss_name previous_config_file is_snell_tmp_file
+        local previous_config_file is_snell_tmp_file node_migration_applied
         is_tls=none
         get new
         # listen
@@ -888,49 +2765,42 @@ create() {
             msg
             return
         }
-        [[ $is_change && $is_config_file ]] && preserved_node_name=$(meta_get "$is_config_file" '.node_name')
-        [[ $is_change && $is_config_file ]] && preserved_entry_addr=$(meta_get "$is_config_file" '.entry_addr')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_mode=$(meta_get "$is_config_file" '.outbound_mode')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_server=$(meta_get "$is_config_file" '.outbound_ss_server')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_port=$(meta_get "$is_config_file" '.outbound_ss_port')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_method=$(meta_get "$is_config_file" '.outbound_ss_method')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_password=$(meta_get "$is_config_file" '.outbound_ss_password')
-        [[ $is_change && $is_config_file ]] && preserved_outbound_ss_name=$(meta_get "$is_config_file" '.outbound_ss_name')
         previous_config_file=$is_config_file
-        if [[ ${2,,} == snell ]]; then
+        node_migration_applied=
+        if [[ $is_change && $previous_config_file ]]; then
+            [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
+            apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$node_lifecycle_error"
+            node_migration_applied=1
+            is_config_file=$is_config_name
+            msg "\n节点配置已应用: $(_green $is_config_name)\n"
+            if [[ $is_caddy && $is_change && $old_host ]]; then
+                is_del_host=$old_host
+                [[ $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+            fi
+        elif [[ ${2,,} == snell ]]; then
             if ! mv -f "$is_snell_tmp_file" "$is_json_file"; then
                 rm -f "$is_snell_tmp_file"
                 err "保存 Snell 配置失败, 原有配置未改变."
-            fi
-            if [[ $previous_config_file && $previous_config_file != "$is_config_name" ]]; then
-                rm -f "$is_conf_dir/$previous_config_file"
-                meta_move "$previous_config_file" "$is_config_name"
             fi
         else
             [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
             cat <<<$is_new_json >"$is_json_file"
         fi
-        [[ $preserved_node_name && $is_config_name ]] && meta_set "$is_config_name" node_name "$preserved_node_name"
-        [[ $preserved_entry_addr && $is_config_name ]] && meta_set "$is_config_name" entry_addr "$preserved_entry_addr"
-        [[ $preserved_outbound_mode && $is_config_name ]] && meta_set "$is_config_name" outbound_mode "$preserved_outbound_mode"
-        [[ $preserved_outbound_ss_server && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_server "$preserved_outbound_ss_server"
-        [[ $preserved_outbound_ss_port && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_port "$preserved_outbound_ss_port"
-        [[ $preserved_outbound_ss_method && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_method "$preserved_outbound_ss_method"
-        [[ $preserved_outbound_ss_password && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_password "$preserved_outbound_ss_password"
-        [[ $preserved_outbound_ss_name && $is_config_name ]] && meta_set "$is_config_name" outbound_ss_name "$preserved_outbound_ss_name"
         [[ $is_config_name ]] && is_config_file=$is_config_name
         [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
-        sync_runtime_node_outbound_modes
-        if [[ $is_new_install ]]; then
-            # config.json
-            create config.json
+        if [[ ! $node_migration_applied ]]; then
+            sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            if [[ $is_new_install ]]; then
+                # config.json
+                create config.json
+            fi
         fi
         # caddy auto tls
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
             create caddy $net
         }
         # restart core
-        manage restart &
+        [[ ! $node_migration_applied ]] && manage restart &
         ;;
     client)
         is_tls=tls
@@ -953,6 +2823,7 @@ create() {
         manage restart caddy &
         ;;
     config.json)
+        local candidate_config
         is_log='log:{output:"/var/log/'$is_core'/access.log",level:"info","timestamp":true}'
         is_dns='dns:{}'
         is_ntp='ntp:{"enabled":true,"server":"time.apple.com"},'
@@ -963,8 +2834,13 @@ create() {
         fi
         is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
-        cat <<<$is_server_config_json >$is_config_json
-        sync_runtime_node_outbound_modes
+        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || err "无法创建候选公共配置"
+        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法写入候选公共配置"; }
+        if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
+            rm -f "$candidate_config"
+            err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+        fi
+        rm -f "$candidate_config"
         manage restart &
         ;;
     esac
@@ -1266,21 +3142,7 @@ change() {
         info
         ;;
     14)
-        ask set_outbound_mode
-        if [[ $is_outbound_mode == 'SS 出站' ]]; then
-            ask string is_outbound_ss_uri "请输入 SS 节点链接:"
-            parse_ss_uri_for_outbound "$is_outbound_ss_uri" || err "SS 节点链接格式无效, 目前仅支持 ss://BASE64(method:password)@host:port#name"
-            meta_set "$is_config_file" outbound_ss_server "$is_outbound_ss_server"
-            meta_set "$is_config_file" outbound_ss_port "$is_outbound_ss_port"
-            meta_set "$is_config_file" outbound_ss_method "$is_outbound_ss_method"
-            meta_set "$is_config_file" outbound_ss_password "$is_outbound_ss_password"
-            meta_set "$is_config_file" outbound_ss_name "$is_outbound_ss_name"
-        fi
-        meta_set "$is_config_file" outbound_mode "$is_outbound_mode"
-        [[ -f "$is_config_json" ]] || create config.json
-        sync_runtime_node_outbound_modes
-        manage restart &
-        msg "\n已更新出站方式为: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
+        edit_node_outbound_mode
         ;;
     15)
         is_new_entry_addr=$3
@@ -1365,21 +3227,7 @@ change() {
         # mode
         if [[ $is_protocol != snell ]]; then
             # backward compatibility for non-snell outbound mode
-            ask set_outbound_mode
-            if [[ $is_outbound_mode == 'SS 出站' ]]; then
-                ask string is_outbound_ss_uri "请输入 SS 节点链接:"
-                parse_ss_uri_for_outbound "$is_outbound_ss_uri" || err "SS 节点链接格式无效, 目前仅支持 ss://BASE64(method:password)@host:port#name"
-                meta_set "$is_config_file" outbound_ss_server "$is_outbound_ss_server"
-                meta_set "$is_config_file" outbound_ss_port "$is_outbound_ss_port"
-                meta_set "$is_config_file" outbound_ss_method "$is_outbound_ss_method"
-                meta_set "$is_config_file" outbound_ss_password "$is_outbound_ss_password"
-                meta_set "$is_config_file" outbound_ss_name "$is_outbound_ss_name"
-            fi
-            meta_set "$is_config_file" outbound_mode "$is_outbound_mode"
-            [[ -f "$is_config_json" ]] || create config.json
-            sync_runtime_node_outbound_modes
-            manage restart &
-            msg "\n已更新出站方式为: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
+            edit_node_outbound_mode
             return
         fi
         if [[ $snell_version == 5 ]]; then
@@ -1422,6 +3270,7 @@ change() {
 del() {
     # dont get ip
     is_dont_get_ip=1
+    local deleted_config_file
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
     [[ ! $is_config_file ]] && get info $1
@@ -1430,10 +3279,8 @@ del() {
             msg "\n是否删除配置文件?: $is_config_file"
             pause
         fi
-        rm -rf $is_conf_dir/"$is_config_file"
-        meta_rm "$is_config_file"
-        [[ -f "$is_config_json" ]] && sync_runtime_node_outbound_modes
-        [[ ! $is_new_json ]] && manage restart &
+        deleted_config_file=$is_config_file
+        apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {
@@ -2710,7 +4557,9 @@ relay_delete() {
         fi
     fi
     rm -f "$backup_file"
-    [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes
+    [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
+        [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+    }
     manage restart &
     _green "\n已删除中转配置: relay-${local_port}.json\n"
 }
