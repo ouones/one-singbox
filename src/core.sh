@@ -596,7 +596,7 @@ outbound_mode_to_direct_tag() {
 }
 
 current_outbound_mode_display() {
-    local cfg=$1 mode name server port
+    local cfg=$1 mode name server port tls_enabled insecure tls_status=
     [[ $cfg ]] || {
         echo 未设置
         return
@@ -607,9 +607,20 @@ current_outbound_mode_display() {
         return
     }
     if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
+        if [[ $mode == 'VLESS 出站' ]]; then
+            tls_enabled=$(meta_get "$cfg" '.outbound_proxy.config.tls.enabled')
+            if [[ $tls_enabled == true ]]; then
+                insecure=$(meta_get "$cfg" '.outbound_proxy.config.tls.insecure')
+                if [[ $insecure == true ]]; then
+                    tls_status='，跳过 TLS 证书校验'
+                else
+                    tls_status='，校验 TLS 证书'
+                fi
+            fi
+        fi
         name=$(meta_get "$cfg" '.outbound_proxy.name')
         [[ $name ]] && {
-            echo "$mode ($name)"
+            echo "$mode ($name)$tls_status"
             return
         }
         if [[ $mode == 'SS 出站' ]]; then
@@ -627,11 +638,11 @@ current_outbound_mode_display() {
         fi
         [[ $server == *:* && $server != \[*\] ]] && server="[$server]"
         [[ $server && $port ]] && {
-            echo "$mode ($server:$port)"
+            echo "$mode ($server:$port)$tls_status"
             return
         }
     fi
-    echo "$mode"
+    echo "$mode${tls_status:-}"
 }
 
 runtime_node_ss_outbound_tag() {

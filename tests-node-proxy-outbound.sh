@@ -479,13 +479,13 @@ vless-menu)
             fail "unsupported or invalid VLESS URI should be rejected: $bad_uri"
         fi
     done
-    vless_uri="vless://$vless_uuid@reality.example.com:443?type=raw&security=reality&flow=xtls-rprx-vision&pbk=$vless_pbk&sid=01020304#VLESS%20%E8%8A%82%E7%82%B9"
+    vless_uri="vless://$vless_uuid@reality.example.com:443?type=raw&security=reality&flow=xtls-rprx-vision&pbk=$vless_pbk&sid=01020304&skip-cert-verify=1#VLESS%20%E8%8A%82%E7%82%B9"
     if change_output=$(printf '6\n%s\n' "$vless_uri" | change node-one.json outbound 2>&1); then :; else fail "VLESS Reality menu entry should apply: $change_output"; fi
     [[ $change_output == *"配置已应用"* && $change_output == *"VLESS 节点"* ]] || fail "VLESS menu success should show the applied upstream name: $change_output"
     [[ $change_output != *"$vless_uuid"* && $change_output != *"$vless_pbk"* && $change_output != *"vless://"* ]] || fail "VLESS menu output must not expose credentials or the share link"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "VLESS 节点" and .outbound_proxy.config.type == "vless" and .outbound_proxy.config.uuid == "'"$vless_uuid"'" and .outbound_proxy.config.tls.reality.public_key == "'"$vless_pbk"'"' "$meta_file" >/dev/null || fail "VLESS normalized config should be saved in the shared per-node proxy cache"
     jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .type == "vless" and .flow == "xtls-rprx-vision" and .tls.reality.public_key == "'"$vless_pbk"'" and (has("network") | not) and (has("transport") | not)' "$is_config_json" >/dev/null || fail "runtime VLESS outbound should carry native Reality/Vision fields without restricting proxied traffic to TCP"
-    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (VLESS 节点)' ]] || fail "VLESS renderer should display the upstream name"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (VLESS 节点)，跳过 TLS 证书校验' ]] || fail "VLESS renderer should display the upstream name and skipped certificate verification"
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
     restart_before=$(restart_count)
@@ -512,7 +512,7 @@ vless-menu)
     [[ $change_output != *"$vless_uuid"* && $change_output != *"vless://"* ]] || fail "VLESS WS output must not expose credentials or the share link"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "WS-Upstream" and .outbound_proxy.config.transport.type == "ws" and .outbound_proxy.config.transport.path == "/socket?token=a%26b" and .outbound_proxy.config.transport.max_early_data == 16' "$meta_file" >/dev/null || fail "VLESS WS normalized config should be cached"
     jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "ws" and .transport.path == "/socket?token=a%26b" and .tls.server_name == "tls.example.com" and .transport.headers.Host == "ws.example.com"' "$is_config_json" >/dev/null || fail "runtime VLESS WS outbound should preserve the normalized transport and TLS fields"
-    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (WS-Upstream)' ]] || fail "VLESS WS renderer should display the upstream name"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (WS-Upstream)，校验 TLS 证书' ]] || fail "VLESS WS renderer should display the upstream name and default certificate verification"
     change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "switching cached WS VLESS to direct should succeed: $change_output"
     jq -e '.outbound_mode == "仅V4" and .outbound_proxy.config.transport.type == "ws"' "$meta_file" >/dev/null || fail "switching direct should retain the WS VLESS cache"
     change_output=$(printf '6\n\n' | change node-one.json outbound 2>&1) || fail "cached WS VLESS config should be reusable: $change_output"
@@ -524,7 +524,7 @@ vless-menu)
     [[ $change_output != *"$vless_uuid"* && $change_output != *"vless://"* ]] || fail "VLESS gRPC output must not expose credentials or the share link"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "GRPC-Upstream" and .outbound_proxy.config.transport.type == "grpc" and .outbound_proxy.config.transport.service_name == "api/v1"' "$meta_file" >/dev/null || fail "VLESS gRPC normalized config should be cached"
     jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "grpc" and .transport.service_name == "api/v1" and .tls.server_name == "grpc-tls.example.com"' "$is_config_json" >/dev/null || fail "runtime VLESS gRPC outbound should preserve serviceName and separate TLS SNI"
-    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (GRPC-Upstream)' ]] || fail "VLESS gRPC renderer should display the upstream name"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出站 (GRPC-Upstream)，校验 TLS 证书' ]] || fail "VLESS gRPC renderer should display the upstream name and default certificate verification"
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
     restart_before=$(restart_count)
