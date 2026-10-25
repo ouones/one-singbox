@@ -427,6 +427,7 @@ is_port_used() {
 
 # ask input a string or pick a option for list.
 ask() {
+    local outbound_display=
     case $1 in
     set_ss_method)
         is_tmp_list=(${ss_method_list[@]})
@@ -457,7 +458,7 @@ ask() {
         ;;
     set_outbound_mode)
         is_tmp_list=("${outbound_mode_list[@]}")
-        is_opt_msg="\n当前出站方式: $(current_outbound_mode_display "$is_config_file")\n\n请选择出站方式:\n"
+        outbound_display=$(current_outbound_mode_display "$is_config_file")
         is_ask_set=is_outbound_mode
         ;;
     string)
@@ -481,7 +482,11 @@ ask() {
         is_emtpy_exit=1
         ;;
     esac
-    msg $is_opt_msg
+    if [[ $is_ask_set == is_outbound_mode ]]; then
+        printf '\n当前出站方式: %s\n\n请选择出站方式:\n' "$outbound_display"
+    else
+        msg $is_opt_msg
+    fi
     [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请选择 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
     [[ $is_tmp_list ]] && show_list "${is_tmp_list[@]}"
     while :; do
@@ -598,12 +603,12 @@ outbound_mode_to_direct_tag() {
 current_outbound_mode_display() {
     local cfg=$1 mode name server port tls_enabled insecure tls_status=
     [[ $cfg ]] || {
-        echo 未设置
+        printf '%s\n' 未设置
         return
     }
     mode=$(meta_get "$cfg" '.outbound_mode')
     [[ $mode ]] || {
-        echo 未设置
+        printf '%s\n' 未设置
         return
     }
     if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
@@ -620,13 +625,13 @@ current_outbound_mode_display() {
         fi
         name=$(meta_get "$cfg" '.outbound_proxy.name')
         [[ $name ]] && {
-            echo "$mode ($name)$tls_status"
+            printf '%s\n' "$mode ($name)$tls_status"
             return
         }
         if [[ $mode == 'SS 出站' ]]; then
             name=$(meta_get "$cfg" '.outbound_ss_name')
             [[ $name ]] && {
-                echo "$mode ($name)"
+                printf '%s\n' "$mode ($name)"
                 return
             }
         fi
@@ -638,11 +643,17 @@ current_outbound_mode_display() {
         fi
         [[ $server == *:* && $server != \[*\] ]] && server="[$server]"
         [[ $server && $port ]] && {
-            echo "$mode ($server:$port)$tls_status"
+            printf '%s\n' "$mode ($server:$port)$tls_status"
             return
         }
     fi
-    echo "$mode${tls_status:-}"
+    printf '%s\n' "$mode${tls_status:-}"
+}
+
+msg_outbound_mode_display() {
+    local prefix=$1 cfg=$2 display
+    display=$(current_outbound_mode_display "$cfg")
+    printf '\n%s %b%s%b\n' "$prefix" "$green" "$display" "$none"
 }
 
 runtime_node_ss_outbound_tag() {
@@ -1352,7 +1363,7 @@ edit_node_outbound_mode() {
         fi
     fi
     apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || err "$outbound_apply_error"
-    msg "\n配置已应用: $(_green $(current_outbound_mode_display "$is_config_file"))\n"
+    msg_outbound_mode_display "配置已应用:" "$is_config_file"
 }
 
 is_valid_ipv4_addr() {
@@ -1561,7 +1572,7 @@ parse_uri_query() {
 }
 
 parse_uri_authority() {
-    local authority=$1
+    local authority=$1 normalized_port
     uri_server=
     uri_port=
     if [[ $authority =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]+)$ ]]; then
@@ -1576,7 +1587,10 @@ parse_uri_authority() {
         is_valid_ipv4_addr "$uri_server" || [[ $(is_test domain "$uri_server") ]] || return 1
     fi
     [[ $uri_port =~ ^[0-9]+$ ]] || return 1
-    uri_port_number=$((10#$uri_port))
+    normalized_port=${uri_port#"${uri_port%%[!0]*}"}
+    [[ $normalized_port ]] || return 1
+    (( ${#normalized_port} <= 5 )) || return 1
+    uri_port_number=$((10#$normalized_port))
     ((uri_port_number >= 1 && uri_port_number <= 65535))
 }
 

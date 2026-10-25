@@ -223,6 +223,13 @@ ss-import-invalid)
         cmp -s "$case_dir/config.before" "$is_config_json" || fail "invalid SS URI must preserve runtime config"
     done
     [[ $change_output == *"仅支持单条 ss://"* ]] || fail "wrong scheme should be explained: $change_output"
+    overflow_uri='ss://aes-128-gcm:secret@127.0.0.1:18446744073709560004#Overflow'
+    if change_output=$(printf '5\n%s\n' "$overflow_uri" | change node-one.json outbound 2>&1); then
+        fail "overflowing SS port should be rejected"
+    fi
+    [[ $change_output == *"端口"* ]] || fail "overflowing SS port should be identified: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "overflowing SS port must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "overflowing SS port must preserve runtime config"
     [[ $(restart_count) == 1 ]] || fail "invalid SS URIs must not restart the service"
     change_output=$(printf '5\n%s\n' 'ss://aes-128-gcm:bad-secret@127.0.0.1:8388?unknown=1' | change node-one.json outbound 2>&1 || true)
     [[ $change_output == *"不支持的参数: unknown"* ]] || fail "unknown SS query parameter should be identified: $change_output"
@@ -233,6 +240,14 @@ ss-import-invalid)
     cmp -s "$case_dir/meta.before" "$meta_file" || fail "SS parameter errors must preserve metadata"
     cmp -s "$case_dir/config.before" "$is_config_json" || fail "SS parameter errors must preserve runtime config"
     [[ $(restart_count) == 1 ]] || fail "SS parameter errors must not restart the service"
+    exit 0
+    ;;
+vless-display-escaped-name)
+    escaped_name_uri='vless://550e8400-e29b-41d4-a716-446655440000@tls.example.com:443?security=tls&insecure=1#foo%5Cc'
+    change_output=$(printf '6\n%s\n' "$escaped_name_uri" | change node-one.json outbound 2>&1) || fail "VLESS with a literal backslash in its name should apply: $change_output"
+    [[ $change_output == *'VLESS 出站 (foo\c)，跳过 TLS 证书校验'* ]] || fail "VLESS success display should preserve a literal backslash and certificate status: $change_output"
+    change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "opening the outbound menu should still work: $change_output"
+    [[ $change_output == *'当前出站方式: VLESS 出站 (foo\c)，跳过 TLS 证书校验'* ]] || fail "outbound menu should preserve a literal backslash and certificate status: $change_output"
     exit 0
     ;;
 parser-ss-encoding)
@@ -253,6 +268,8 @@ parser-ss-encoding)
     if parse_proxy_uri ss 'ss://aes-128-gcm:secret@127.0.0.1:8388#Bad%'; then
         fail "malformed percent escape in SS name must be rejected"
     fi
+    parse_proxy_uri ss 'ss://aes-128-gcm:secret@127.0.0.1:00080' || fail "SS parser should accept a decimal port with leading zeros"
+    [[ $(jq -r '.server_port' <<<"$outbound_proxy_config_json") == 80 ]] || fail "SS parser should normalize a decimal port with leading zeros"
     exit 0
     ;;
 vless-menu)
@@ -1154,10 +1171,10 @@ CASE
 }
 
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"
