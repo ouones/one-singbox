@@ -32,7 +32,10 @@ if [[ $1 == check ]]; then
     [[ $config && -f $config ]] || exit 2
     [[ ! $conf_dir || -d $conf_dir ]] || exit 2
     [[ $config != "$is_config_json" ]] || exit 3
-    [[ ${TEST_REJECT_CHECK:-0} != 1 ]] || exit 1
+    if [[ ${TEST_REJECT_CHECK:-0} == 1 ]]; then
+        printf '%s\n' "${TEST_CHECK_ERROR:-synthetic config check failure}" >&2
+        exit 1
+    fi
     jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.inbounds // []) | type == "array")' "$config" >/dev/null || exit 4
     if [[ $conf_dir ]]; then
         shopt -s nullglob
@@ -41,6 +44,7 @@ if [[ $1 == check ]]; then
         done
     fi
     if [[ ${TEST_REJECT_GRPC_CHECK:-0} == 1 ]] && jq -e '[.outbounds[]? | select(.transport.type == "grpc")] | length > 0' "$config" >/dev/null; then
+        printf '%s\n' 'missing gRPC transport capability' >&2
         exit 6
     fi
 fi
@@ -248,6 +252,47 @@ vless-display-escaped-name)
     [[ $change_output == *'VLESS 出站 (foo\c)，跳过 TLS 证书校验'* ]] || fail "VLESS success display should preserve a literal backslash and certificate status: $change_output"
     change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "opening the outbound menu should still work: $change_output"
     [[ $change_output == *'当前出站方式: VLESS 出站 (foo\c)，跳过 TLS 证书校验'* ]] || fail "outbound menu should preserve a literal backslash and certificate status: $change_output"
+    exit 0
+    ;;
+vless-pcs-hex-compat)
+    shopt -u patsub_replacement 2>/dev/null || true
+    is_core_ver=1.15.0-alpha.13
+    parse_proxy_uri vless 'vless://550e8400-e29b-41d4-a716-446655440000@vless.example.com:443?security=tls&pcs=3031323334353637383961626364656630313233343536373839616263646566' || fail "64-character hexadecimal certificate pin should parse without patsub_replacement"
+    jq -e '.tls.certificate_sha256 == ["MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="]' <<<"$outbound_proxy_config_json" >/dev/null || fail "hexadecimal certificate pin should normalize to the exact 32-byte Base64 digest"
+    exit 0
+    ;;
+vless-check-diagnostics)
+    cp "$meta_file" "$case_dir/meta.before"
+    cp "$is_config_json" "$case_dir/config.before"
+    export TEST_REJECT_CHECK=1 TEST_CHECK_ERROR='synthetic full config check failure \c tail'
+    if change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1); then
+        fail "a rejected full config check should fail the menu operation"
+    fi
+    unset TEST_REJECT_CHECK TEST_CHECK_ERROR
+    [[ $change_output == *"完整配置校验失败"* && $change_output == *'synthetic full config check failure \c tail'* ]] || fail "full config check failure should include the checker diagnostic literally: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "full config check failure must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "full config check failure must preserve runtime config"
+
+    grpc_uri='vless://550e8400-e29b-41d4-a716-446655440000@grpc.example.com:443?type=grpc&security=tls'
+    export TEST_REJECT_GRPC_CHECK=1
+    if change_output=$(printf '6\n%s\n' "$grpc_uri" | change node-one.json outbound 2>&1); then
+        fail "a core without gRPC support should reject the candidate"
+    fi
+    unset TEST_REJECT_GRPC_CHECK
+    [[ $change_output == *"完整配置校验失败"* && $change_output == *"missing gRPC transport capability"* ]] || fail "missing gRPC support should be identified from the checker diagnostic: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "missing gRPC support must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "missing gRPC support must preserve runtime config"
+
+    quic_uri='vless://550e8400-e29b-41d4-a716-446655440000@quic.example.com:443?type=quic&security=tls'
+    export TEST_REJECT_CHECK=1 TEST_CHECK_ERROR='missing QUIC transport capability'
+    if change_output=$(printf '6\n%s\n' "$quic_uri" | change node-one.json outbound 2>&1); then
+        fail "a core without QUIC support should reject the candidate"
+    fi
+    unset TEST_REJECT_CHECK TEST_CHECK_ERROR
+    [[ $change_output == *"完整配置校验失败"* && $change_output == *"missing QUIC transport capability"* ]] || fail "missing QUIC support should be identified from the checker diagnostic: $change_output"
+    cmp -s "$case_dir/meta.before" "$meta_file" || fail "missing QUIC support must preserve metadata"
+    cmp -s "$case_dir/config.before" "$is_config_json" || fail "missing QUIC support must preserve runtime config"
+    [[ $(restart_count) == 0 ]] || fail "failed full checks must not restart the service"
     exit 0
     ;;
 parser-ss-encoding)
@@ -1171,10 +1216,10 @@ CASE
 }
 
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"

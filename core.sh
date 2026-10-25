@@ -1093,6 +1093,7 @@ apply_node_outbound_mode() {
     local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
     local source_config candidate_meta candidate_config original_meta original_config
     local candidate_meta_json proxy_json config_type method password
+    local check_error
     local meta_install config_install old_meta_exists=0 old_config_exists=0
     local restore_errors=()
     outbound_apply_error=
@@ -1247,8 +1248,10 @@ apply_node_outbound_mode() {
         rm -rf "$tmp_dir"
         return 1
     fi
-    if ! "$is_core_bin" check -c "$candidate_config" -C "$is_conf_dir" >/dev/null 2>&1; then
+    if ! "$is_core_bin" check -c "$candidate_config" -C "$is_conf_dir" >"$tmp_dir/check.log" 2>&1; then
         outbound_apply_error="完整配置校验失败，原配置未改变"
+        check_error=$(sed -n '/[^[:space:]]/{s/\\/\\\\/g;s/[[:cntrl:]]//g;p;q;}' "$tmp_dir/check.log")
+        [[ ! $check_error ]] || outbound_apply_error+="：$check_error"
         rm -rf "$tmp_dir"
         return 1
     fi
@@ -1856,7 +1859,7 @@ normalize_vless_ech_config() {
 }
 
 normalize_vless_certificate_sha256() {
-    local input=$1 pin raw padding mod decoded_len canonical normalized
+    local input=$1 pin raw padding mod decoded_len canonical normalized hex_escaped i
     local -a pins=()
     vless_certificate_sha256_json='[]'
     [[ $input ]] || return 0
@@ -1864,7 +1867,11 @@ normalize_vless_certificate_sha256() {
     IFS=, read -r -a pins <<<"$input"
     for pin in "${pins[@]}"; do
         if [[ $pin =~ ^[[:xdigit:]]{64}$ ]]; then
-            normalized=$(printf '%b' "${pin//??/\\x&}" | base64 -w 0) || return 1
+            hex_escaped=
+            for ((i = 0; i < ${#pin}; i += 2)); do
+                hex_escaped+="\\x${pin:i:2}"
+            done
+            normalized=$(printf '%b' "$hex_escaped" | base64 -w 0) || return 1
         else
             [[ $pin =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
             raw=${pin%%=*}
