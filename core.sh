@@ -4061,6 +4061,7 @@ get() {
 info() {
     local info_target=${1:-${is_config_file:-$is_config_name}}
     is_surge_str=
+    is_url=
     if [[ $info_target ]]; then
         get info "$info_target"
     elif [[ ! $is_protocol ]]; then
@@ -4220,6 +4221,7 @@ info() {
         [[ $is_insecure ]] && {
             warn "某些客户端如(V2rayN 等)导入URL需手动将: 跳过证书验证(allowInsecure) 设置为 true, 或打开: 允许不安全的连接"
         }
+        [[ $is_protocol != snell ]] && render_qrcode "$is_url" || :
     fi
     if [[ $is_surge_str ]]; then
         msg "------------- Surge 配置 -------------"
@@ -4241,6 +4243,23 @@ footer_msg() {
     return 0
 }
 
+render_qrcode() {
+    local url=$1
+    msg "------------- $is_config_name & QR code 二维码 -------------"
+    msg
+    if [[ $(type -P qrencode) ]]; then
+        if qrencode -t ANSI "$url"; then
+            msg
+            return 0
+        fi
+        warn "($is_config_name) QR code 二维码生成失败，请复制上方链接."
+    else
+        msg "请安装 qrencode: $(_green "$cmd update -y; $cmd install qrencode -y")"
+    fi
+    msg
+    return 1
+}
+
 # URL or qrcode
 url_qr() {
     is_dont_show_info=1
@@ -4259,14 +4278,7 @@ url_qr() {
             footer_msg
         else
             link="https://233boy.github.io/tools/qr.html#${is_url}"
-            msg "\n------------- $is_config_name & QR code 二维码 -------------"
-            msg
-            if [[ $(type -P qrencode) ]]; then
-                qrencode -t ANSI "${is_url}"
-            else
-                msg "请安装 qrencode: $(_green "$cmd update -y; $cmd install qrencode -y")"
-            fi
-            msg
+            render_qrcode "$is_url" || :
             msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
             msg "\n\e[4;${is_color}m${link}\e[0m\n"
             footer_msg
