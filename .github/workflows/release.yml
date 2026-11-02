@@ -24,29 +24,46 @@ jobs:
           fetch-depth: 0
       - name: bump version
         run: |
-          latest_tag="$(git tag --list 'v1.*' --sort=-version:refname | head -n1)"
-          latest_minor="${latest_tag#v1.}"
-          current_version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
-          current_minor="${current_version#v1.}"
-          if [[ ! "$latest_minor" =~ ^[0-9]+$ || ! "$current_minor" =~ ^[0-9]+$ ]]; then
-            echo "Could not determine the current v1.N release version." >&2
-            exit 1
+          matching_tag=""
+          if [[ "$GITHUB_RUN_ATTEMPT" -gt 1 ]]; then
+            for tag in $(git tag --list 'v1.*' --sort=-version:refname); do
+              tag_commit="$(git rev-parse "${tag}^{commit}")"
+              tag_parent="$(git rev-list --parents -n1 "$tag_commit" | cut -d' ' -f2)"
+              if [[ "$tag_commit" == "$GITHUB_SHA" || "$tag_parent" == "$GITHUB_SHA" ]]; then
+                matching_tag="$tag"
+                break
+              fi
+            done
           fi
-          if (( current_minor > latest_minor )); then
-            release_minor="$current_minor"
+          if [[ -n "$matching_tag" ]]; then
+            release_version="$matching_tag"
+            release_commit="$(git rev-parse "${matching_tag}^{commit}")"
+            sed -i "s/^is_sh_ver=.*/is_sh_ver=${release_version}/" sing-box.sh
           else
-            release_minor=$((latest_minor + 1))
+            latest_tag="$(git tag --list 'v1.*' --sort=-version:refname | head -n1)"
+            latest_minor="${latest_tag#v1.}"
+            current_version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
+            current_minor="${current_version#v1.}"
+            if [[ ! "$latest_minor" =~ ^[0-9]+$ || ! "$current_minor" =~ ^[0-9]+$ ]]; then
+              echo "Could not determine the current v1.N release version." >&2
+              exit 1
+            fi
+            if (( current_minor > latest_minor )); then
+              release_minor="$current_minor"
+            else
+              release_minor=$((latest_minor + 1))
+            fi
+            release_version="v1.${release_minor}"
+            sed -i "s/^is_sh_ver=.*/is_sh_ver=${release_version}/" sing-box.sh
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add sing-box.sh
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: bump version to ${release_version}"
+            fi
+            release_commit="$(git rev-parse HEAD)"
+            git tag "$release_version" "$release_commit"
           fi
-          release_version="v1.${release_minor}"
-          sed -i "s/^is_sh_ver=.*/is_sh_ver=${release_version}/" sing-box.sh
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add sing-box.sh
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: bump version to ${release_version}"
-          fi
-          release_commit="$(git rev-parse HEAD)"
-          git tag "$release_version" "$release_commit"
           echo "is_sh_ver=${release_version}" >> "$GITHUB_ENV"
           echo "release_commit=${release_commit}" >> "$GITHUB_ENV"
       - name: tar
