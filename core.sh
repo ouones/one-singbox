@@ -4285,7 +4285,9 @@ render_qrcode() {
 }
 
 show_qrcode_link() {
-    local link="https://233boy.github.io/tools/qr.html#${1}"
+    local encoded_url
+    encoded_url=$(jq -rn --arg uri "$1" '$uri | @uri')
+    local link="https://one-singbox-node-qr.clj1105557035.workers.dev/#data=${encoded_url}"
     msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
     msg "\n\e[4;${is_color}m${link}\e[0m\n"
 }
@@ -4307,6 +4309,7 @@ url_qr() {
             fi
             footer_msg
         else
+            msg "\n\e[${is_color}m${is_url}\e[0m\n"
             render_qrcode "$is_url" || :
             show_qrcode_link "$is_url"
             footer_msg

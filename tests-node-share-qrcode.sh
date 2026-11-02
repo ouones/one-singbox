@@ -72,7 +72,9 @@ expect_qr_args() {
 
 expect_browser_qr_link() {
   local output_file=$1 expected_url=$2 expected_count=${3:-1}
-  local browser_link="https://233boy.github.io/tools/qr.html#${expected_url}"
+  local encoded_url
+  encoded_url=$(jq -rn --arg uri "$expected_url" '$uri | @uri')
+  local browser_link="https://one-singbox-node-qr.clj1105557035.workers.dev/#data=${encoded_url}"
   local browser_link_count
   browser_link_count=$(grep -F -o -- "$browser_link" "$output_file" | wc -l)
   [[ $browser_link_count == "$expected_count" ]] || fail "expected $expected_count browser QR link(s), got $browser_link_count in $output_file"
@@ -82,7 +84,7 @@ expect_browser_qr_link() {
 
 expect_no_browser_qr_link() {
   local output_file=$1
-  [[ $(<"$output_file") != *"https://233boy.github.io/tools/qr.html#"* ]] || fail "unexpected browser QR link in $output_file"
+  [[ $(<"$output_file") != *"https://one-singbox-node-qr.clj1105557035.workers.dev/#data="* ]] || fail "unexpected browser QR link in $output_file"
 }
 
 stty() {
@@ -126,6 +128,12 @@ manage_log="$case_dir/manage.log"
 manage() { printf '%s\n' "$*" >>"$manage_log"; }
 is_port_used() { return 1; }
 printf '%s\n' '{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"rules":[]}}' >"$is_config_json"
+
+# Keep a literal expected value independent of the implementation's encoder.
+browser_fixture='vless://user:pass@[2001:db8::1]:443?path=%2Fws&security=tls#香港%20测试😀#内部  '
+expected_browser_fixture='https://one-singbox-node-qr.clj1105557035.workers.dev/#data=vless%3A%2F%2Fuser%3Apass%40%5B2001%3Adb8%3A%3A1%5D%3A443%3Fpath%3D%252Fws%26security%3Dtls%23%E9%A6%99%E6%B8%AF%2520%E6%B5%8B%E8%AF%95%F0%9F%98%80%23%E5%86%85%E9%83%A8%20%20'
+show_qrcode_link "$browser_fixture" >"$case_dir/encoded-link.out" 2>&1 || fail "browser link generation should succeed"
+[[ $(<"$case_dir/encoded-link.out") == *"$expected_browser_fixture"* ]] || fail "browser link must encode the full URI exactly once, including UTF-8, percent escapes, internal fragments and trailing spaces"
 
 # Creation and automatic details share the existing add -> info flow.
 unset is_config_file is_config_name is_new_protocol is_protocol net port uuid password ss_password ss_method
