@@ -20,7 +20,7 @@ mkdir -p "$workdir/bin"
 cat >"$workdir/bin/qrencode" <<'FAKE_QRENCODE'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$QR_LOG"
-if [[ ${QR_FIXTURE:-} == braille ]]; then
+if [[ ${QR_FIXTURE:-} == native ]]; then
   printf '▀ ▄    ▀ ▄      \n    ▀      ▀▄  ▄\n'
   exit "${QR_EXIT:-0}"
 fi
@@ -85,7 +85,7 @@ type() {
 export PATH="$QR_BIN:$PATH"
 export QR_PACKAGE_LOG="$CASE_DIR/packages.log"
 source "$CORE_FILE"
-full_braille_cell='⣿'
+full_qr_cell='█'
 TEST_TTY_SIZE='40 80'
 case_dir=$CASE_DIR
 mkdir -p "$case_dir/conf/.quan-meta"
@@ -120,7 +120,7 @@ expected_url=$is_url
 [[ $expected_url == ss://* ]] || fail "created SS node should expose its original URL"
 [[ $(<"$case_dir/add.out") == *"$expected_url"* ]] || fail "creation output should retain the original URL"
 expect_qr_args "$expected_url"
-[[ $(<"$case_dir/add.out") == *"$full_braille_cell"* ]] || fail "creation should render the compact QR code"
+[[ $(<"$case_dir/add.out") == *"$full_qr_cell"* ]] || fail "creation should render the QR code"
 [[ $(grep -c '^' "$manage_log") == 1 ]] || fail "successful creation should perform its existing single restart"
 
 # QR failures must not turn a successful create into a failure or trigger another restart.
@@ -163,17 +163,17 @@ special_url=$is_url
 [[ $special_url == *"@[2001:db8::10]:41602#二维码%20node" ]] || fail "special IPv6 URL should preserve existing formatting: $special_url"
 [[ $(<"$case_dir/info.out") == *"$special_url"* ]] || fail "info output should include its original URL"
 expect_qr_args "$special_url"
-[[ $(<"$case_dir/info.out") == *"$full_braille_cell"* ]] || fail "info should render the compact QR code"
+[[ $(<"$case_dir/info.out") == *"$full_qr_cell"* ]] || fail "info should render the QR code"
 
 # A narrow terminal must not display a QR code that would wrap across the screen.
 TEST_TTY_SIZE='12 20'
 rm -f "$QR_LOG"
 info special.json >"$case_dir/narrow.out" 2>&1 || fail "info should remain successful when the QR code does not fit"
-[[ $(<"$case_dir/narrow.out") != *"$full_braille_cell"* ]] || fail "a QR code that exceeds the terminal size must not be displayed"
+[[ $(<"$case_dir/narrow.out") != *"$full_qr_cell"* ]] || fail "a QR code that exceeds the terminal size must not be displayed"
 [[ $(<"$case_dir/narrow.out") == *"终端空间不足"* && $(<"$case_dir/narrow.out") == *"$special_url"* ]] || fail "small terminal should explain the space limit and retain the share URL"
 rm -f "$QR_LOG"
 url_qr qr special.json >"$case_dir/narrow-qr-command.out" 2>&1 || fail "the independent QR command should remain successful when the QR does not fit"
-[[ $(<"$case_dir/narrow-qr-command.out") != *"$full_braille_cell"* && $(<"$case_dir/narrow-qr-command.out") == *"终端空间不足"* ]] || fail "the independent QR command should skip an oversized QR with a clear message"
+[[ $(<"$case_dir/narrow-qr-command.out") != *"$full_qr_cell"* && $(<"$case_dir/narrow-qr-command.out") == *"终端空间不足"* ]] || fail "the independent QR command should skip an oversized QR with a clear message"
 [[ $(<"$case_dir/narrow-qr-command.out") == *"https://233boy.github.io/tools/qr.html#$special_url"* ]] || fail "the independent QR command should retain its webpage fallback"
 is_dont_show_info=
 
@@ -182,14 +182,14 @@ TEST_TTY_SIZE='40 80'
 rm -f "$QR_LOG"
 COLUMNS=1 info special.json >"$case_dir/stale-columns.out" 2>&1 || fail "info should succeed when COLUMNS is stale"
 expect_qr_args "$special_url"
-[[ $(<"$case_dir/stale-columns.out") == *"$full_braille_cell"* ]] || fail "stale COLUMNS must not hide a QR code that fits the terminal"
+[[ $(<"$case_dir/stale-columns.out") == *"$full_qr_cell"* ]] || fail "stale COLUMNS must not hide a QR code that fits the terminal"
 
 # Without a readable terminal size, omit the QR code and keep the original link visible.
 TEST_TTY_SIZE=
 unset -f stty
 rm -f "$QR_LOG"
 info special.json >"$case_dir/no-tty.out" 2>&1 || fail "info should succeed without a TTY"
-[[ ! -f $QR_LOG && $(<"$case_dir/no-tty.out") != *"$full_braille_cell"* ]] || fail "a missing TTY must not invoke or display qrencode"
+[[ ! -f $QR_LOG && $(<"$case_dir/no-tty.out") != *"$full_qr_cell"* ]] || fail "a missing TTY must not invoke or display qrencode"
 [[ $(<"$case_dir/no-tty.out") == *"无法读取终端尺寸"* && $(<"$case_dir/no-tty.out") == *"$special_url"* ]] || fail "no-TTY output should explain the skipped QR and retain the share URL"
 stty() {
   [[ ${TEST_TTY_SIZE:-} ]] || return 1
@@ -197,35 +197,31 @@ stty() {
 }
 TEST_TTY_SIZE='40 80'
 
-# The issue's long VLESS Reality URL fits in 40x24 when rendered with compact Braille cells.
+# The issue's long VLESS Reality URL fits when the terminal can display the native UTF8 output.
 issue16_url='vless://00000000-0000-4000-8000-000000000000@203.0.113.10:40018?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome#TEST-NODE'
 rm -f "$QR_LOG"
-render_qrcode "$issue16_url" >"$case_dir/long-fit.out" 2>&1 || fail "the compact issue QR should fit in an 80x40 terminal"
+render_qrcode "$issue16_url" >"$case_dir/long-fit.out" 2>&1 || fail "the issue QR should fit in an 80x40 terminal"
 expect_qr_args "$issue16_url"
-[[ $(<"$case_dir/long-fit.out") == *"$full_braille_cell"* ]] || fail "a compact QR that fits should be displayed"
+[[ $(<"$case_dir/long-fit.out") == *"$full_qr_cell"* ]] || fail "a QR that fits should be displayed"
 
-# The issue's long QR should fit a phone-sized 40x24 terminal in compact mode.
+# A terminal that fits the compact QR but not the native output must be rejected.
 TEST_TTY_SIZE='24 40'
 rm -f "$QR_LOG"
-render_qrcode "$issue16_url" >"$case_dir/long-mobile.out" 2>&1 || fail "the compact issue QR should fit in a 40x24 terminal"
+render_qrcode "$issue16_url" >"$case_dir/long-mobile.out" 2>&1 && fail "the native issue QR should not fit in a 40x24 terminal"
 expect_qr_args "$issue16_url"
-[[ $(<"$case_dir/long-mobile.out") == *"$full_braille_cell"* && $(<"$case_dir/long-mobile.out") != *"终端空间不足"* ]] || fail "a 40x24 terminal should display the compact issue QR"
-mobile_qr_output=$(msg() { :; }; warn() { :; }; render_qrcode "$issue16_url")
-mobile_qr_width_bytes=$(printf '%s\n' "$mobile_qr_output" | head -n 1 | wc -c)
-mobile_qr_width=$(((mobile_qr_width_bytes - 1) / 3))
-mobile_qr_height=$(printf '%s\n' "$mobile_qr_output" | wc -l)
-[[ $mobile_qr_width == 29 && $mobile_qr_height == 15 ]] || fail "the compact QR should occupy 29x15 cells, got ${mobile_qr_width}x${mobile_qr_height}"
-
-# The Braille fixture exercises every dot position in the compact cell mapping.
+[[ $(<"$case_dir/long-mobile.out") != *"$full_qr_cell"* && $(<"$case_dir/long-mobile.out") == *"终端空间不足"* ]] || fail "a 40x24 terminal should explain that the native QR does not fit"
+# Native UTF8 output must be passed through without converting its block characters.
 rm -f "$QR_LOG"
-QR_FIXTURE=braille render_qrcode 'fixture-url' >"$case_dir/braille-fixture.out" 2>&1 || fail "a narrow terminal should render the compact QR fixture"
+export QR_FIXTURE=native
+native_qr_output=$(msg() { :; }; warn() { :; }; render_qrcode 'fixture-url') || fail "a terminal with enough space should render the native QR fixture"
+unset QR_FIXTURE
 expect_qr_args 'fixture-url'
-[[ $(<"$case_dir/braille-fixture.out") == *'⠁⠂⠄⠈⠐⠠⡀⢀'* ]] || fail "each QR module should map to its expected Braille dot"
+[[ $native_qr_output == $'▀ ▄    ▀ ▄      \n    ▀      ▀▄  ▄' ]] || fail "render_qrcode should preserve qrencode UTF8 output exactly"
 
 TEST_TTY_SIZE='24 28'
 rm -f "$QR_LOG"
 render_qrcode "$issue16_url" >"$case_dir/long-narrow.out" 2>&1 || :
-[[ $(<"$case_dir/long-narrow.out") != *"$full_braille_cell"* && $(<"$case_dir/long-narrow.out") == *"终端空间不足"* ]] || fail "a terminal narrower than the compact QR should omit it with a clear warning"
+[[ $(<"$case_dir/long-narrow.out") != *"$full_qr_cell"* && $(<"$case_dir/long-narrow.out") == *"终端空间不足"* ]] || fail "a terminal smaller than the native QR should omit it with a clear warning"
 expect_qr_args "$issue16_url"
 TEST_TTY_SIZE='40 80'
 
@@ -237,7 +233,7 @@ rm -f "$QR_LOG"
 info relay-41603.json >"$case_dir/no-link.out" 2>&1 || fail "info for an unshareable node should succeed"
 [[ ! -f $QR_LOG ]] || fail "node without a share URL must not call qrencode"
 [[ $is_url ]] && fail "node without a share URL must clear the previous URL"
-[[ $(<"$case_dir/no-link.out") != *"$full_braille_cell"* ]] || fail "node without a share URL must not display a QR code"
+[[ $(<"$case_dir/no-link.out") != *"$full_qr_cell"* ]] || fail "node without a share URL must not display a QR code"
 
 # Existing quiet and export paths do not invoke qrencode.
 rm -f "$QR_LOG"
@@ -256,13 +252,13 @@ is_dont_auto_exit=
 url_qr url special.json >"$case_dir/url.out" 2>&1 || fail "URL export should succeed"
 [[ ! -f $QR_LOG ]] || fail "URL export must not call qrencode"
 [[ $(<"$case_dir/url.out") == *"$special_url"* ]] || fail "URL export should retain the share URL"
-[[ $(<"$case_dir/url.out") != *"$full_braille_cell"* ]] || fail "URL export must not display a QR code"
+[[ $(<"$case_dir/url.out") != *"$full_qr_cell"* ]] || fail "URL export must not display a QR code"
 
 # Independent QR remains available through the same renderer.
 rm -f "$QR_LOG"
 url_qr qr special.json >"$case_dir/qr.out" 2>&1 || fail "independent QR command should succeed"
 expect_qr_args "$special_url"
-[[ $(<"$case_dir/qr.out") == *"$full_braille_cell"* ]] || fail "independent QR command should render the compact QR code"
+[[ $(<"$case_dir/qr.out") == *"$full_qr_cell"* ]] || fail "independent QR command should render the QR code"
 
 # Missing and failing qrencode are non-blocking for node details.
 rm -f "$QR_LOG"
@@ -301,16 +297,43 @@ if qrencode_bin=$(command -v qrencode); then
 source "$CORE_FILE"
 msg() { :; }
 warn() { :; }
-stty() { printf '24 40\n'; }
+stty() { printf '40 80\n'; }
 is_config_name=TEST-NODE
 render_qrcode "$QR_URL"
 REAL_QR
-  ) || fail "real qrencode output should fit in a 40x24 terminal"
-  real_qr_width_bytes=$(printf '%s\n' "$real_qr_output" | head -n 1 | wc -c)
-  real_qr_width=$(((real_qr_width_bytes - 1) / 3))
+  ) || fail "real qrencode output should fit in an 80x40 terminal"
+  [[ $real_qr_output == "$qr_output" ]] || fail "render_qrcode should preserve the real qrencode output exactly"
+  real_qr_width=$(printf '%s\n' "$real_qr_output" | sed -e 's/█/x/g' -e 's/▀/x/g' -e 's/▄/x/g' | wc -L)
   real_qr_height=$(printf '%s\n' "$real_qr_output" | wc -l)
-  [[ $real_qr_width == 29 && $real_qr_height == 15 ]] || fail "real compact QR dimensions changed: ${real_qr_width}x${real_qr_height}"
-  echo "PASS: real qrencode compact dimensions are ${real_qr_width} columns x ${real_qr_height} rows"
+  [[ $real_qr_width == 57 && $real_qr_height == 29 ]] || fail "real native QR dimensions changed: ${real_qr_width}x${real_qr_height}"
+  echo "PASS: real qrencode native dimensions are ${real_qr_width} columns x ${real_qr_height} rows"
+
+  if command -v zbarimg >/dev/null && python3 -c 'from PIL import Image, ImageDraw, ImageFont' >/dev/null 2>&1 && [[ -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf ]]; then
+    qr_image="$workdir/qr-terminal.png"
+    printf '%s\n' "$real_qr_output" >"$workdir/qr-terminal.txt"
+    python3 - "$workdir/qr-terminal.txt" "$qr_image" <<'RENDER_QR'
+import sys
+from PIL import Image, ImageDraw, ImageFont
+
+text = open(sys.argv[1], encoding="utf-8").read().rstrip("\n")
+font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
+probe = Image.new("RGB", (1, 1), "white")
+draw = ImageDraw.Draw(probe)
+bounds = draw.multiline_textbbox((0, 0), text, font=font, spacing=0)
+quiet_zone = 32
+origin = (quiet_zone - bounds[0], quiet_zone - bounds[1])
+image = Image.new("RGB", (bounds[2] - bounds[0] + quiet_zone * 2, bounds[3] - bounds[1] + quiet_zone * 2), "white")
+draw = ImageDraw.Draw(image)
+draw.rectangle((origin[0] + bounds[0], origin[1] + bounds[1], origin[0] + bounds[2], origin[1] + bounds[3]), fill="black")
+draw.multiline_text(origin, text, font=font, fill="white", spacing=0)
+image.save(sys.argv[2])
+RENDER_QR
+    decoded_url=$(zbarimg --quiet --raw "$qr_image") || fail "the rasterized terminal QR should be decodable"
+    [[ $decoded_url == "$issue16_url" ]] || fail "the rasterized terminal QR decoded to a different URL"
+    echo "PASS: rendered terminal QR decodes to the original issue URL"
+  else
+    echo "SKIP: rendered terminal QR decode requires zbarimg, Pillow, and DejaVu Sans Mono"
+  fi
 fi
 
 bash "$repo_root/tests-qrcode-deps.sh" || fail "QR dependency lifecycle tests failed"
