@@ -291,6 +291,7 @@ expect_no_browser_qr_link "$case_dir/url.out"
 rm -f "$QR_LOG"
 url_qr qr special.json >"$case_dir/qr.out" 2>&1 || fail "independent QR command should succeed"
 expect_qr_args "$special_url"
+expect_browser_qr_link "$case_dir/qr.out" "$special_url"
 [[ $(<"$case_dir/qr.out") == *"$full_qr_cell"* ]] || fail "independent QR command should render the QR code"
 
 # Missing and failing qrencode are non-blocking for node details.
