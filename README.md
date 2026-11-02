@@ -1,149 +1,137 @@
-# 介绍
+# one-singbox
 
-最好用的 sing-box 一键安装脚本 & 管理脚本，支持主流代理协议节点搭建与原生高性能端口中转
+<p align="center">
+  <img src="assets/readme/hero.png" width="100%" alt="one-singbox：sing-box 安装与终端管理工具，通过 sb 菜单、节点命令和中转命令管理 Linux 服务器上的配置。">
+</p>
 
-# 特点
+## 介绍
 
-- 快速安装
-- 无敌好用
-- 零学习成本
-- 自动化 TLS
-- 简化所有流程
-- 兼容 sing-box 命令
-- 强大的快捷参数
-- 支持所有常用协议
-- 一键添加 VLESS-REALITY (默认)
-- 一键添加 TUIC
-- 一键添加 Trojan
-- 一键添加 Hysteria2
-- 一键添加 AnyTLS
-- 一键添加 Snell v6 (默认, PSK 需 12-255 位, 支持 default/unshaped/unsafe-raw 运行模式, 向后兼容 v5, 支持双格式导出 sing-box URI 链接与 Surge 代理配置)
-- 一键添加端口中转 (原生 direct 极速转发, 支持 TCP/UDP 双协议, 回车自动分配端口)
-- 支持交互式主菜单与快捷命令行双模式管理 (直接运行 sing-box 即可操作)
-- 一键添加 Shadowsocks 2022
-- 一键添加 VMess-(TCP/HTTP/QUIC)
-- 一键添加 VMess-(WS/H2/HTTPUpgrade)-TLS
-- 一键添加 VLESS-(WS/H2/HTTPUpgrade)-TLS
-- 一键添加 Trojan-(WS/H2/HTTPUpgrade)-TLS
-- 一键启用 BBR
-- 一键更改伪装网站
-- 一键更改 (端口/UUID/密码/域名/路径/加密方式/SNI/PSK/运行模式/混淆等...)
-- 还有更多...
+**one-singbox 是面向 Linux 服务器的 sing-box 安装与终端管理工具。** 通过交互式菜单和快捷命令 `sb`，管理代理节点、节点出站方式、TCP/UDP 端口中转及日常维护。
 
-# 设计理念
+从[安装教程](#教程)开始，已有安装可直接查看[常用命令](#命令行)。
 
-设计理念为：**高效率，超快速，极易用**
+本项目基于 [233boy/sing-box](https://github.com/233boy/sing-box) 演进，在保留节点管理方式的基础上，围绕 Snell、节点出站、中转及维护功能持续开发。
 
-脚本基于作者的自身使用需求，以 **多配置同时运行** 为核心设计
+| 能力 | 可以做什么 |
+| --- | --- |
+| 多协议节点管理 | 新增、修改、查看和删除多个节点，支持 VLESS-REALITY、TUIC、Trojan、Hysteria2、AnyTLS、Shadowsocks、VMess 等协议与部分传输组合。 |
+| Snell 支持 | 创建和管理 Snell v6/v5 节点，导出 `snell://` URI 与 Surge 配置。 |
+| 节点出站 | 为本机节点选择 IPv4/IPv6 直连方式，或通过 SS、VLESS 分享链接配置代理出站。 |
+| TCP/UDP 中转 | 使用 sing-box 原生 `direct` 入站，将本地端口转发到固定的远端地址和端口。 |
+| 日常维护 | 查看服务状态，更新脚本与内核，管理日志容量，为支持分享的节点显示二维码。 |
 
-并且专门优化了，添加、更改、查看、删除、这四项常用功能
+<p align="center">
+  <img src="assets/readme/capabilities.png" width="100%" alt="功能关系示意：客户端连接本机代理节点后，使用所选直连或 SS、VLESS 代理出站；端口中转则把本地 TCP/UDP 端口转发到固定远端。">
+</p>
 
-你只需要一条命令即可完成 添加、更改、查看、删除、等操作
+节点出站与端口中转分别管理：前者决定本机代理节点的流量如何发出，后者转发一个本地端口到固定目标。协议、版本与分享限制见[详细使用说明](docs/usage.md)。
 
-例如，添加一个配置仅需不到 1 秒！瞬间完成添加！其他操作亦是如此！
+## 教程
 
-脚本的参数非常高效率并且超级易用，请掌握参数的使用
+### 安装条件
 
-# 一键安装
+- 使用 **root** 用户，在可运行 Bash 的 Linux 服务器上操作；下面的安装命令需要 `wget`。
+- CPU 架构为 **amd64/x86_64** 或 **arm64/aarch64**。
+- 系统具有 `apt-get`、`yum`、`zypper` 或 `apk` 包管理器之一，并运行 **systemd** 或 **OpenRC**。
+- 服务器能够下载 GitHub 上的脚本、内核及相关依赖。
+
+以上是安装脚本检查的环境条件，不代表所有发行版版本均已逐一测试。Alpine 等精简环境需先准备 Bash 和 `wget`，再在 Bash 中执行安装命令。
+
+### 安装并进入菜单
+
+在 Bash 中执行：
 
 ```bash
 bash <(wget -qO- -o- https://github.com/ouones/one-singbox/raw/main/install.sh)
 ```
 
-# 文档
+安装过程会自动创建一个 **VLESS-REALITY** 节点，并显示节点信息。安装完成后，运行：
 
-安装及使用：https://233boy.com/sing-box/sing-box-script/
-
-# 帮助
-
-首页每次显示时都会通过 systemd 或 OpenRC 查询 sing-box 服务状态，并以绿色“运行中”或红色停止／启动失败状态展示；查询失败时以红色“状态读取失败”提示。该状态不代表外网连通性。
-
-除 Snell 外，创建成功和查看支持分享链接的本机节点时，会在链接后自动显示终端二维码。终端空间不足、无法读取终端尺寸、缺少 `qrencode` 或生成失败时，会附上浏览器二维码页链接；原始分享 URI 始终保留，可直接复制导入。普通节点详情中，终端二维码成功显示时不额外显示网页链接；单独 `qr` 命令仍会显示浏览器二维码页链接，`url` 命令不显示二维码。新安装在脚本部署后、首次节点详情显示前会自动尝试补齐 `qrencode`；失败不影响主体安装或节点创建，链接仍可复制。终端会给出当前系统的手动安装命令。主动更新脚本（主菜单“更新脚本”、`sing-box update sh`、`sing-box U` 或 `sing-box update.sh`）也会尝试补齐；即使脚本已是最新或指定版本与当前版本相同，也可通过主动更新重试。二维码补装失败不影响脚本更新。旧版本通过脚本文件更新后，首次进入首页也会尝试补齐；失败不阻断首页，后续普通首页不再重试，可手动安装或再次主动更新恢复。
-
-日志大小限制：运行 `sing-box`，进入「9 其他」→「6 日志大小限制」。默认 200 MB，可输入正整数修改，回车保留当前值；设置在重启后保留。首页显示“日志用量：当前值 / 上限 MB”，每次显示首页重新统计 `/var/log/sing-box/` 第一层非符号链接普通 `.log` 和 `.log.1` 文件的实际字节数（1 MB = 1024 × 1024 字节），并按两位小数展示当前值；没有日志时显示 0.00，读取失败时提示暂不可用。
-
-日志维护服务每 10 秒检查一次，超限后轮转并优先清理最旧记录，保留最近记录，同时留出一半容量供新日志写入；调低限制会立即检查。检查间隔内可能短暂超过上限。轮转采用复制后截断的方式，无需重启 sing-box，但复制与截断之间并发写入的少量记录可能丢失。
-
-节点出站方式：运行 `sing-box c <节点配置名> outbound`，或在节点编辑菜单中选择“更改出站方式”。支持四种 IPv4／IPv6 直连方式、SS SIP002 `ss://` 分享链接（Base64／Base64URL 或百分号编码凭据，兼容既有 SS2022 Base64 链接及多密钥密码）和 VLESS TCP/raw、WebSocket、gRPC、HTTP/h2、HTTPUpgrade 与原生 QUIC 分享链接；WebSocket、gRPC、HTTP、HTTPUpgrade 支持 none/TLS/Reality。WebSocket 映射 path、Host 和 early data；gRPC 映射 serviceName，仅接受缺省或 `gun` 模式，非空 authority 仅在可识别的 sing-box 1.14.0 构建中与默认值完全相同时接受。`h2` 需要 TLS/Reality；QUIC 仅支持无额外加密的 sing-box 原生 TLS，不兼容其他内核的额外 QUIC 加密或 Reality 组合。HTTP host 按列表解析，HTTPUpgrade host 为单值。VLESS TLS 支持 `ech` 的 ECH CONFIGS PEM／静态 ECHConfigList Base64（空值启用 DNS 获取），Base64 会包装成 PEM；`pcs` 固定整张证书 SHA-256，接受逗号分隔的十六进制或 Base64 多值，需要 sing-box 1.15.0+，1.14.0 拒绝非空值；`vcn` 仅接受空值或与 SNI 相同的证书名。Vision 只用于 TCP/raw。SS 非空插件、非空 `spx`／`spiderX`、XHTTP、mKCP、VLESS Encryption、`mux`／`smux`、TCP `headerType=http` 伪装、未知连接参数及无法等价映射的组合会明确拒绝。选择同类型代理并直接回车可复用缓存；切回直连保留最近一次代理配置。修改节点名称会保留关联，端口或协议变更会迁移代理缓存与路由，删除节点会清除关联。展示名称或地址与端口，不回显凭据。配置会先完整校验，再同步重启并确认服务运行后才提示“配置已应用”；应用失败会恢复相关配置并尝试恢复服务。该状态不表示上游连通性已检测，代理故障时不会自动改走直连。
-
-使用：`sing-box help`
-
+```bash
+sb
 ```
-sing-box script v1.0 by 233boy
-Usage: sing-box [options]... [args]...
 
-基本:
-   v, version                                      显示当前版本
-   ip                                              返回当前主机的 IP
-   pbk                                             同等于 sing-box generate reality-keypair
-   get-port                                        返回一个可用的端口
-   ss2022                                          返回一个可用于 Shadowsocks 2022 的密码
+主菜单提供“添加配置”“更改配置”“查看配置”“中转管理”等入口。首页同时显示服务状态与日志用量；**服务运行状态不代表外网连通性**。
 
-一般:
-   a, add [protocol] [args... | auto]              添加配置
-   add snell [port] [psk] [version]                添加 Snell (默认 v6, 支持 v5, 需要 sing-box >= 1.14.0)
-   c, change [name] [option] [args... | auto]      更改配置
-   d, del [name]                                   删除配置**
-   i, info [name]                                  查看配置
-   qr [name]                                       二维码信息
-   url [name]                                      URL 信息
-   Snell 提供 sing-box URI 与 Surge 配置双格式导出 (不支持二维码)
-   log                                             查看日志
-更改:
-   full [name] [...]                               更改多个参数
-   id [name] [uuid | auto]                         更改 UUID
-   host [name] [domain]                            更改域名
-   port [name] [port | auto]                       更改端口
-   path [name] [path | auto]                       更改路径
-   passwd [name] [password | auto]                 更改密码
-   key [name] [Private key | auto] [Public key]    更改密钥
-   method [name] [method | auto]                   更改加密方式
-   sni [name] [ ip | domain]                       更改 serverName
-   new [name] [...]                                更改协议
-   web [name] [domain]                             更改伪装网站
-   psk [name] [psk | auto]                         更改 Snell PSK
-   snell-version [name] [6 | 5 | auto]             更改 Snell 版本
-   mode [name] [default | unshaped | unsafe-raw | auto] 更改 Snell 运行模式 (v6)
-   obfs [name] [none | http | auto]                更改 Snell 混淆模式 (v5)
+### 创建节点并获取分享信息
 
-进阶:
-   dns [...]                                       设置 DNS
-   dd, ddel [name...]                              删除多个配置**
-   fix [name]                                      修复一个配置
-   fix-all                                         修复全部配置
-   fix-caddyfile                                   修复 Caddyfile
-   fix-config.json                                 修复 config.json
-   import                                          导入 sing-box/v2ray 脚本配置
+可直接使用安装时生成的节点；需要其他协议或更多节点时，再按以下步骤新增。
 
-中转:
-   relay add [local-port] [remote-addr] [remote-port]   添加中转 (sing-box 原生 direct, 支持 TCP/UDP)
-   relay list                                           中转列表
-   relay info [local-port]                              查看中转详情
-   relay delete [local-port]                            删除中转
-   中转管理亦可通过主菜单交互操作
-   中转无内置认证，请务必使用防火墙或网络 ACL 限制来源
-   中转不生成分享链接或二维码
+1. 运行 `sb`，选择“添加配置”，再按提示选择协议、填写参数。
+2. 创建后查看节点详情；也可通过“查看配置”重新选择节点。
+3. 复制分享链接到支持该协议的客户端，或扫描详情中的二维码。Snell 提供 URI 和 Surge 配置，不生成二维码。
+4. 根据所选协议，在服务器防火墙和云安全组中放行实际使用的 TCP/UDP 端口，再从客户端连接验证。
 
-管理:
-   un, uninstall                                   卸载
-   u, update [core | sh | caddy] [ver]             更新
-   U, update.sh                                    更新脚本
-   s, status                                       运行状态
-   start, stop, restart [caddy]                    启动, 停止, 重启
-   t, test                                         测试运行
-   reinstall                                       重装脚本
+也可以直接指定协议添加，例如：
 
-测试:
-   debug [name]                                    显示一些 debug 信息, 仅供参考
-   gen [...]                                       同等于 add, 但只显示 JSON 内容, 不创建文件, 测试使用
-   no-auto-tls [...]                               同等于 add, 但禁止自动配置 TLS, 可用于 *TLS 相关协议
-其他:
-   bbr                                             启用 BBR, 如果支持
-   bin [...]                                       运行 sing-box 命令, 例如: sing-box bin help
-   [...] [...]                                     兼容绝大多数的 sing-box 命令, 例如: sing-box generate uuid
-   h, help                                         显示此帮助界面
-
-谨慎使用 del, ddel, 此选项会直接删除配置; 无需确认
-反馈问题) https://github.com/ouones/one-singbox/issues
-文档(doc) https://233boy.com/sing-box/sing-box-script/
+```bash
+sb add snell
 ```
+
+Snell 创建需要 sing-box 内核 **1.14.0 或更高版本**，默认创建 v6；AnyTLS 需要 **1.12.0 或更高版本**。需要域名及自动 TLS 的配置，请先阅读[协议与 TLS 条件](docs/usage.md#协议与-tls)。
+
+更多操作见[使用说明](docs/usage.md)：[节点出站](docs/usage.md#节点出站)、[端口中转](docs/usage.md#端口中转)、[二维码](docs/usage.md#二维码与分享)、[日志管理](docs/usage.md#日志与容量限制)。中转无内置认证，使用前应通过防火墙或网络 ACL 限制来源。
+
+## 命令行
+
+下表中的 `节点名` 是脚本中显示的节点配置名，`本地端口` 是已有中转使用的监听端口，执行时请替换为实际值。运行 `sb` 可进入主菜单；省略部分参数时，脚本会交互询问。
+
+### 节点管理
+
+| 操作 | 命令 |
+| --- | --- |
+| 选择协议添加节点 | `sb add` |
+| 添加 Snell 节点 | `sb add snell` |
+| 修改节点 | `sb c 节点名` |
+| 查看节点信息 | `sb info 节点名` |
+| 查看分享链接 | `sb url 节点名` |
+| 显示二维码（Snell 除外） | `sb qr 节点名` |
+| 删除节点 | `sb del 节点名` |
+
+**`sb del` 和批量删除命令 `sb ddel` 会直接删除配置，无需再次确认。**
+
+### 节点出站
+
+| 操作 | 命令 |
+| --- | --- |
+| 更改节点出站方式 | `sb c 节点名 outbound` |
+
+### 端口中转
+
+| 操作 | 命令 |
+| --- | --- |
+| 交互添加中转 | `sb relay add` |
+| 列出中转 | `sb relay list` |
+| 查看中转 | `sb relay info 本地端口` |
+| 删除中转 | `sb relay delete 本地端口` |
+
+**中转无内置认证；`sb relay delete` 会直接删除配置，无需再次确认。**
+
+### 服务维护
+
+| 操作 | 命令 |
+| --- | --- |
+| 查看服务状态 | `sb status` |
+| 启动服务 | `sb start` |
+| 停止服务 | `sb stop` |
+| 重启服务 | `sb restart` |
+| 查看日志 | `sb log` |
+| 更新管理脚本 | `sb update sh` |
+| 更新 sing-box 内核 | `sb update core` |
+
+完整命令、参数和别名以当前安装版本的帮助为准：
+
+```bash
+sb help
+```
+
+`sb` 与管理脚本的 `sing-box` 入口等价；运行内核命令可使用 `sb bin`，例如 `sb bin version`。更多示例见[详细使用说明](docs/usage.md)。
+
+## 致谢
+
+- [233boy/sing-box](https://github.com/233boy/sing-box)：本项目演进所基于的安装与管理脚本。[上游教程](https://233boy.com/sing-box/sing-box-script/)可作基础用法补充，本项目功能以本仓库文档为准。
+- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)：代理与转发内核。
+- [Caddy](https://github.com/caddyserver/caddy)：相关 TLS 配置使用的 Web 服务。
+- [libqrencode](https://github.com/fukuchi/libqrencode)：终端二维码生成工具。
+
+许可证见 [LICENSE](LICENSE)。问题反馈请提交到[本项目 Issues](https://github.com/ouones/one-singbox/issues)，并附脚本/内核版本、系统环境和已隐去凭据的错误信息。
