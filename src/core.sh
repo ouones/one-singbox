@@ -4247,14 +4247,31 @@ footer_msg() {
 
 render_qrcode() {
     local url=$1
+    local terminal_size terminal_rows terminal_columns qr_output qr_width qr_height
     msg "------------- $is_config_name & QR code 二维码 -------------"
     msg
     if [[ $(type -P qrencode) ]]; then
-        if qrencode -t ANSI "$url"; then
+        if ! terminal_size=$(stty size 2>/dev/null) || [[ ! $terminal_size =~ ^[1-9][0-9]*[[:space:]]+[1-9][0-9]*$ ]]; then
+            warn "($is_config_name) 无法读取终端尺寸，未显示二维码，请复制上方链接."
             msg
-            return 0
+            return 1
         fi
-        warn "($is_config_name) QR code 二维码生成失败，请复制上方链接."
+        read -r terminal_rows terminal_columns <<<"$terminal_size"
+        if ! qr_output=$(qrencode -t UTF8 "$url"); then
+            warn "($is_config_name) QR code 二维码生成失败，请复制上方链接."
+            msg
+            return 1
+        fi
+        qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | wc -L)
+        qr_height=$(printf '%s\n' "$qr_output" | wc -l)
+        if ((qr_width >= terminal_columns || qr_height >= terminal_rows)); then
+            warn "($is_config_name) 终端空间不足，未显示二维码，请复制上方链接."
+            msg
+            return 1
+        fi
+        printf '%s\n' "$qr_output"
+        msg
+        return 0
     else
         msg "请安装 qrencode: $(_green "$cmd update -y; $cmd install qrencode -y")"
     fi
