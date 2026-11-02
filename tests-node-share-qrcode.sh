@@ -21,7 +21,7 @@ cat >"$workdir/bin/qrencode" <<'FAKE_QRENCODE'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$QR_LOG"
 if [[ ${QR_FIXTURE:-} == braille ]]; then
-  printf '▀▄\n▄▀\n'
+  printf '▀ ▄    ▀ ▄      \n    ▀      ▀▄  ▄\n'
   exit "${QR_EXIT:-0}"
 fi
 if [[ ${2:-} == UTF8 ]]; then
@@ -211,11 +211,11 @@ mobile_qr_width=$(((mobile_qr_width_bytes - 1) / 3))
 mobile_qr_height=$(printf '%s\n' "$mobile_qr_output" | wc -l)
 [[ $mobile_qr_width == 29 && $mobile_qr_height == 15 ]] || fail "the compact QR should occupy 29x15 cells, got ${mobile_qr_width}x${mobile_qr_height}"
 
-# A compact Braille cell preserves the four-by-two module pattern from UTF8 QR output.
+# The Braille fixture exercises every dot position in the compact cell mapping.
 rm -f "$QR_LOG"
 QR_FIXTURE=braille render_qrcode 'fixture-url' >"$case_dir/braille-fixture.out" 2>&1 || fail "a narrow terminal should render the compact QR fixture"
 expect_qr_args 'fixture-url'
-[[ $(<"$case_dir/braille-fixture.out") == *'⡱'* ]] || fail "the QR module pattern should map to the expected Braille cell"
+[[ $(<"$case_dir/braille-fixture.out") == *'⠁⠂⠄⠈⠐⠠⡀⢀'* ]] || fail "each QR module should map to its expected Braille dot"
 
 TEST_TTY_SIZE='24 28'
 rm -f "$QR_LOG"
