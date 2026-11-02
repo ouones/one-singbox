@@ -50,23 +50,31 @@ jobs:
           echo "is_sh_ver=${release_version}" >> "$GITHUB_ENV"
           echo "release_commit=${release_commit}" >> "$GITHUB_ENV"
       - name: tar
-        run: tar zcvf code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md
+        run: |
+          mkdir -p .release-artifacts
+          tar zcvf .release-artifacts/code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md
       - name: update main version
         run: |
-          if ! git push origin HEAD:main; then
+          for attempt in {1..10}; do
             git fetch origin main
             git checkout --detach origin/main
             sed -i "s/^is_sh_ver=.*/is_sh_ver=${is_sh_ver}/" sing-box.sh
             git add sing-box.sh
-            if ! git diff --cached --quiet; then
-              git commit -m "chore: bump version to ${is_sh_ver}"
+            if git diff --cached --quiet; then
+              break
             fi
-            git push origin HEAD:main
-          fi
+            git commit -m "chore: bump version to ${is_sh_ver}"
+            if git push origin HEAD:main; then
+              break
+            fi
+            if [[ "$attempt" -eq 10 ]]; then
+              exit 1
+            fi
+          done
           git push origin "${is_sh_ver}"
       - name: release
         uses: softprops/action-gh-release@v1
         with:
-          files: code.tar.gz
+          files: .release-artifacts/code.tar.gz
           tag_name: ${{ env.is_sh_ver }}
           target_commitish: ${{ env.release_commit }}
