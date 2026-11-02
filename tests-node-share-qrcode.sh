@@ -70,6 +70,21 @@ expect_qr_args() {
   [[ ${qr_args[2]} == "$expected_url" ]] || fail "qrencode input differs from the displayed URL"
 }
 
+expect_browser_qr_link() {
+  local output_file=$1 expected_url=$2 expected_count=${3:-1}
+  local browser_link="https://233boy.github.io/tools/qr.html#${expected_url}"
+  local browser_link_count
+  browser_link_count=$(grep -F -o -- "$browser_link" "$output_file" | wc -l)
+  [[ $browser_link_count == "$expected_count" ]] || fail "expected $expected_count browser QR link(s), got $browser_link_count in $output_file"
+  [[ $(<"$output_file") == *"$expected_url"* ]] || fail "browser QR fallback must retain the original share URI"
+  [[ $(<"$output_file") != *"api.qrserver.com"* && $(<"$output_file") != *"quickchart.io"* && $(<"$output_file") != *"chart.googleapis.com"* ]] || fail "QR output must not include a third-party QR API URL"
+}
+
+expect_no_browser_qr_link() {
+  local output_file=$1
+  [[ $(<"$output_file") != *"https://233boy.github.io/tools/qr.html#"* ]] || fail "unexpected browser QR link in $output_file"
+}
+
 stty() {
   [[ ${TEST_TTY_SIZE:-} ]] || return 1
   printf '%s\n' "$TEST_TTY_SIZE"
@@ -119,6 +134,7 @@ wait
 expected_url=$is_url
 [[ $expected_url == ss://* ]] || fail "created SS node should expose its original URL"
 [[ $(<"$case_dir/add.out") == *"$expected_url"* ]] || fail "creation output should retain the original URL"
+expect_no_browser_qr_link "$case_dir/add.out"
 expect_qr_args "$expected_url"
 [[ $(<"$case_dir/add.out") == *"$full_qr_cell"* ]] || fail "creation should render the QR code"
 [[ $(grep -c '^' "$manage_log") == 1 ]] || fail "successful creation should perform its existing single restart"
@@ -134,6 +150,7 @@ rm -f "$QR_LOG"
 wait
 failure_url=$(<"$case_dir/add-failure-url.txt")
 [[ $(<"$case_dir/add-failure.out") == *"二维码生成失败"* && $(<"$case_dir/add-failure.out") == *"$failure_url"* ]] || fail "creation should report QR failure and retain URL"
+expect_browser_qr_link "$case_dir/add-failure.out" "$failure_url"
 [[ -f "$is_conf_dir/Shadowsocks-41604.json" ]] || fail "qrencode failure must not remove the created node"
 [[ $(grep -c '^' "$manage_log") == $((before_restarts + 1)) ]] || fail "QR failure must not trigger an extra service operation"
 
@@ -147,6 +164,7 @@ rm -f "$QR_LOG"
 wait
 missing_url=$(<"$case_dir/add-missing-url.txt")
 [[ $(<"$case_dir/add-missing.out") == *"qrencode"* && $(<"$case_dir/add-missing.out") == *"$missing_url"* ]] || fail "creation should show install guidance and retain URL"
+expect_browser_qr_link "$case_dir/add-missing.out" "$missing_url"
 [[ ! -f $QR_LOG && -f "$is_conf_dir/Shadowsocks-41605.json" ]] || fail "missing qrencode must not block node creation"
 [[ $(grep -c '^' "$manage_log") == $((before_restarts + 1)) ]] || fail "missing qrencode must not trigger an extra service operation"
 QR_MISSING=
@@ -162,6 +180,7 @@ info special.json >"$case_dir/info.out" 2>&1 || fail "visible info should succee
 special_url=$is_url
 [[ $special_url == *"@[2001:db8::10]:41602#二维码%20node" ]] || fail "special IPv6 URL should preserve existing formatting: $special_url"
 [[ $(<"$case_dir/info.out") == *"$special_url"* ]] || fail "info output should include its original URL"
+expect_no_browser_qr_link "$case_dir/info.out"
 expect_qr_args "$special_url"
 [[ $(<"$case_dir/info.out") == *"$full_qr_cell"* ]] || fail "info should render the QR code"
 
@@ -171,10 +190,11 @@ rm -f "$QR_LOG"
 info special.json >"$case_dir/narrow.out" 2>&1 || fail "info should remain successful when the QR code does not fit"
 [[ $(<"$case_dir/narrow.out") != *"$full_qr_cell"* ]] || fail "a QR code that exceeds the terminal size must not be displayed"
 [[ $(<"$case_dir/narrow.out") == *"终端空间不足"* && $(<"$case_dir/narrow.out") == *"$special_url"* ]] || fail "small terminal should explain the space limit and retain the share URL"
+expect_browser_qr_link "$case_dir/narrow.out" "$special_url"
 rm -f "$QR_LOG"
 url_qr qr special.json >"$case_dir/narrow-qr-command.out" 2>&1 || fail "the independent QR command should remain successful when the QR does not fit"
 [[ $(<"$case_dir/narrow-qr-command.out") != *"$full_qr_cell"* && $(<"$case_dir/narrow-qr-command.out") == *"终端空间不足"* ]] || fail "the independent QR command should skip an oversized QR with a clear message"
-[[ $(<"$case_dir/narrow-qr-command.out") == *"https://233boy.github.io/tools/qr.html#$special_url"* ]] || fail "the independent QR command should retain its webpage fallback"
+expect_browser_qr_link "$case_dir/narrow-qr-command.out" "$special_url"
 is_dont_show_info=
 
 # A menu's stale COLUMNS value must not override the actual window size.
@@ -183,6 +203,7 @@ rm -f "$QR_LOG"
 COLUMNS=1 info special.json >"$case_dir/stale-columns.out" 2>&1 || fail "info should succeed when COLUMNS is stale"
 expect_qr_args "$special_url"
 [[ $(<"$case_dir/stale-columns.out") == *"$full_qr_cell"* ]] || fail "stale COLUMNS must not hide a QR code that fits the terminal"
+expect_no_browser_qr_link "$case_dir/stale-columns.out"
 
 # Without a readable terminal size, omit the QR code and keep the original link visible.
 TEST_TTY_SIZE=
@@ -191,6 +212,7 @@ rm -f "$QR_LOG"
 info special.json >"$case_dir/no-tty.out" 2>&1 || fail "info should succeed without a TTY"
 [[ ! -f $QR_LOG && $(<"$case_dir/no-tty.out") != *"$full_qr_cell"* ]] || fail "a missing TTY must not invoke or display qrencode"
 [[ $(<"$case_dir/no-tty.out") == *"无法读取终端尺寸"* && $(<"$case_dir/no-tty.out") == *"$special_url"* ]] || fail "no-TTY output should explain the skipped QR and retain the share URL"
+expect_browser_qr_link "$case_dir/no-tty.out" "$special_url"
 stty() {
   [[ ${TEST_TTY_SIZE:-} ]] || return 1
   printf '%s\n' "$TEST_TTY_SIZE"
@@ -234,6 +256,16 @@ info relay-41603.json >"$case_dir/no-link.out" 2>&1 || fail "info for an unshare
 [[ ! -f $QR_LOG ]] || fail "node without a share URL must not call qrencode"
 [[ $is_url ]] && fail "node without a share URL must clear the previous URL"
 [[ $(<"$case_dir/no-link.out") != *"$full_qr_cell"* ]] || fail "node without a share URL must not display a QR code"
+expect_no_browser_qr_link "$case_dir/no-link.out"
+
+# Snell details remain outside the QR fallback.
+cat >"$is_conf_dir/snell.json" <<'NODE'
+{"inbounds":[{"tag":"snell.json","type":"snell","listen":"::","listen_port":41606,"version":5,"psk":"supplied-psk","obfs_mode":"none"}]}
+NODE
+rm -f "$QR_LOG"
+info snell.json >"$case_dir/snell.out" 2>&1 || fail "Snell info should succeed"
+[[ ! -f $QR_LOG ]] || fail "Snell info must not call qrencode"
+expect_no_browser_qr_link "$case_dir/snell.out"
 
 # Existing quiet and export paths do not invoke qrencode.
 rm -f "$QR_LOG"
@@ -253,6 +285,7 @@ url_qr url special.json >"$case_dir/url.out" 2>&1 || fail "URL export should suc
 [[ ! -f $QR_LOG ]] || fail "URL export must not call qrencode"
 [[ $(<"$case_dir/url.out") == *"$special_url"* ]] || fail "URL export should retain the share URL"
 [[ $(<"$case_dir/url.out") != *"$full_qr_cell"* ]] || fail "URL export must not display a QR code"
+expect_no_browser_qr_link "$case_dir/url.out"
 
 # Independent QR remains available through the same renderer.
 rm -f "$QR_LOG"

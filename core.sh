@@ -4225,7 +4225,9 @@ info() {
         [[ $is_insecure ]] && {
             warn "某些客户端如(V2rayN 等)导入URL需手动将: 跳过证书验证(allowInsecure) 设置为 true, 或打开: 允许不安全的连接"
         }
-        [[ $is_protocol != snell ]] && render_qrcode "$is_url" || :
+        if [[ $is_protocol != snell ]] && ! render_qrcode "$is_url"; then
+            show_qrcode_link "$is_url"
+        fi
     fi
     if [[ $is_surge_str ]]; then
         msg "------------- Surge 配置 -------------"
@@ -4282,6 +4284,12 @@ render_qrcode() {
     return 1
 }
 
+show_qrcode_link() {
+    link="https://233boy.github.io/tools/qr.html#${1}"
+    msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
+    msg "\n\e[4;${is_color}m${link}\e[0m\n"
+}
+
 # URL or qrcode
 url_qr() {
     is_dont_show_info=1
@@ -4299,10 +4307,8 @@ url_qr() {
             fi
             footer_msg
         else
-            link="https://233boy.github.io/tools/qr.html#${is_url}"
             render_qrcode "$is_url" || :
-            msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
-            msg "\n\e[4;${is_color}m${link}\e[0m\n"
+            show_qrcode_link "$is_url"
             footer_msg
         fi
     else
