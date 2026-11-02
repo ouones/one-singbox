@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: main-release
+  queue: max
+
 permissions:
   contents: write
 
@@ -17,15 +21,33 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - name: get ver
+          ref: main
+      - name: bump version
         run: |
-          echo "$(grep -E '^is_sh_ver=' sing-box.sh)" >> $GITHUB_ENV
-          echo "old=$(git tag --sort=-v:refname | head -n1)" >> $GITHUB_ENV
-      # - name: test
-      #   if: env.is_sh_ver == env.old 
-      #   run: |
-      #     echo not found new version.
-      #     exit 1
+          latest_tag="$(git tag --list 'v1.*' --sort=-version:refname | head -n1)"
+          latest_minor="${latest_tag#v1.}"
+          current_version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
+          current_minor="${current_version#v1.}"
+          if [[ ! "$latest_minor" =~ ^[0-9]+$ || ! "$current_minor" =~ ^[0-9]+$ ]]; then
+            echo "Could not determine the current v1.N release version." >&2
+            exit 1
+          fi
+          if (( current_minor > latest_minor )); then
+            release_minor="$current_minor"
+          else
+            release_minor=$((latest_minor + 1))
+          fi
+          release_version="v1.${release_minor}"
+          sed -i "s/^is_sh_ver=.*/is_sh_ver=${release_version}/" sing-box.sh
+          echo "is_sh_ver=${release_version}" >> "$GITHUB_ENV"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sing-box.sh
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: bump version to ${release_version}"
+            git push origin HEAD:main
+          fi
+          echo "release_commit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: tar
         run: tar zcvf code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md
       - name: release
@@ -33,3 +55,4 @@ jobs:
         with:
           files: code.tar.gz
           tag_name: ${{ env.is_sh_ver }}
+          target_commitish: ${{ env.release_commit }}
