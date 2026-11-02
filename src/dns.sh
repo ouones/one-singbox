@@ -33,7 +33,7 @@ dns_set() {
             if [[ $2 ]]; then
                 is_dns_use=${2,,}
             else
-                ask string is_dns_use "请输入 DNS: "
+                ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): "
             fi
             ;;
         none)
@@ -45,9 +45,9 @@ dns_set() {
         esac
     else
         is_tmp_list=(${is_dns_list[@]})
-        ask list is_dns_use null "\n请选择 DNS:\n"
+        ask list is_dns_use null "\n请选择 DNS；选择 set 输入自定义地址，选择 none 表示不设置 DNS:\n"
         if [[ $is_dns_use == "set" ]]; then
-            ask string is_dns_use "请输入 DNS: "
+            ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): "
         fi
     fi
     is_dns_use_bak=$is_dns_use

@@ -134,15 +134,15 @@ log_limit_init() {
 
 log_limit_set() {
     local current=$(log_limit_read) value
-    msg "\n当前日志大小限制: $current MB (默认 200 MB)"
+    msg "\n当前日志占用上限: $current MB (默认上限 200 MB)"
     while :; do
-        msg "请输入日志大小限制 (正整数, 单位 MB), 回车保留当前值:"
+        msg "请输入新的日志占用上限 (大于 0 的整数，单位 MB；留空保留当前值):"
         IFS= read -r value || return
         [[ ! $value ]] && return 0
         if log_limit_valid "$value"; then
             break
         fi
-        msg "请输入有效的正整数 (单位 MB)."
+        msg "输入无效，请输入大于 0 的整数 (单位 MB)."
     done
     echo "$value" >"$is_core_dir/log-limit-mb" || return 1
     # Stop the worker before the immediate check to avoid concurrent rotation.
@@ -153,7 +153,7 @@ log_limit_set() {
     fi
     log_limit_check || { log_limit_service; return 1; }
     log_limit_service || { warn "日志维护服务启动失败，请检查服务状态."; return 1; }
-    msg "\n已设置日志大小限制: $(_green "$value MB")\n"
+    msg "\n已设置日志占用上限: $(_green "$value MB")\n"
 }
 
 log_limit_remove() {

@@ -5,7 +5,7 @@ show_help() {
         ;;
     *)
         [[ $1 ]] && warn "未知选项 '$1'"
-        msg "$is_core_name script $is_sh_ver by $author"
+        msg "$is_script_name script $is_sh_ver by $author"
         msg "Usage: $is_core [options]... [args]... "
         msg
         help_info=(
@@ -16,16 +16,20 @@ show_help() {
             "   get-port                                        返回一个可用的端口"
             "   ss2022                                          返回一个可用于 Shadowsocks 2022 的密码\n"
             "一般:"
-            "   a, add [protocol] [args... | auto]              添加配置"
+            "   a, add [protocol] [args... | auto]              添加节点"
             "   add snell [port] [psk] [version]                添加 Snell (默认 v6, 支持 v5, 需要 sing-box >= 1.14.0)"
-            "   c, change [name] [option] [args... | auto]      更改配置"
-            "   d, del [name]                                   删除配置**"
-            "   i, info [name]                                  查看配置"
+            "   c, change [name] [option] [args... | auto]      修改节点"
+            "   d, del [name]                                   删除节点**"
+            "   i, info [name]                                  查看节点信息"
             "   qr [name]                                       二维码信息"
             "   url [name]                                      URL 信息"
             "   Snell 提供 sing-box URI 与 Surge 配置双格式导出 (不支持二维码)"
             "   log                                             查看日志"
-            "   节点出站方式在节点编辑的“更改出站方式”中设置，支持四种直连、SS SIP002、VLESS TCP/raw、WebSocket、gRPC、HTTP/h2、HTTPUpgrade 与 QUIC；WebSocket、gRPC、HTTP/HTTPUpgrade 支持 none/TLS/Reality；WebSocket 映射 path、Host、early data，gRPC 映射 serviceName 且仅支持默认/gun mode，非空 authority 仅接受可识别 v1.14.0 构建的默认值；h2 需要 TLS/Reality，QUIC 仅支持无额外加密的 sing-box 原生 TLS；HTTP host 为列表，HTTPUpgrade host 为单值；TLS 支持 ECH PEM/Base64 和空值 DNS 获取，整张证书 SHA-256 `pcs` 需 sing-box 1.15.0+（1.14.0 拒绝），`vcn` 仅可为空或等于 SNI；Vision 只支持 TCP/raw；拒绝非空 `spx`/`spiderX`、XHTTP、mKCP、VLESS Encryption、`mux`/`smux`、QUIC Reality、跨内核额外 QUIC 加密、TCP headerType=http 伪装、插件和未知连接参数；切回直连保留代理缓存，同类代理回车可复用；改名保留关联，端口或协议变更迁移关联，删除节点清除关联；应用失败会恢复相关配置并尝试恢复服务；“配置已应用”不代表上游连通性已检测\n"
+            "节点出站:"
+            "   为已有节点选择直连或代理出站；不会导入新节点。"
+            "   支持 IPv4/IPv6 直连、Shadowsocks 和 VLESS。"
+            "   兼容范围与参数限制见: https://github.com/ouones/one-singbox/blob/main/docs/usage.md#节点出站"
+            "   配置应用成功表示服务已重启，不代表代理上游连通性已测试。\n"
             # "   logerr                                          查看错误日志\n"
             "更改:"
             # "   dp, dynamicport [name] [start | auto] [end]     更改动态端口"
@@ -38,10 +42,10 @@ show_help() {
             "   key [name] [Private key | auto] [Public key]    更改密钥"
             # "   type [name] [type | auto]                       更改伪装类型"
             "   method [name] [method | auto]                   更改加密方式"
-            "   sni [name] [domain | auto]                     更改 serverName；auto 按区域重新选择"
+            "   sni [name] [domain | auto]                     更改 SNI 域名；auto 按区域重新选择"
             # "   seed [name] [seed | auto]                       更改 mKCP seed"
             "   new [name] [...]                                更改协议"
-            "   web [name] [domain]                             更改伪装网站"
+            "   web [name] [domain]                             更改反向代理目标域名"
             "   psk [name] [psk | auto]                         更改 Snell PSK"
             "   snell-version [name] [6 | 5 | auto]             更改 Snell 版本"
             "   mode [name] [default | unshaped | unsafe-raw | auto] 更改 Snell 运行模式 (v6)"
@@ -59,8 +63,9 @@ show_help() {
             "   relay list                                           中转列表"
             "   relay info [local-port]                              查看中转详情"
             "   relay delete [local-port]                            删除中转"
-            "   中转管理亦可通过主菜单交互操作"
+            "   也可从首页“TCP/UDP 端口中转”菜单操作"
             "   中转无内置认证，请务必使用防火墙或网络 ACL 限制来源"
+            "   命令行 relay delete 指定端口后会立即删除；面板操作会先确认"
             "   中转不生成分享链接或二维码\n"
             "管理:"
             "   un, uninstall                                   卸载"
@@ -68,7 +73,6 @@ show_help() {
             "   U, update.sh                                    更新脚本"
             "   s, status                                       运行状态"
             "   start, stop, restart [caddy]                    启动, 停止, 重启"
-            "   t, test                                         测试运行"
             "   reinstall                                       重装脚本\n"
             "测试:"
             # "   client, genc [name]                             显示用于客户端 JSON, 仅供参考"
@@ -85,8 +89,8 @@ show_help() {
         for v in "${help_info[@]}"; do
             msg "$v"
         done
-        msg "谨慎使用 del, ddel, 此选项会直接删除配置; 无需确认"
-        msg "反馈问题) $(msg_ul https://github.com/${is_sh_repo}/issues) "
+        msg "命令行 del 和 ddel 会立即删除节点，无需再次确认；从交互菜单删除时会先确认。"
+        msg "问题反馈: $(msg_ul https://github.com/${is_sh_repo}/issues)"
         ;;
 
     esac
@@ -96,10 +100,13 @@ about() {
     ####### 要点13脸吗只会改我链接的小人 #######
     unset c n m s b
     msg
-    msg "Github: $(msg_ul https://github.com/${is_sh_repo})"
-    msg "Twitter: $(msg_ul https://twitter.com/ai233boy)"
-    msg "$is_core_name site: $(msg_ul https://sing-box.sagernet.org/)"
-    msg "$is_core_name core: $(msg_ul https://github.com/${is_core_repo})"
+    msg "one-singbox 脚本版本: $is_sh_ver"
+    msg "sing-box 内核版本: $is_core_ver"
+    [[ $is_caddy ]] && msg "Caddy 版本: $is_caddy_ver"
+    msg "项目源码: $(msg_ul https://github.com/${is_sh_repo})"
+    msg "问题反馈: $(msg_ul https://github.com/${is_sh_repo}/issues)"
+    msg "sing-box 文档: $(msg_ul https://sing-box.sagernet.org/)"
+    msg "sing-box 内核源码: $(msg_ul https://github.com/${is_core_repo})"
     msg
     ####### 要点13脸吗只会改我链接的小人 #######
 }

@@ -5,9 +5,9 @@ caddy_config() {
         mkdir -p $is_caddy_dir $is_caddy_dir/sites $is_caddy_conf
         cat >$is_caddyfile <<-EOF
 # don't edit this file #
-# for more info, see https://233boy.com/$is_core/caddy-auto-tls/
+# for more info, see https://github.com/ouones/one-singbox/blob/main/docs/usage.md
 # 不要编辑这个文件 #
-# 更多相关请阅读此文章: https://233boy.com/$is_core/caddy-auto-tls/
+# 更多相关请阅读此文章: https://github.com/ouones/one-singbox/blob/main/docs/usage.md
 # https://caddyserver.com/docs/caddyfile/options
 {
   admin off
@@ -52,6 +52,6 @@ reverse_proxy https://$proxy_site {
         ;;
     esac
     [[ $1 != "new" && $1 != 'proxy' ]] && {
-        [[ ! -f ${is_caddy_site_file}.add ]] && echo "# see https://233boy.com/$is_core/caddy-auto-tls/" >${is_caddy_site_file}.add
+        [[ ! -f ${is_caddy_site_file}.add ]] && echo "# see https://github.com/ouones/one-singbox/blob/main/docs/usage.md" >${is_caddy_site_file}.add
     }
 }

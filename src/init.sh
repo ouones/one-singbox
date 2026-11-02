@@ -1,7 +1,7 @@
 #!/bin/bash
 
-author=233boy
-# github=https://github.com/233boy/sing-box
+author=ouones
+is_script_name=one-singbox
 
 # bash fonts colors
 red='\e[31m'
@@ -70,7 +70,7 @@ amd64 | x86_64)
     is_arch="arm64"
     ;;
 *)
-    err "此脚本仅支持 64 位系统..."
+    err "当前系统架构不受支持。请使用 amd64/x86_64 或 arm64/aarch64。"
     ;;
 esac
 
@@ -90,7 +90,8 @@ is_caddy_bin=/usr/local/bin/caddy
 is_caddy_dir=/etc/caddy
 is_caddy_repo=caddyserver/caddy
 is_caddyfile=$is_caddy_dir/Caddyfile
-is_caddy_conf=$is_caddy_dir/$author
+is_caddy_conf=$is_caddy_dir/$is_script_name
+[[ ! -d $is_caddy_conf && -d $is_caddy_dir/233boy ]] && is_caddy_conf=$is_caddy_dir/233boy
 is_systemd=$(type -P systemctl)
 is_openrc=$(type -P rc-service)
 if [[ $is_systemd ]]; then
@@ -171,7 +172,7 @@ if [[ -f $is_caddy_bin && -d $is_caddy_dir && $is_caddy_service ]]; then
 fi
 
 load log.sh
-log_limit_init || warn "无法启用日志大小限制，请在其他菜单中重新设置."
+log_limit_init || warn "无法启用日志容量维护。请从“系统工具”重新设置日志占用上限。"
 
 load core.sh
 [[ ! $args ]] && args=main
