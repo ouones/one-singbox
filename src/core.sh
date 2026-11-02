@@ -4364,8 +4364,16 @@ update() {
 # main menu; if no prefer args.
 is_main_menu() {
     core_status_read
+    load log.sh
+    local is_log_usage_limit is_log_usage_bytes
+    is_log_usage_limit=$(log_limit_read)
     msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
+    if is_log_usage_bytes=$(log_usage_read); then
+        msg "日志用量：$(awk -v bytes="$is_log_usage_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }') / $is_log_usage_limit MB"
+    else
+        msg "日志用量：暂不可用 / $is_log_usage_limit MB"
+    fi
     msg "群组(Chat): $(msg_ul https://t.me/tg233boy)"
     is_main_start=1
     ask mainmenu
@@ -4402,7 +4410,6 @@ is_main_menu() {
         show_help
         ;;
     9)
-        load log.sh
         is_tmp_list=("启用BBR" "查看日志" "测试运行" "重装脚本" "设置DNS" "日志大小限制($(log_limit_read)MB)")
         ask list is_do_other
         case $REPLY in
