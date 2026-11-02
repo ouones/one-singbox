@@ -4285,7 +4285,7 @@ render_qrcode() {
 }
 
 show_qrcode_link() {
-    link="https://233boy.github.io/tools/qr.html#${1}"
+    local link="https://233boy.github.io/tools/qr.html#${1}"
     msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
     msg "\n\e[4;${is_color}m${link}\e[0m\n"
 }
