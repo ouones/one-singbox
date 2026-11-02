@@ -110,7 +110,6 @@ status
 start
 stop
 restart [caddy]
-test
 bbr
 log [trace|debug|info|warn|error|fatal|panic|none|del]
 update [core|sh|caddy] [version]
