@@ -230,6 +230,7 @@ change-auto | change-auto-us-san-jose | change-auto-us-los-angeles)
   assert_created_sni "$is_conf_dir/VLESS-REALITY-12345.json" "$TEST_EXPECTED"
   jq -e '.node_name == "KeptName" and .entry_addr == "edge.example.com" and .outbound_mode == "V4优先" and .custom == "preserve"' "$is_conf_dir/.quan-meta/VLESS-REALITY-12345.json.meta.json" >/dev/null || fail "SNI auto changed node metadata"
   jq -e '.inbounds[0].users[0].uuid == "11111111-1111-1111-1111-111111111111" and .inbounds[0].tls.reality.private_key == "private-key-value"' "$is_conf_dir/VLESS-REALITY-12345.json" >/dev/null || fail "SNI auto changed the UUID or private key"
+  [[ $is_url == *"sni=$TEST_EXPECTED"* ]] || fail "share URL did not use the automatically selected SNI"
   cmp -s "$case_dir/other-node.before" "$is_conf_dir/VLESS-REALITY-23456.json" || fail "SNI auto changed another node"
   cmp -s "$case_dir/other-node-meta.before" "$is_conf_dir/.quan-meta/VLESS-REALITY-23456.json.meta.json" || fail "SNI auto changed another node's metadata"
   assert_request_count 1
@@ -244,6 +245,11 @@ change-manual)
   write_existing_reality
   main change VLESS-REALITY-12345.json sni manual.example.com >/dev/null
   assert_created_sni "$is_conf_dir/VLESS-REALITY-12345.json" manual.example.com
+  assert_request_count 0
+  ;;
+non-reality)
+  main add ss 12345 test-password aes-128-gcm >/dev/null
+  [[ -f "$is_conf_dir/Shadowsocks-12345.json" ]] || fail "non-REALITY configuration was not created"
   assert_request_count 0
   ;;
 read-only)
@@ -311,6 +317,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
   expect_case "$core_file" change-auto-us-los-angeles '{"countryCode":"US","city":"Los Angeles"}' lamag.org
   expect_case "$core_file" change-other '{"countryCode":"US","city":"Los Angeles"}' old.example.com
   expect_case "$core_file" change-manual '{"countryCode":"DE"}' manual.example.com
+  expect_case "$core_file" non-reality '{"countryCode":"DE"}' ''
   expect_case "$core_file" read-only '{"countryCode":"DE"}' old.example.com
 done
 
