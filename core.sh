@@ -216,19 +216,26 @@ reality_sni_pick() {
 }
 
 reality_sni_select() {
-    local response country_code
+    local response country_code city_region
     local -a pool
     response=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
         timeout 10 wget --no-check-certificate -q -O - -T 10 -t 1 'https://my.ippure.com/v1/info' 2>/dev/null) || response=
     country_code=$(jq -ers 'if length == 1 and (.[0] | type == "object") and (.[0].countryCode | type == "string" and length > 0) then .[0].countryCode else empty end' <<<"$response" 2>/dev/null) || country_code=
-    case $country_code in
-    DE)
+    city_region=$(jq -ers 'if length == 1 and (.[0] | type == "object") and .[0].countryCode == "US" then if .[0].city == "San Jose" then "san-jose" elif .[0].city == "Los Angeles" then "los-angeles" else empty end else empty end' <<<"$response" 2>/dev/null) || city_region=
+    case $country_code/$city_region in
+    US/san-jose)
+        pool=(www.sccoe.org historysanjose.org www.rosicrucianpark.org)
+        ;;
+    US/los-angeles)
+        pool=(lamag.org)
+        ;;
+    DE/*)
         pool=(www.uni-frankfurt.de www.staedelmuseum.de liebieghaus.de www.schirn.de dff.film)
         ;;
-    SG)
+    SG/*)
         pool=(trinitycollege.edu.sg)
         ;;
-    HK)
+    HK/*)
         pool=(www.hkapa.edu www.hsu.edu.hk www.hko.gov.hk www.archsd.gov.hk)
         ;;
     *)
