@@ -5,7 +5,7 @@
 ## Language
 
 **one-singbox**：
-面向 Linux 服务器的 sing-box 安装与终端管理工具，提供交互式菜单和快捷命令。基于 233boy 项目演进，具有自身的维护方向。
+由 ouones 维护的 sing-box 安装与终端管理工具，提供交互式菜单和快捷命令，脚本名为 one-singbox。
 _Avoid_：将项目称为 sing-box 内核，或使用容易被理解为 Web 后台的“管理面板”作为主要定位。
 
 **sing-box 内核**：

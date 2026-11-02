@@ -1,7 +1,7 @@
 #!/bin/bash
 
-author=233boy
-# github=https://github.com/233boy/sing-box
+author=ouones
+is_script_name=one-singbox
 
 # bash fonts colors
 red='\e[31m'
@@ -179,7 +179,7 @@ download() {
         ;;
     sh)
         link=https://github.com/${is_sh_repo}/releases/latest/download/code.tar.gz
-        name="$is_core_name 脚本"
+        name="$is_script_name 脚本"
         tmpfile=$tmpsh
         is_ok=$is_sh_ok
         ;;
@@ -225,7 +225,7 @@ check_status() {
             is_fail=1
         }
         [[ ! -f $is_sh_ok ]] && {
-            msg err "下载 ${is_core_name} 脚本失败"
+            msg err "下载 ${is_script_name} 脚本失败"
             is_fail=1
         }
         [[ ! -f $is_jq_ok ]] && {
@@ -325,7 +325,7 @@ main() {
     # show welcome msg
     clear
     echo
-    echo "........... $is_core_name script by $author .........."
+    echo "........... $is_script_name script by $author .........."
     echo
 
     # start installing...

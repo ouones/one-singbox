@@ -101,7 +101,7 @@ qrcode_dependency_refresh_index() {
 
 qrcode_dependency_report_failure() {
     local install_command=$1
-    local message='二维码依赖 qrencode 自动补齐失败，二维码暂不可用。请复制上方链接'
+    local message='二维码工具 qrencode 自动安装失败，终端二维码暂不可用。查看节点时仍可复制分享链接，或使用显示的网页二维码链接。'
     [[ $install_command ]] && message="$message；也可手动执行：$install_command"
     message="$message；之后可通过主动更新脚本重试。"
     if declare -F warn >/dev/null 2>&1; then

@@ -1,6 +1,7 @@
 #!/bin/bash
 
-author=233boy
+author=ouones
+is_script_name=one-singbox
 
 red='\e[31m'
 yellow='\e[33m'
@@ -29,15 +30,15 @@ warn() {
     echo -e "\n$is_warn $@\n"
 }
 
-[[ $EUID != 0 ]] && err "当前非 ${yellow}ROOT用户.${none}"
+[[ $EUID != 0 ]] && err "请以 root 用户重新运行此脚本。"
 
 cmd=$(type -P apt-get || type -P yum || type -P zypper || type -P apk)
-[[ ! $cmd ]] && err "此脚本仅支持 ${yellow}(Ubuntu or Debian or CentOS or SUSE or Alpine)${none}."
+[[ ! $cmd ]] && err "未检测到受支持的包管理器 (apt-get、yum、zypper 或 apk)。"
 
 is_systemd=$(type -P systemctl)
 is_openrc=$(type -P rc-service)
 [[ ! $is_systemd && ! $is_openrc ]] && {
-    err "此系统缺少 ${yellow}(systemctl 或 rc-service)${none}, 请安装 systemd 或确认 OpenRC 已启用."
+    err "未检测到 systemd 或 OpenRC 服务管理器。请先安装并启用其中之一。"
 }
 
 is_core=sing-box
@@ -117,39 +118,36 @@ ss_method_list=(
     2022-blake3-chacha20-poly1305
 )
 mainmenu=(
-    "添加配置"
-    "更改配置"
-    "查看配置"
-    "删除配置"
-    "运行管理"
-    "更新"
+    "节点管理"
+    "TCP/UDP 端口中转"
+    "服务控制"
+    "更新软件"
+    "系统工具"
+    "命令帮助与反馈"
+    "版本与项目信息"
     "卸载"
-    "帮助"
-    "其他"
-    "关于"
-    "中转管理"
 )
 info_list=(
     "协议 (protocol)"
     "地址 (address)"
     "端口 (port)"
-    "用户ID (id)"
-    "传输协议 (network)"
-    "伪装类型 (type)"
-    "伪装域名 (host)"
+    "用户 ID (UUID)"
+    "传输方式 (network)"
+    "传输类型 (type)"
+    "主机名 (host)"
     "路径 (path)"
     "传输层安全 (TLS)"
     "应用层协议协商 (Alpn)"
     "密码 (password)"
     "加密方式 (encryption)"
-    "链接 (URL)"
-    "目标地址 (remote addr)"
-    "目标端口 (remote port)"
+    "分享链接"
+    "目标地址"
+    "目标端口"
     "流控 (flow)"
     "SNI (serverName)"
     "指纹 (Fingerprint)"
     "公钥 (Public key)"
-    "用户名 (Username)"
+    "用户名"
     "跳过证书验证 (allowInsecure)"
     "拥塞控制算法 (congestion_control)"
     "版本 (version)"
@@ -169,24 +167,16 @@ change_list=(
     "更改目标端口"
     "更改密钥"
     "更改 SNI (serverName)"
-    "更改伪装网站"
-    "更改用户名 (Username)"
+    "更改反向代理目标域名"
+    "更改用户名"
     "更改节点名称"
-    "更改出站方式"
-    "更改入口地址"
-    "查看当前节点链接"
+    "更改节点出站方式"
+    "更改分享地址"
+    "查看分享链接"
     "更改 PSK"
     "更改 Snell 版本"
     "更改 Snell 混淆模式"
     "更改 Snell 运行模式"
-)
-outbound_mode_list=(
-    "V6优先"
-    "V4优先"
-    "仅V4"
-    "仅V6"
-    "SS 出站"
-    "VLESS 出站"
 )
 servername_list=(
     www.amazon.com
@@ -228,6 +218,13 @@ pause() {
     echo -ne "按 $(_green Enter 回车键) 继续, 或按 $(_red Ctrl + C) 取消."
     read -rs -d $'\n'
     echo
+}
+
+confirm_action() {
+    local answer
+    echo -ne "$1 [y/N]: "
+    read -r answer
+    [[ ${answer,,} == y || ${answer,,} == yes ]]
 }
 
 get_uuid() {
@@ -280,7 +277,7 @@ snell_mode_valid() {
 }
 
 snell_mode_desc() {
-    echo -e "\n------------- Snell v6 运行模式说明 (小白指南) -------------\n1. default    \e[92m[推荐]\e[0m   : 自动特征整型与动态填充，防封锁能力最强 (小白首选)\n2. unshaped   \e[96m[低延迟]\e[0m : 纯净直连无额外填充，延迟更低、更省流量 (适合游戏或中转)\n3. unsafe-raw \e[33m[极速]\e[0m   : 极高吞吐裸跑传输，无安全防御机制 (仅限内网专线或自建中转)\n-----------------------------------------------------------"
+    echo -e "\n------------- Snell v6 运行模式说明 -------------\n1. default    \e[92m[推荐]\e[0m     : 使用默认的流量处理与填充策略。\n2. unshaped   \e[96m[减少填充]\e[0m : 不使用流量整形和额外填充。\n3. unsafe-raw \e[33m[裸传输]\e[0m   : 不提供流量保护，仅用于可信的内网或专用线路。\n--------------------------------------------------"
 }
 
 snell_obfs_mode_valid() {
@@ -351,7 +348,7 @@ get_ip() {
     export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
     [[ ! $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
     [[ ! $ip ]] && {
-        err "获取服务器 IP 失败.."
+        err "无法获取服务器公网 IP。请检查网络连接后重试。"
     }
 }
 
@@ -360,7 +357,7 @@ get_port() {
     while :; do
         ((is_count++))
         if [[ $is_count -ge 233 ]]; then
-            err "自动获取可用端口失败次数达到 233 次, 请检查端口占用情况."
+            err "已尝试 233 次，仍未找到可用端口。请检查端口占用情况。"
         fi
         tmp_port=$(shuf -i 20000-65535 -n 1)
         [[ ! $(is_test port_used $tmp_port) && $tmp_port != $port ]] && break
@@ -432,6 +429,7 @@ is_port_used() {
 # ask input a string or pick a option for list.
 ask() {
     local outbound_display=
+    local is_secret_input=
     case $1 in
     set_ss_method)
         is_tmp_list=(${ss_method_list[@]})
@@ -461,7 +459,7 @@ ask() {
         is_opt_input_msg=$3
         ;;
     set_outbound_mode)
-        is_tmp_list=("${outbound_mode_list[@]}")
+        is_tmp_list=("IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 代理出站" "VLESS 代理出站")
         outbound_display=$(current_outbound_mode_display "$is_config_file")
         is_ask_set=is_outbound_mode
         ;;
@@ -477,25 +475,36 @@ ask() {
         ;;
     get_config_file)
         is_tmp_list=("${is_all_json[@]}")
-        is_opt_msg="\n请选择配置:\n"
+        is_opt_msg="\n请选择节点:\n"
         is_ask_set=is_config_file
         ;;
     mainmenu)
         is_tmp_list=("${mainmenu[@]}")
         is_ask_set=is_main_pick
         is_emtpy_exit=1
+        is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (直接回车退出):"
         ;;
     esac
+    case $is_ask_set in
+    *pass* | *psk* | *private_key* | *uuid* | *token* | *secret*) is_secret_input=1 ;;
+    esac
     if [[ $is_ask_set == is_outbound_mode ]]; then
-        printf '\n当前出站方式: %s\n\n请选择出站方式:\n' "$outbound_display"
+        printf '\n当前出站方式: %s\n' "$outbound_display"
+        msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出站可选 Shadowsocks 或 VLESS。"
+        printf '\n请选择出站方式:\n'
     else
         msg $is_opt_msg
     fi
-    [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请选择 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
+    [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
     [[ $is_tmp_list ]] && show_list "${is_tmp_list[@]}"
     while :; do
         echo -ne $is_opt_input_msg
-        read REPLY
+        if [[ $is_secret_input ]]; then
+            read -rs REPLY
+            echo
+        else
+            read -r REPLY
+        fi
         [[ ! $REPLY && $is_emtpy_exit ]] && exit
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
         [[ "$REPLY" == "${is_str}2${is_get}3${is_opt}3" && $is_ask_set == 'is_main_pick' ]] && {
@@ -524,16 +533,41 @@ ask() {
             }
             [[ $(grep ^y$ <<<$is_ask_set) ]] && {
                 [[ $(grep -i ^y$ <<<"$REPLY") ]] && break
-                msg "请输入 (y)"
+                msg "请输入 y 确认，或按 Ctrl+C 取消。"
                 continue
             }
-            [[ $REPLY ]] && export "$is_ask_set=$REPLY" && msg "使用: ${!is_ask_set}" && break
+            if [[ $REPLY ]]; then
+                export "$is_ask_set=$REPLY"
+                if [[ $is_secret_input ]]; then
+                    msg "已设置（输入内容已隐藏）"
+                else
+                    msg "使用: ${!is_ask_set}"
+                fi
+                break
+            fi
         else
-            [[ $(is_test number "$REPLY") ]] && is_ask_result=${is_tmp_list[$REPLY - 1]}
+            if [[ $(is_test number "$REPLY") ]]; then
+                if [[ $is_ask_set == is_outbound_mode ]]; then
+                    case $REPLY in
+                    1) is_ask_result="V6优先" ;;
+                    2) is_ask_result="V4优先" ;;
+                    3) is_ask_result="仅V4" ;;
+                    4) is_ask_result="仅V6" ;;
+                    5) is_ask_result="SS 出站" ;;
+                    6) is_ask_result="VLESS 出站" ;;
+                    esac
+                else
+                    is_ask_result=${is_tmp_list[$REPLY - 1]}
+                fi
+            fi
             [[ $is_ask_result ]] && export $is_ask_set="$is_ask_result" && msg "选择: ${!is_ask_set}" && break
         fi
 
-        msg "输入${is_err}"
+        if [[ $is_tmp_list ]]; then
+            msg "$is_err 输入无效，请输入 1-${#is_tmp_list[@]} 中的编号。"
+        else
+            msg "$is_err 输入无效，请按提示重新输入。"
+        fi
     done
     unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg is_emtpy_exit
 }
@@ -604,8 +638,20 @@ outbound_mode_to_direct_tag() {
     esac
 }
 
+outbound_mode_display_name() {
+    case $1 in
+    "V6优先") echo "IPv6 优先" ;;
+    "V4优先") echo "IPv4 优先" ;;
+    "仅V4") echo "仅 IPv4" ;;
+    "仅V6") echo "仅 IPv6" ;;
+    "SS 出站") echo "Shadowsocks 代理出站" ;;
+    "VLESS 出站") echo "VLESS 代理出站" ;;
+    *) echo "$1" ;;
+    esac
+}
+
 current_outbound_mode_display() {
-    local cfg=$1 mode name server port tls_enabled insecure tls_status=
+    local cfg=$1 mode mode_label name server port tls_enabled insecure tls_status=
     [[ $cfg ]] || {
         printf '%s\n' 未设置
         return
@@ -615,6 +661,7 @@ current_outbound_mode_display() {
         printf '%s\n' 未设置
         return
     }
+    mode_label=$(outbound_mode_display_name "$mode")
     if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
         if [[ $mode == 'VLESS 出站' ]]; then
             tls_enabled=$(meta_get "$cfg" '.outbound_proxy.config.tls.enabled')
@@ -629,13 +676,13 @@ current_outbound_mode_display() {
         fi
         name=$(meta_get "$cfg" '.outbound_proxy.name')
         [[ $name ]] && {
-            printf '%s\n' "$mode ($name)$tls_status"
+            printf '%s\n' "$mode_label ($name)$tls_status"
             return
         }
         if [[ $mode == 'SS 出站' ]]; then
             name=$(meta_get "$cfg" '.outbound_ss_name')
             [[ $name ]] && {
-                printf '%s\n' "$mode ($name)"
+                printf '%s\n' "$mode_label ($name)"
                 return
             }
         fi
@@ -647,11 +694,11 @@ current_outbound_mode_display() {
         fi
         [[ $server == *:* && $server != \[*\] ]] && server="[$server]"
         [[ $server && $port ]] && {
-            printf '%s\n' "$mode ($server:$port)$tls_status"
+            printf '%s\n' "$mode_label ($server:$port)$tls_status"
             return
         }
     fi
-    printf '%s\n' "$mode${tls_status:-}"
+    printf '%s\n' "$mode_label${tls_status:-}"
 }
 
 msg_outbound_mode_display() {
@@ -1334,11 +1381,13 @@ edit_node_outbound_mode() {
         fi
         current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
         if [[ $current_proxy_type == shadowsocks ]]; then
-            echo -ne "请输入 SS 分享链接 (直接回车复用当前配置):"
+            echo -ne "请输入 Shadowsocks 分享链接 (留空复用当前配置；输入内容隐藏):"
         else
-            echo -ne "请输入 SS 分享链接:"
+            echo -ne "请输入 Shadowsocks 分享链接 (输入内容隐藏):"
         fi
-        IFS= read -r is_outbound_ss_uri
+        IFS= read -rs is_outbound_ss_uri
+        echo
+        [[ $is_outbound_ss_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_ss_uri ]]; then
             parse_proxy_uri ss "$is_outbound_ss_uri" || err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"
             proxy_config=$outbound_proxy_config_json
@@ -1354,11 +1403,13 @@ edit_node_outbound_mode() {
         fi
         current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
         if [[ $current_proxy_type == vless ]]; then
-            echo -ne "请输入 VLESS 分享链接 (直接回车复用当前配置):"
+            echo -ne "请输入 VLESS 分享链接 (留空复用当前配置；输入内容隐藏):"
         else
-            echo -ne "请输入 VLESS 分享链接:"
+            echo -ne "请输入 VLESS 分享链接 (输入内容隐藏):"
         fi
-        IFS= read -r is_outbound_vless_uri
+        IFS= read -rs is_outbound_vless_uri
+        echo
+        [[ $is_outbound_vless_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_vless_uri ]]; then
             parse_proxy_uri vless "$is_outbound_vless_uri" || err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"
             proxy_config=$outbound_proxy_config_json
@@ -2971,7 +3022,7 @@ change() {
             [[ $is_new_port != 443 && $(is_test port_used $is_new_port) && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
-        [[ ! $is_new_port ]] && ask string is_new_port "请输入新端口:"
+        [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
         if [[ $is_caddy && $host ]]; then
             net=$is_old_net
             is_https_port=$is_new_port
@@ -2987,7 +3038,7 @@ change() {
         # new host
         is_new_host=$3
         [[ ! $host ]] && err "($is_config_file) 不支持更改域名."
-        [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名:"
+        [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
         old_host=$host # del old host
         add $net $is_new_host
         ;;
@@ -2996,7 +3047,7 @@ change() {
         is_new_path=$3
         [[ ! $path ]] && err "($is_config_file) 不支持更改路径."
         [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
-        [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径:"
+        [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
         add $net auto auto $is_new_path
         ;;
     4)
@@ -3010,7 +3061,7 @@ change() {
         else
             err "($is_config_file) 不支持更改密码."
         fi
-        [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码:"
+        [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
         password=$is_new_pass
         ss_password=$is_new_pass
         is_socks_pass=$is_new_pass
@@ -3021,7 +3072,7 @@ change() {
         is_new_uuid=$3
         [[ ! $uuid ]] && err "($is_config_file) 不支持更改 UUID."
         [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
-        [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID:"
+        [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
         add $net auto $is_new_uuid
         ;;
     6)
@@ -3044,7 +3095,7 @@ change() {
         # new remote addr
         is_new_door_addr=$3
         [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标地址."
-        [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址:"
+        [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
         door_addr=$is_new_door_addr
         add $net
         ;;
@@ -3053,7 +3104,7 @@ change() {
         is_new_door_port=$3
         [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标端口."
         [[ ! $is_new_door_port ]] && {
-            ask string door_port "请输入新的目标端口:"
+            ask string door_port "请输入新的目标端口 (1-65535):"
             is_new_door_port=$door_port
         }
         add $net auto auto $is_new_door_port
@@ -3070,8 +3121,8 @@ change() {
             [[ $is_new_private_key && ! $is_new_public_key ]] && {
                 err "无法找到 Public key."
             }
-            [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新 Private key:"
-            [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新 Public key:"
+            [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新的私钥 (输入不显示):"
+            [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新的公钥:"
             if [[ $is_new_private_key == $is_new_public_key ]]; then
                 err "Private key 和 Public key 不能一样."
             fi
@@ -3102,11 +3153,8 @@ change() {
         is_new_servername=$3
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改 serverName."
         [[ $is_auto ]] && is_new_servername=$is_random_servername
-        [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 serverName:"
+        [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
         is_servername=$is_new_servername
-        [[ $(grep -i "^233boy.com$" <<<$is_servername) ]] && {
-            err "你干嘛～哎呦～"
-        }
         add $net
         ;;
     11)
@@ -3116,27 +3164,23 @@ change() {
             err "($is_config_file) 不支持更改伪装网站."
         }
         [[ ! -f $is_caddy_conf/${host}.conf.add ]] && err "无法配置伪装网站."
-        [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的伪装网站 (例如 example.com):"
+        [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的反向代理目标域名 (例如 example.com):"
         proxy_site=$(sed 's#^.*//##;s#/$##' <<<$is_new_proxy_site)
-        [[ $(grep -i "^233boy.com$" <<<$proxy_site) ]] && {
-            err "你干嘛～哎呦～"
-        } || {
-            load caddy.sh
-            caddy_config proxy
-            manage restart caddy &
-        }
+        load caddy.sh
+        caddy_config proxy
+        manage restart caddy &
         msg "\n已更新伪装网站为: $(_green $proxy_site) \n"
         ;;
     12)
         # new socks user
         [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
-        ask string is_socks_user "请输入新用户名 (Username):"
+        ask string is_socks_user "请输入新用户名:"
         add $net
         ;;
     13)
         # update share link node name (does not rename json file)
         is_new_name=$3
-        [[ ! $is_new_name ]] && ask string is_new_name "请输入新节点名称:"
+        [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
         is_new_name=${is_new_name%.json}
         [[ ! $is_new_name ]] && err "节点名称不能为空."
         is_old_name=$(node_name_for_link "$is_config_file")
@@ -3151,8 +3195,8 @@ change() {
     15)
         is_new_entry_addr=$3
         if [[ -z $is_new_entry_addr ]]; then
-            echo -ne "请输入新的入口地址(IP或域名):"
-            read is_new_entry_addr
+            echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
+            read -r is_new_entry_addr
         fi
         is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr")
         msg "\n已更新入口地址为: $(_green $is_new_entry_addr)\n"
@@ -3163,7 +3207,7 @@ change() {
         [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell PSK."
         is_new_snell_psk=$3
         [[ $is_auto ]] && is_new_snell_psk=$(get_snell_psk)
-        [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK:"
+        [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
         if [[ $snell_version == 6 ]]; then
             ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"
         fi
@@ -3176,7 +3220,7 @@ change() {
         is_new_snell_version=$3
         [[ $is_auto ]] && is_new_snell_version=6
         [[ ! $is_new_snell_version ]] && {
-            ask string is_new_snell_version "请输入新的 Snell 版本 [5/6]:"
+            ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
         }
         snell_version_valid "$is_new_snell_version" || err "Snell 版本只支持 5 或 6. $is_err_tips"
         if [[ $is_new_snell_version == 6 && $snell_version != 6 ]]; then
@@ -3280,8 +3324,10 @@ del() {
     [[ ! $is_config_file ]] && get info $1
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
-            msg "\n是否删除配置文件?: $is_config_file"
-            pause
+            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file。确认删除"; then
+                msg "已取消删除节点。"
+                return
+            fi
         fi
         deleted_config_file=$is_config_file
         apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
@@ -3310,10 +3356,15 @@ del() {
 # uninstall
 uninstall() {
     if [[ $is_caddy ]]; then
-        is_tmp_list=("卸载 $is_core_name" "卸载 ${is_core_name} & Caddy")
+        is_tmp_list=("仅卸载 sing-box 和 one-singbox" "卸载 sing-box、one-singbox 和 Caddy")
         ask list is_do_uninstall
+        if [[ $REPLY == '2' ]]; then
+            confirm_action "将删除 sing-box 配置、one-singbox 脚本，以及整个 Caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return; }
+        else
+            confirm_action "将删除 sing-box 配置、one-singbox 脚本和服务。确认卸载" || { msg "已取消卸载。"; return; }
+        fi
     else
-        ask string y "是否卸载 ${is_core_name}? [y]:"
+        confirm_action "将删除 sing-box 配置、one-singbox 脚本和服务。确认卸载" || { msg "已取消卸载。"; return; }
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
@@ -3348,34 +3399,20 @@ manage() {
     case $1 in
     1 | start)
         is_do=start
-        is_do_msg=启动
-        is_test_run=1
         ;;
     2 | stop)
         is_do=stop
-        is_do_msg=停止
         ;;
     3 | r | restart)
         is_do=restart
-        is_do_msg=重启
-        is_test_run=1
         ;;
     *)
         is_do=$1
-        is_do_msg=$1
         ;;
     esac
     case $2 in
-    caddy)
-        is_do_name=$2
-        is_run_bin=$is_caddy_bin
-        is_do_name_msg=Caddy
-        ;;
-    *)
-        is_do_name=$is_core
-        is_run_bin=$is_core_bin
-        is_do_name_msg=$is_core_name
-        ;;
+    caddy) is_do_name=caddy ;;
+    *) is_do_name=$is_core ;;
     esac
     if [[ $is_systemd ]]; then
         systemctl $is_do $is_do_name 2>/dev/null
@@ -3392,19 +3429,6 @@ manage() {
             ;;
         esac
     fi
-    [[ $is_test_run && ! $is_new_install ]] && {
-        sleep 2
-        if [[ ! $(pgrep -f $is_run_bin 2>/dev/null || grep -l "$is_run_bin" /proc/*/cmdline 2>/dev/null) ]]; then
-            is_run_fail=${is_do_name_msg,,}
-            [[ ! $is_no_manage_msg ]] && {
-                msg
-                warn "($is_do_msg) $is_do_name_msg 失败"
-                _yellow "检测到运行失败, 自动执行测试运行."
-                get test-run
-                _yellow "测试结束, 请按 Enter 退出."
-            }
-        fi
-    }
 }
 
 # add a config
@@ -3640,7 +3664,7 @@ add() {
                 get_port
                 is_https_port=$tmp_port
                 warn "端口 (80 或 443) 已经被占用, 你也可以考虑使用 no-auto-tls"
-                msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
+                msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://github.com/ouones/one-singbox/blob/main/docs/usage.md)\n"
                 msg "\n Caddy 将使用非标准端口实现自动配置 TLS, HTTP:$is_http_port HTTPS:$is_https_port\n"
                 msg "请确定是否继续???"
                 pause
@@ -3648,7 +3672,7 @@ add() {
             is_install_caddy=1
         fi
         # set host
-        [[ ! $host ]] && ask string host "请输入域名:"
+        [[ ! $host ]] && ask string host "请输入服务器域名 (需解析到本机公网 IP):"
         # test host dns
         get host-test
     else
@@ -3659,18 +3683,18 @@ add() {
             [[ ! $port ]] && {
                 get_port
                 is_default_arg=$tmp_port
-                ask string port "请输入端口(直接回车随机):"
+                ask string port "请输入监听端口 (1-65535，留空使用自动分配的 $is_default_arg):"
             }
 
             case ${is_new_protocol,,} in
             socks)
                 # set user
-                [[ ! $is_socks_user ]] && ask string is_socks_user "请设置用户名:"
+                [[ ! $is_socks_user ]] && ask string is_socks_user "请输入 SOCKS 用户名:"
                 # set password
                 [[ ! $is_socks_pass ]] && {
                     [[ ! $tmp_uuid ]] && get_uuid
                     is_default_arg=$tmp_uuid
-                    ask string is_socks_pass "请设置密码(直接回车随机):"
+                    ask string is_socks_pass "请输入 SOCKS 密码 (留空随机生成；输入不显示):"
                 }
                 ;;
             shadowsocks)
@@ -3684,7 +3708,7 @@ add() {
                         [[ ! $tmp_uuid ]] && get_uuid
                         is_default_arg=$tmp_uuid
                     fi
-                    ask string ss_password "请设置密码(直接回车随机):"
+                    ask string ss_password "请输入 Shadowsocks 密码 (留空随机生成；输入不显示):"
                 }
                 ;;
             esac
@@ -3709,9 +3733,9 @@ add() {
     # Dokodemo-Door
     if [[ $is_new_protocol == 'Direct' ]]; then
         # set remote addr
-        [[ ! $door_addr ]] && ask string door_addr "请输入目标地址:"
+        [[ ! $door_addr ]] && ask string door_addr "请输入目标地址 (IPv4、IPv6 或域名):"
         # set remote port
-        [[ ! $door_port ]] && ask string door_port "请输入目标端口:"
+        [[ ! $door_port ]] && ask string door_port "请输入目标端口 (1-65535):"
     fi
 
     # Shadowsocks 2022
@@ -3725,7 +3749,7 @@ add() {
             cat <<<"$is_new_json" >$is_test_json_save
             $is_core_bin check -c $is_test_json_save &>/dev/null
             if [[ $? != 0 ]]; then
-                warn "Shadowsocks 协议 ($ss_method) 不支持使用密码 ($(_red_bg $ss_password))\n\n你可以使用命令: $(_green $is_core ss2022) 生成支持的密码.\n\n脚本将自动创建可用密码:)"
+                warn "当前 Shadowsocks 加密方式 ($ss_method) 不支持此密码。脚本将自动生成可用密码。"
                 ss_password=
                 # create new json.
                 json_str=
@@ -3742,7 +3766,7 @@ add() {
     fi
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
-        echo -ne "请输入节点名称(直接回车随机8位):"
+        echo -ne "请输入节点名称 (留空自动生成 8 位名称):"
         read is_custom_node_name
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
@@ -3918,7 +3942,7 @@ get() {
         socks*)
             net=socks
             is_protocol=$net
-            [[ ! $is_socks_user ]] && is_socks_user=233boy
+            [[ ! $is_socks_user ]] && is_socks_user=sbuser
             [[ ! $is_socks_pass ]] && is_socks_pass=$uuid
             json_str="users:[{username: \"$is_socks_user\", password: \"$is_socks_pass\"}]"
             ;;
@@ -3985,7 +4009,7 @@ get() {
         if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
             msg "\n请将 ($(_red_bg $host)) 解析到 ($(_red_bg $ip))"
             msg "\n如果使用 Cloudflare, 在 DNS 那; 关闭 (Proxy status / 代理状态), 即是 (DNS only / 仅限 DNS)"
-            ask string y "我已经确定解析 [y]:"
+            ask string y "确认域名已解析到本机公网 IP；如使用 Cloudflare，代理状态为“仅 DNS”。输入 y 继续:"
             get ping
             if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
                 _cyan "\n测试结果: $is_host_dns"
@@ -4021,42 +4045,6 @@ get() {
         is_install_sh=$(cat $is_sh_dir/install.sh)
         uninstall
         bash <<<$is_install_sh
-        ;;
-    test-run)
-        if [[ $is_systemd ]]; then
-            systemctl list-units --full -all &>/dev/null
-            [[ $? != 0 ]] && {
-                _yellow "\n无法执行测试, 请检查 systemctl 状态.\n"
-                return
-            }
-        fi
-        is_no_manage_msg=1
-        if [[ ! $(pgrep -f $is_core_bin 2>/dev/null || grep -l "$is_core_bin" /proc/*/cmdline 2>/dev/null) ]]; then
-            _yellow "\n测试运行 $is_core_name ..\n"
-            manage start &>/dev/null
-            if [[ $is_run_fail == $is_core ]]; then
-                _red "$is_core_name 运行失败信息:"
-                $is_core_bin run -c $is_config_json -C $is_conf_dir
-            else
-                _green "\n测试通过, 已启动 $is_core_name ..\n"
-            fi
-        else
-            _green "\n$is_core_name 正在运行, 跳过测试\n"
-        fi
-        if [[ $is_caddy ]]; then
-            if [[ ! $(pgrep -f $is_caddy_bin 2>/dev/null || grep -l "$is_caddy_bin" /proc/*/cmdline 2>/dev/null) ]]; then
-                _yellow "\n测试运行 Caddy ..\n"
-                manage start caddy &>/dev/null
-                if [[ $is_run_fail == 'caddy' ]]; then
-                    _red "Caddy 运行失败信息:"
-                    $is_caddy_bin run --config $is_caddyfile
-                else
-                    _green "\n测试通过, 已启动 Caddy ..\n"
-                fi
-            else
-                _green "\nCaddy 正在运行, 跳过测试\n"
-            fi
-        fi
         ;;
     esac
 }
@@ -4130,7 +4118,7 @@ info() {
         is_info_str=($is_protocol $is_addr $port $password tcp tls true)
         ;;
     hy*)
-        is_can_change=(0 1 4 13 14 15 16)
+        is_can_change=(0 1 4 12 13 14 15)
         is_info_show=(0 1 2 10 8 9 20)
         is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1#$is_node_name"
         is_info_str=($is_protocol $is_addr $port $password tls h3 true)
@@ -4157,7 +4145,7 @@ info() {
         is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
         ;;
     anytls)
-        is_can_change=(0 1 4 13 14 15 16)
+        is_can_change=(0 1 4 12 13 14 15)
         if [[ $is_anytls_domain ]]; then
             is_info_show=(0 1 2 10 8)
             is_info_str=($is_protocol $is_anytls_domain $port $password tls)
@@ -4237,7 +4225,7 @@ info() {
         msg "------------- no-auto-tls INFO -------------"
         msg "端口(port): $port"
         msg "路径(path): $path"
-        msg "\e[41m帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)"
+        msg "\e[41m帮助(help)\e[0m: $(msg_ul https://github.com/ouones/one-singbox/blob/main/docs/usage.md)"
     fi
     footer_msg
 }
@@ -4334,7 +4322,7 @@ update() {
         ;;
     2 | sh)
         is_update_name=sh
-        is_show_name="$is_core_name 脚本"
+        is_show_name="$is_script_name 脚本"
         is_run_ver=$is_sh_ver
         is_update_repo=$is_sh_repo
         ;;
@@ -4381,7 +4369,79 @@ update() {
     [[ $is_update_name != 'sh' ]] && manage restart $is_update_name &
 }
 
-# main menu; if no prefer args.
+# Interactive menus are grouped by the task users want to complete.
+node_menu() {
+    is_tmp_list=("添加节点" "修改节点" "查看节点信息" "删除节点" "返回首页")
+    ask list is_node_action null "\n请选择节点操作:\n"
+    case $REPLY in
+    1) add ;;
+    2) change ;;
+    3) info ;;
+    4) del ;;
+    5) is_main_menu ;;
+    esac
+}
+
+service_menu() {
+    is_tmp_list=("查看服务状态" "启动服务" "停止服务" "重启服务" "查看日志" "返回首页")
+    ask list is_service_action null "\n请选择服务操作:\n"
+    case $REPLY in
+    1)
+        core_status_read
+        msg "\nsing-box 内核：$is_core_status (版本 $is_core_ver)"
+        [[ $is_caddy ]] && msg "Caddy：$is_caddy_status (版本 $is_caddy_ver)"
+        ;;
+    2)
+        manage start &
+        msg "已提交启动服务请求。"
+        ;;
+    3)
+        manage stop &
+        msg "已提交停止服务请求。"
+        ;;
+    4)
+        manage restart &
+        msg "已提交重启服务请求。"
+        ;;
+    5)
+        load log.sh
+        log_set
+        ;;
+    6) is_main_menu ;;
+    esac
+}
+
+update_menu() {
+    is_tmp_list=("更新 sing-box 内核" "更新 one-singbox 脚本")
+    [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
+    is_tmp_list+=("返回首页")
+    ask list is_do_update null "\n请选择要更新的软件:\n"
+    case $REPLY in
+    1 | 2) update "$REPLY" ;;
+    3)
+        if [[ $is_caddy ]]; then
+            update caddy
+        else
+            is_main_menu
+        fi
+        ;;
+    4) is_main_menu ;;
+    esac
+}
+
+system_tools_menu() {
+    is_tmp_list=("启用 BBR" "设置 DNS" "设置日志占用上限" "重装 one-singbox 脚本" "返回首页")
+    ask list is_system_tool null "\n请选择系统工具:\n"
+    case $REPLY in
+    1) load bbr.sh; _try_enable_bbr ;;
+    2) load dns.sh; dns_set ;;
+    3) log_limit_set ;;
+    4) get reinstall ;;
+    5) is_main_menu ;;
+    esac
+}
+
+# Main menu; leave input empty to exit.
 is_main_menu() {
     if ! qrcode_dependency_checked; then
         qrcode_dependency_install || :
@@ -4390,97 +4450,39 @@ is_main_menu() {
     load log.sh
     local is_log_usage_limit is_log_usage_bytes
     is_log_usage_limit=$(log_limit_read)
-    msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
-    msg "$is_core_name $is_core_ver: $is_core_status"
+    msg "\n------------- $is_script_name script $is_sh_ver by $author -------------"
+    msg "sing-box 内核：$is_core_ver ($is_core_status)"
     if is_log_usage_bytes=$(log_usage_read); then
-        msg "日志用量：$(awk -v bytes="$is_log_usage_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }') / $is_log_usage_limit MB"
+        msg "日志占用：$(awk -v bytes="$is_log_usage_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }') MB / 上限 $is_log_usage_limit MB"
     else
-        msg "日志用量：暂不可用 / $is_log_usage_limit MB"
+        msg "日志占用：暂不可用 / 上限 $is_log_usage_limit MB"
     fi
-    msg "群组(Chat): $(msg_ul https://t.me/tg233boy)"
+    msg "问题反馈：$(msg_ul https://github.com/ouones/one-singbox/issues)"
     is_main_start=1
     ask mainmenu
     case $REPLY in
-    1)
-        add
-        ;;
-    2)
-        change
-        ;;
-    3)
-        info
-        ;;
-    4)
-        del
-        ;;
-    5)
-        ask list is_do_manage "启动 停止 重启"
-        manage $REPLY &
-        msg "\n管理状态执行: $(_green $is_do_manage)\n"
-        ;;
-    6)
-        is_tmp_list=("更新$is_core_name" "更新脚本")
-        [[ $is_caddy ]] && is_tmp_list+=("更新Caddy")
-        ask list is_do_update null "\n请选择更新:\n"
-        update $REPLY
-        ;;
-    7)
-        uninstall
-        ;;
-    8)
-        msg
-        load help.sh
-        show_help
-        ;;
-    9)
-        is_tmp_list=("启用BBR" "查看日志" "测试运行" "重装脚本" "设置DNS" "日志大小限制($(log_limit_read)MB)")
-        ask list is_do_other
-        case $REPLY in
-        1)
-            load bbr.sh
-            _try_enable_bbr
-            ;;
-        2)
-            load log.sh
-            log_set
-            ;;
-        3)
-            get test-run
-            ;;
-        4)
-            get reinstall
-            ;;
-        5)
-            load dns.sh
-            dns_set
-            ;;
-        6)
-            log_limit_set
-            ;;
-        esac
-        ;;
-    10)
-        load help.sh
-        about
-        ;;
-    11)
-        relay_menu
-        ;;
+    1) node_menu ;;
+    2) relay_menu ;;
+    3) service_menu ;;
+    4) update_menu ;;
+    5) system_tools_menu ;;
+    6) msg; load help.sh; show_help ;;
+    7) load help.sh; about ;;
+    8) uninstall ;;
     esac
 }
 
 relay_warn_security() {
-    warn "当前中转未设置身份验证，请务必使用系统防火墙 (如 ufw / iptables) 或云服务商安全组 / 网络 ACL 限制访问来源，以防止端口被未授权滥用."
+    warn "中转没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
 }
 
 relay_info_show() {
     local l_port=$1 r_addr=$2 r_port=$3
-    msg "type = direct"
-    msg "listen = ::"
-    msg "listen_port = $l_port"
-    msg "override_address = $r_addr"
-    msg "override_port = $r_port"
-    msg "network = tcp,udp"
+    msg "类型: TCP/UDP 端口转发"
+    msg "监听地址: ::"
+    msg "监听端口: $l_port"
+    msg "目标地址: $r_addr"
+    msg "目标端口: $r_port"
 }
 
 relay_add() {
@@ -4493,7 +4495,7 @@ relay_add() {
         done
         local auto_port=$local_port
         is_default_arg=$auto_port
-        ask string local_port "请输入本地监听端口 (直接回车自动生成):"
+        ask string local_port "请输入本地监听端口 (1-65535，留空使用自动分配的 $local_port):"
         [[ -z "$REPLY" ]] && msg "自动分配本地端口: $local_port"
     fi
     local_port=$(echo "$local_port" | tr -d ' ')
@@ -4502,13 +4504,13 @@ relay_add() {
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
 
     if [[ ! $remote_addr ]]; then
-        ask string remote_addr "请输入目标地址 (IPv4/IPv6/域名):"
+        ask string remote_addr "请输入目标地址 (IPv4、IPv6 或域名):"
     fi
     remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [[ -n $remote_addr ]] || err "目标地址不能为空."
 
     if [[ ! $remote_port ]]; then
-        ask string remote_port "请输入目标端口:"
+        ask string remote_port "请输入目标端口 (1-65535):"
     fi
     remote_port=$(echo "$remote_port" | tr -d ' ')
     [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
@@ -4556,7 +4558,7 @@ relay_info() {
     local local_port=$1
     if [[ ! $local_port ]]; then
         relay_list
-        ask string local_port "请输入要查看的中转本地端口:"
+        ask string local_port "请输入要查看的中转监听端口:"
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
@@ -4585,7 +4587,7 @@ relay_list() {
         l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
         r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
         r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
-        msg "本地端口: $l_port -> 目标: $r_addr:$r_port (network: tcp,udp)"
+        msg "监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
         ((count++))
     done
     msg "------------------------------------"
@@ -4599,12 +4601,15 @@ relay_delete() {
         relay_list
         # Existing relays may be listening; only validate the port format here.
         local is_cant_test_port=1
-        ask string local_port "请输入要删除的中转本地端口:"
+        ask string local_port "请输入要删除的中转监听端口:"
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     relay_file="$is_conf_dir/relay-${local_port}.json"
     [[ -f $relay_file ]] || err "未找到中转配置 (relay-${local_port}.json)."
+    if [[ $is_main_start ]]; then
+        confirm_action "将删除监听端口 $local_port 的中转配置。确认删除" || { msg "已取消删除中转。"; return; }
+    fi
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
     mv -f "$relay_file" "$backup_file" || err "备份中转配置失败，未执行删除."
     if [[ -f $is_config_json ]]; then
@@ -4622,8 +4627,8 @@ relay_delete() {
 }
 
 relay_menu() {
-    is_tmp_list=("添加中转" "中转列表" "删除中转" "返回主菜单")
-    ask list is_relay_action null "\n请选择中转管理操作:\n"
+    is_tmp_list=("添加端口中转" "查看中转列表" "查看中转详情" "删除端口中转" "返回首页")
+    ask list is_relay_action null "\n请选择端口中转操作:\n"
     case $REPLY in
     1)
         relay_add
@@ -4632,9 +4637,12 @@ relay_menu() {
         relay_list
         ;;
     3)
-        relay_delete
+        relay_info
         ;;
     4)
+        relay_delete
+        ;;
+    5)
         is_main_menu
         ;;
     esac
@@ -4800,9 +4808,6 @@ main() {
         [[ $2 && $2 != 'caddy' ]] && err "无法识别 ($2), 请使用: $is_core $1 [caddy]"
         manage $1 $2 &
         ;;
-    t | test)
-        get test-run
-        ;;
     reinstall)
         get $1
         ;;
@@ -4815,7 +4820,7 @@ main() {
         ;;
     v | ver | version)
         [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy $is_caddy_ver)"
-        msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_core_name script $is_sh_ver) $is_caddy_ver\n"
+        msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_script_name script $is_sh_ver) $is_caddy_ver\n"
         ;;
     h | help | --help)
         load help.sh
