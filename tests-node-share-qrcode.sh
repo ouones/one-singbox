@@ -20,7 +20,18 @@ mkdir -p "$workdir/bin"
 cat >"$workdir/bin/qrencode" <<'FAKE_QRENCODE'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$QR_LOG"
-printf 'QRCODE_RENDERED\n'
+if [[ ${2:-} == UTF8 ]]; then
+  columns=57
+  rows=29
+else
+  columns=114
+  rows=57
+fi
+printf 'QRCODE_RENDERED'
+printf '%*s\n' "$((columns - 14))" '' | tr ' ' x
+for ((row = 1; row < rows; row++)); do
+  printf '%*s\n' "$columns" '' | tr ' ' x
+done
 exit "${QR_EXIT:-0}"
 FAKE_QRENCODE
 chmod +x "$workdir/bin/qrencode"
@@ -32,7 +43,7 @@ fail() {
 
 run_core_case() {
   local core_file=$1 case_name=$2
-  CORE_FILE="$core_file" CASE_DIR="$workdir/$case_name" QR_BIN="$workdir/bin" bash <<'CASE' || exit 1
+  CORE_FILE="$core_file" CASE_NAME="$case_name" CASE_DIR="$workdir/$case_name" QR_BIN="$workdir/bin" bash <<'CASE' || exit 1
 set -o pipefail
 
 fail() {
@@ -46,8 +57,13 @@ expect_qr_args() {
   local qr_args=()
   mapfile -t qr_args <"$QR_LOG"
   [[ ${#qr_args[@]} == 3 ]] || fail "qrencode expected exactly three arguments, got ${#qr_args[@]}"
-  [[ ${qr_args[0]} == -t && ${qr_args[1]} == ANSI ]] || fail "qrencode options changed: ${qr_args[*]}"
+  [[ ${qr_args[0]} == -t && ${qr_args[1]} == UTF8 ]] || fail "qrencode options changed: ${qr_args[*]}"
   [[ ${qr_args[2]} == "$expected_url" ]] || fail "qrencode input differs from the displayed URL"
+}
+
+stty() {
+  [[ ${TEST_TTY_SIZE:-} ]] || return 1
+  printf '%s\n' "$TEST_TTY_SIZE"
 }
 
 type() {
@@ -58,6 +74,7 @@ type() {
 }
 
 source "$CORE_FILE"
+TEST_TTY_SIZE='40 80'
 case_dir=$CASE_DIR
 mkdir -p "$case_dir/conf/.quan-meta"
 export PATH="$QR_BIN:$PATH"
@@ -137,6 +154,52 @@ special_url=$is_url
 expect_qr_args "$special_url"
 [[ $(grep -c 'QRCODE_RENDERED' "$case_dir/info.out") == 1 ]] || fail "info should render one QR code"
 
+# A narrow terminal must not display a QR code that would wrap across the screen.
+TEST_TTY_SIZE='12 20'
+rm -f "$QR_LOG"
+info special.json >"$case_dir/narrow.out" 2>&1 || fail "info should remain successful when the QR code does not fit"
+[[ $(<"$case_dir/narrow.out") != *"QRCODE_RENDERED"* ]] || fail "a QR code that exceeds the terminal size must not be displayed"
+[[ $(<"$case_dir/narrow.out") == *"终端空间不足"* && $(<"$case_dir/narrow.out") == *"$special_url"* ]] || fail "small terminal should explain the space limit and retain the share URL"
+rm -f "$QR_LOG"
+url_qr qr special.json >"$case_dir/narrow-qr-command.out" 2>&1 || fail "the independent QR command should remain successful when the QR does not fit"
+[[ $(<"$case_dir/narrow-qr-command.out") != *"QRCODE_RENDERED"* && $(<"$case_dir/narrow-qr-command.out") == *"终端空间不足"* ]] || fail "the independent QR command should skip an oversized QR with a clear message"
+[[ $(<"$case_dir/narrow-qr-command.out") == *"https://233boy.github.io/tools/qr.html#$special_url"* ]] || fail "the independent QR command should retain its webpage fallback"
+is_dont_show_info=
+
+# A menu's stale COLUMNS value must not override the actual window size.
+TEST_TTY_SIZE='40 80'
+rm -f "$QR_LOG"
+COLUMNS=1 info special.json >"$case_dir/stale-columns.out" 2>&1 || fail "info should succeed when COLUMNS is stale"
+expect_qr_args "$special_url"
+[[ $(<"$case_dir/stale-columns.out") == *"QRCODE_RENDERED"* ]] || fail "stale COLUMNS must not hide a QR code that fits the terminal"
+
+# Without a readable terminal size, omit the QR code and keep the original link visible.
+TEST_TTY_SIZE=
+unset -f stty
+rm -f "$QR_LOG"
+info special.json >"$case_dir/no-tty.out" 2>&1 || fail "info should succeed without a TTY"
+[[ ! -f $QR_LOG && $(<"$case_dir/no-tty.out") != *"QRCODE_RENDERED"* ]] || fail "a missing TTY must not invoke or display qrencode"
+[[ $(<"$case_dir/no-tty.out") == *"无法读取终端尺寸"* && $(<"$case_dir/no-tty.out") == *"$special_url"* ]] || fail "no-TTY output should explain the skipped QR and retain the share URL"
+stty() {
+  [[ ${TEST_TTY_SIZE:-} ]] || return 1
+  printf '%s\n' "$TEST_TTY_SIZE"
+}
+TEST_TTY_SIZE='40 80'
+
+# The issue's long VLESS Reality URL fits in 80x40 only in compact UTF8 mode.
+issue16_url='vless://00000000-0000-4000-8000-000000000000@203.0.113.10:40018?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome#TEST-NODE'
+rm -f "$QR_LOG"
+render_qrcode "$issue16_url" >"$case_dir/long-fit.out" 2>&1 || fail "the compact issue QR should fit in an 80x40 terminal"
+expect_qr_args "$issue16_url"
+[[ $(<"$case_dir/long-fit.out") == *"QRCODE_RENDERED"* ]] || fail "a compact QR that fits should be displayed"
+TEST_TTY_SIZE='24 40'
+rm -f "$QR_LOG"
+render_qrcode "$issue16_url" >"$case_dir/long-narrow.out" 2>&1 || :
+[[ ! $(<"$case_dir/long-narrow.out") == *"QRCODE_RENDERED"* ]] || fail "the long issue QR must be omitted when it cannot fit"
+[[ $(<"$case_dir/long-narrow.out") == *"终端空间不足"* ]] || fail "a long QR that does not fit should explain the space limit"
+expect_qr_args "$issue16_url"
+TEST_TTY_SIZE='40 80'
+
 # A node without a share URL must not reuse the preceding node's URL.
 cat >"$is_conf_dir/relay-41603.json" <<'NODE'
 {"inbounds":[{"tag":"relay-41603.json","type":"direct","listen":"::","listen_port":41603,"override_address":"203.0.113.20","override_port":41603}]}
@@ -186,10 +249,20 @@ QR_EXIT=23 info special.json >"$case_dir/failing.out" 2>&1 || fail "qrencode fai
 [[ -f $QR_LOG ]] || fail "failing qrencode should have been called"
 [[ $(<"$case_dir/failing.out") == *"二维码生成失败"* && $(<"$case_dir/failing.out") == *"$special_url"* ]] || fail "qrencode failure should be clear and retain URL"
 
-echo "PASS: QR details behavior for $(basename "$CORE_FILE")"
+echo "PASS: QR details behavior for $CASE_NAME core"
 CASE
 }
 
 run_core_case "$repo_root/core.sh" root || fail "root core QR tests failed"
 run_core_case "$repo_root/src/core.sh" src || fail "src core QR tests failed"
+
+if qrencode_bin=$(command -v qrencode); then
+  issue16_url='vless://00000000-0000-4000-8000-000000000000@203.0.113.10:40018?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome#TEST-NODE'
+  qr_output=$("$qrencode_bin" -t UTF8 "$issue16_url") || fail "real qrencode failed to render the issue URL"
+  qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | wc -L)
+  qr_height=$(printf '%s\n' "$qr_output" | wc -l)
+  [[ $qr_width == 57 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
+  echo "PASS: real qrencode UTF8 dimensions are ${qr_width} columns x ${qr_height} rows"
+fi
+
 echo "PASS: node share QR tests"
