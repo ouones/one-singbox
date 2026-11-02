@@ -115,12 +115,39 @@ is_tls_key=$is_core_dir/bin/tls.key
     rm $is_tls_tmp
 }
 
-if [[ $(pgrep -f $is_core_bin) ]]; then
-    is_core_status=$(_green running)
-else
-    is_core_status=$(_red_bg stopped)
-    is_core_stop=1
-fi
+core_status_read() {
+    local service_status service_status_code
+    is_core_stop=
+    if [[ $is_systemd ]]; then
+        if service_status=$(systemctl is-active "$is_core" 2>/dev/null); then
+            service_status_code=0
+        else
+            service_status_code=$?
+        fi
+        case "$service_status_code:$service_status" in
+            0:active) is_core_status=$(_green "运行中") ;;
+            3:failed) is_core_status=$(_red "启动失败"); is_core_stop=1 ;;
+            3:inactive) is_core_status=$(_red "已停止"); is_core_stop=1 ;;
+            *) is_core_status=$(_red "状态读取失败"); is_core_stop=1 ;;
+        esac
+    elif [[ $is_openrc ]]; then
+        if rc-service "$is_core" status >/dev/null 2>&1; then
+            service_status_code=0
+        else
+            service_status_code=$?
+        fi
+        case $service_status_code in
+            0) is_core_status=$(_green "运行中") ;;
+            3 | 4 | 8 | 16) is_core_status=$(_red "已停止"); is_core_stop=1 ;;
+            32) is_core_status=$(_red "启动失败"); is_core_stop=1 ;;
+            *) is_core_status=$(_red "状态读取失败"); is_core_stop=1 ;;
+        esac
+    else
+        is_core_status=$(_red "状态读取失败")
+        is_core_stop=1
+    fi
+}
+core_status_read
 if [[ -f $is_caddy_bin && -d $is_caddy_dir && $is_caddy_service ]]; then
     is_caddy=1
     if [[ $is_systemd ]]; then

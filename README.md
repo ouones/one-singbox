@@ -56,6 +56,8 @@ bash <(wget -qO- -o- https://github.com/ouones/one-singbox/raw/main/install.sh)
 
 # 帮助
 
+首页每次显示时都会通过 systemd 或 OpenRC 查询 sing-box 服务状态，并以绿色“运行中”或红色停止／启动失败状态展示；该状态不代表外网连通性。
+
 除 Snell 外，创建成功和查看支持分享链接的本机节点时，会在链接后自动显示终端二维码。缺少 `qrencode` 或生成失败时仍可复制原链接；单独 `url` 命令不显示二维码。
 
 日志大小限制：运行 `sing-box`，进入「9 其他」→「6 日志大小限制」。默认 200 MB，可输入正整数修改，回车保留当前值；设置在重启后保留。限制包括 `/var/log/sing-box/` 中的 `.log` 和轮转生成的 `.log.1` 文件总大小（1 MB = 1024 × 1024 字节）。

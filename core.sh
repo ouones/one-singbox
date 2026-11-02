@@ -69,11 +69,6 @@ if [[ -x $is_core_bin ]]; then
     is_core_ver=$($is_core_bin version 2>/dev/null | awk 'NR==1{print $3}')
 fi
 [[ -z $is_core_ver ]] && is_core_ver=unknown
-if [[ -d $is_conf_dir ]] && compgen -G "$is_conf_dir/*.json" >/dev/null; then
-    is_core_status=installed
-else
-    is_core_status=not-installed
-fi
 [[ -x $is_caddy_bin ]] && is_caddy=1
 
 export LC_ALL=C
@@ -4366,6 +4361,7 @@ update() {
 
 # main menu; if no prefer args.
 is_main_menu() {
+    core_status_read
     msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
     msg "群组(Chat): $(msg_ul https://t.me/tg233boy)"
@@ -4764,6 +4760,7 @@ main() {
         get $@
         ;;
     s | status)
+        core_status_read
         msg "\n$is_core_name $is_core_ver: $is_core_status\n"
         [[ $is_caddy ]] && msg "Caddy $is_caddy_ver: $is_caddy_status\n"
         ;;

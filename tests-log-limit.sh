@@ -103,8 +103,12 @@ grep -qx 'del sing-box-log-limit default' "$workdir/service-calls" || fail 'Open
 
 # Exercise the actual menu branches in both distributed core copies.
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+    source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
     is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
+    is_systemd= is_openrc=
+    _green() { printf 'GREEN:%s' "$*"; }
+    _red() { printf 'RED:%s' "$*"; }
     msg_ul() { :; }
     load() { [[ $1 == log.sh ]] || fail 'menu loads log module'; }
     ask() {
@@ -119,6 +123,70 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     log_limit_set() { menu_called=1; }
     is_main_menu
     [[ $menu_called == 1 ]] || fail 'menu calls log limit setting'
+
+    menu_output=
+    menu_service_calls="$workdir/home-status-calls"
+    : >"$menu_service_calls"
+    msg() { menu_output+="$*"$'\n'; }
+    systemctl() {
+        printf 'systemctl %s\n' "$*" >>"$menu_service_calls"
+        [[ $* == 'is-active sing-box' ]] || fail "unexpected systemd status command: $*"
+        case $service_state in
+            active) echo active ;;
+            inactive | failed) echo "$service_state"; return 3 ;;
+            *) return 1 ;;
+        esac
+    }
+    rc-service() {
+        printf 'rc-service %s\n' "$*" >>"$menu_service_calls"
+        [[ $* == 'sing-box status' ]] || fail "unexpected OpenRC status command: $*"
+        return "$openrc_status"
+    }
+    run_main_menu_status() {
+        local expected=$1
+        menu_output=
+        menu_called=
+        is_main_menu
+        [[ $menu_called == 1 ]] || fail 'status failure must not stop the main menu'
+        [[ $menu_output == *"sing-box test: $expected"* ]] || fail "wrong homepage status: $menu_output"
+    }
+
+    is_systemd=1
+    is_openrc=
+    service_state=inactive
+    is_core_status=installed
+    run_main_menu_status 'RED:已停止'
+    [[ $is_core_stop == 1 ]] || fail 'stopped systemd service should set the stop marker'
+    [[ $(cat "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should only query systemd status'
+
+    : >"$menu_service_calls"
+    service_state=active
+    is_core_stop=1
+    run_main_menu_status 'GREEN:运行中'
+    [[ -z $is_core_stop ]] || fail 'running systemd service should clear the old stop marker'
+    [[ $(cat "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should refresh systemd status on every display'
+
+    : >"$menu_service_calls"
+    service_state=failed
+    run_main_menu_status 'RED:启动失败'
+    service_state=query-error
+    run_main_menu_status 'RED:状态读取失败'
+
+    is_systemd=
+    is_openrc=1
+    openrc_status=0
+    : >"$menu_service_calls"
+    run_main_menu_status 'GREEN:运行中'
+    [[ $(cat "$menu_service_calls") == 'rc-service sing-box status' ]] || fail 'OpenRC homepage should query rc-service only'
+    openrc_status=3
+    : >"$menu_service_calls"
+    run_main_menu_status 'RED:已停止'
+    openrc_status=32
+    : >"$menu_service_calls"
+    run_main_menu_status 'RED:启动失败'
+    openrc_status=1
+    : >"$menu_service_calls"
+    run_main_menu_status 'RED:状态读取失败'
 done
 
 echo 'PASS: log size limit and service lifecycle'
