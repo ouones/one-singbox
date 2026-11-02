@@ -36,6 +36,10 @@ jobs:
             done
           fi
           if [[ -n "$matching_tag" ]]; then
+            if [[ ! "$matching_tag" =~ ^v1\.[0-9]+$ ]]; then
+              echo "Could not determine the current v1.N release version." >&2
+              exit 1
+            fi
             release_version="$matching_tag"
             release_commit="$(git rev-parse "${matching_tag}^{commit}")"
             sed -i "s/^is_sh_ver=.*/is_sh_ver=${release_version}/" sing-box.sh
