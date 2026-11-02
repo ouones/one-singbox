@@ -322,4 +322,183 @@ run_install_case install-success success 0
 run_install_case install-failure fail 0
 run_install_case mandatory-failure fail 1
 
+update_workdir=$workdir/update
+update_root=$update_workdir/root
+update_core=$update_root/etc/sing-box/sh/core.sh
+update_runner=$update_workdir/run-update.sh
+update_archive=$update_workdir/code.tar.gz
+update_package_dir=$update_workdir/release
+update_package_log=$update_workdir/packages.log
+update_service_log=$update_workdir/services.log
+
+prepare_update_fixture() {
+  mkdir -p "$update_root/etc/sing-box/bin" "$update_root/etc/sing-box/sh" \
+    "$update_root/etc/sing-box/conf" "$update_root/usr/local/bin" \
+    "$update_root/var/log/sing-box" "$update_package_dir"
+  cp "$repo_root/core.sh" "$update_core"
+  cp -R "$repo_root/src" "$update_root/etc/sing-box/sh/src"
+  rewrite_paths "$update_core" "$update_root"
+
+  cat >"$update_root/etc/sing-box/bin/sing-box" <<'CORE'
+#!/usr/bin/env bash
+[[ $1 == version ]] && printf 'sing-box version 1.14.0\n'
+CORE
+  cat >"$update_root/usr/local/bin/sing-box" <<'SCRIPT'
+#!/usr/bin/env bash
+exit 0
+SCRIPT
+  cp "$update_root/usr/local/bin/sing-box" "$update_root/usr/local/bin/sb"
+  chmod +x "$update_root/etc/sing-box/bin/sing-box" "$update_root/usr/local/bin/sing-box" "$update_root/usr/local/bin/sb"
+  printf '%s\n' '{"keep":true}' >"$update_root/etc/sing-box/conf/keep.json"
+  printf '100\n' >"$update_root/etc/sing-box/log-limit-mb"
+  : >"$update_service_log"
+
+  cat >"$qrcode_test_bin/wget" <<'WGET'
+#!/usr/bin/env bash
+if [[ $* == *api.github.com/repos/ouones/one-singbox/releases/latest* ]]; then
+  printf '{"tag_name":"%s"}\n' "$QRCODE_TEST_LATEST_VERSION"
+  exit 0
+fi
+if [[ $* == */releases/download/*/code.tar.gz* ]]; then
+  while (($#)); do
+    if [[ $1 == -O ]]; then
+      cp "$QRCODE_TEST_UPDATE_ARCHIVE" "$2"
+      exit $?
+    fi
+    shift
+  done
+fi
+exit 55
+WGET
+  chmod +x "$qrcode_test_bin/wget"
+
+  cat >"$qrcode_test_bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$QRCODE_TEST_SERVICE_LOG"
+exit 0
+SYSTEMCTL
+  chmod +x "$qrcode_test_bin/systemctl"
+
+  cat >"$update_runner" <<'RUNNER'
+#!/usr/bin/env bash
+source "$QRCODE_TEST_CORE"
+is_sh_ver=v1.34
+is_caddy=1
+is_caddy_ver=v2.8.0
+ask() {
+  case $1 in
+    mainmenu) REPLY=6 ;;
+    list)
+      REPLY=2
+      [[ ! $2 ]] || printf -v "$2" '%s' 2
+      ;;
+  esac
+}
+main "$@"
+RUNNER
+  chmod +x "$update_runner"
+
+  printf 'new script release\n' >"$update_package_dir/update.marker"
+  tar czf "$update_archive" -C "$update_package_dir" update.marker || fail "could not create update fixture archive"
+}
+
+run_active_update() {
+  local latest=$1 mode=$2
+  shift 2
+  QRCODE_TEST_LATEST_VERSION=$latest \
+    QRCODE_TEST_MODE=$mode \
+    QRCODE_TEST_CORE=$update_core \
+    QRCODE_TEST_UPDATE_ARCHIVE=$update_archive \
+    QRCODE_TEST_PACKAGE_LOG=$update_package_log \
+    QRCODE_TEST_SERVICE_LOG=$update_service_log \
+    QRCODE_TEST_INSTALLED_MARKER=$QRCODE_TEST_INSTALLED_MARKER \
+    QRCODE_TEST_BIN=$qrcode_test_bin \
+    PATH="$qrcode_test_bin:$PATH" \
+    bash "$update_runner" "$@"
+}
+
+prepare_update_fixture
+rm -f "$qrcode_test_bin/qrencode" "$QRCODE_TEST_INSTALLED_MARKER" "$update_root/etc/sing-box/sh/qrcode-dependency-checked"
+: >"$update_package_log"
+run_active_update v1.34 success update sh v1.34 >"$update_workdir/same-version.out" 2>&1 || fail "same-version update command failed"
+[[ -f $update_root/etc/sing-box/sh/qrcode-dependency-checked ]] && fail "QR marker was stored in the script directory"
+[[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "same-version script update did not mark the check complete"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "update sh with the current version skipped dependency installation"
+grep -Fq '版本一样' "$update_workdir/same-version.out" || fail "same-version update did not retain its normal result"
+
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.34 success U >"$update_workdir/latest.out" 2>&1 || fail "U update command failed"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "already-latest U update skipped dependency installation"
+grep -Fq '当前已经是最新版本' "$update_workdir/latest.out" || fail "already-latest U update did not retain its normal result"
+
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.35 success update.sh >"$update_workdir/new-version.out" 2>&1 || fail "update.sh command failed"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "new-version update.sh skipped dependency installation"
+grep -Fq '更新成功' "$update_workdir/new-version.out" || fail "new-version update.sh did not finish the script update"
+[[ $(<"$update_root/etc/sing-box/sh/update.marker") == 'new script release' ]] || fail "new-version update.sh did not extract the release"
+
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.36 success main >"$update_workdir/menu.out" 2>&1 || fail "homepage script update menu failed"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "homepage script update menu skipped dependency installation"
+grep -Fq '更新成功' "$update_workdir/menu.out" || fail "homepage script update menu did not finish the script update"
+
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.37 fail update.sh >"$update_workdir/qr-failure.out" 2>&1 || fail "QR package failure stopped the script update"
+[[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "failed active update did not mark the check complete"
+grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/qr-failure.out" || fail "failed active update omitted the QR failure result"
+grep -Fq 'apt-get install -y qrencode' "$update_workdir/qr-failure.out" || fail "failed active update omitted manual package guidance"
+grep -Fq '更新成功' "$update_workdir/qr-failure.out" || fail "QR failure overwrote the script update result"
+[[ $(<"$update_root/etc/sing-box/sh/update.marker") == 'new script release' ]] || fail "QR failure prevented the script release from being extracted"
+
+# A later explicit update retries even when the marker already exists.
+: >"$update_package_log"
+run_active_update v1.34 success U >"$update_workdir/retry.out" 2>&1 || fail "active update retry after QR failure failed"
+[[ -x $qrcode_test_bin/qrencode ]] || fail "active update did not retry after the failed attempt marker"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "active update marker prevented retry"
+
+: >"$update_package_log"
+run_active_update v1.34 success U >"$update_workdir/already-installed.out" 2>&1 || fail "active update with qrencode present failed"
+[[ ! -s $update_package_log ]] || fail "active update reinstalled an existing qrencode command"
+
+# A package manager may exit successfully without making qrencode available.
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.38 missing update.sh >"$update_workdir/install-unverified.out" 2>&1 || fail "unverified QR install stopped the script update"
+grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/install-unverified.out" || fail "unverified QR install did not report failure"
+grep -Fq 'apt-get install -y qrencode' "$update_workdir/install-unverified.out" || fail "unverified QR install omitted manual guidance"
+grep -Fq '更新成功' "$update_workdir/install-unverified.out" || fail "unverified QR install overwrote the script update result"
+[[ ! -x $qrcode_test_bin/qrencode ]] || fail "unverified QR install unexpectedly created the command"
+
+# The checked marker still cannot prevent a later active retry.
+: >"$update_package_log"
+run_active_update v1.34 success U >"$update_workdir/retry-after-unverified.out" 2>&1 || fail "active retry after unverified install failed"
+[[ -x $qrcode_test_bin/qrencode ]] || fail "active update did not retry after an unverified install"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "checked marker prevented retry after unverified install"
+
+# Removing the command after a successful attempt also remains repairable by update.
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.34 success update sh v1.34 >"$update_workdir/removed-command.out" 2>&1 || fail "active update after qrencode removal failed"
+[[ -x $qrcode_test_bin/qrencode ]] || fail "active update did not repair a removed qrencode command"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "removed qrencode command did not trigger package installation"
+
+rm -f "$qrcode_test_bin/qrencode"
+rm -f "$update_root/etc/sing-box/qrcode-dependency-checked"
+: >"$update_package_log"
+run_active_update v1.14.0 success update core v1.14.0 >"$update_workdir/core-update.out" 2>&1 || fail "same-version core update failed"
+run_active_update v2.8.0 success update caddy v2.8.0 >"$update_workdir/caddy-update.out" 2>&1 || fail "same-version Caddy update failed"
+[[ ! -s $update_package_log ]] || fail "core or Caddy update triggered QR package operations"
+[[ ! -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "core or Caddy update consumed the QR check marker"
+
+[[ $(<"$update_root/etc/sing-box/conf/keep.json") == '{"keep":true}' ]] || fail "script update changed node configuration"
+[[ $(<"$update_root/etc/sing-box/log-limit-mb") == 100 ]] || fail "script update changed log limit settings"
+if grep -Eq '^restart ' "$update_service_log"; then
+  fail "script update triggered a core service restart"
+fi
+echo 'PASS: active script update aliases, version branches, nonblocking failures, and retries'
+
 echo 'PASS: QR dependency lifecycle tests'

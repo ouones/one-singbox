@@ -4340,6 +4340,9 @@ update() {
         err "无法识别 ($1), 请使用: $is_core update [core | sh | caddy] [ver]"
         ;;
     esac
+    if [[ $is_update_name == 'sh' ]]; then
+        qrcode_dependency_install || :
+    fi
     if [[ $2 ]]; then
         if [[ $is_update_name == 'sh' ]]; then
             is_new_ver=$2
