@@ -38,7 +38,7 @@ show_help() {
             "   key [name] [Private key | auto] [Public key]    更改密钥"
             # "   type [name] [type | auto]                       更改伪装类型"
             "   method [name] [method | auto]                   更改加密方式"
-            "   sni [name] [ ip | domain]                       更改 serverName"
+            "   sni [name] [domain | auto]                     更改 serverName；auto 按区域重新选择"
             # "   seed [name] [seed | auto]                       更改 mKCP seed"
             "   new [name] [...]                                更改协议"
             "   web [name] [domain]                             更改伪装网站"
