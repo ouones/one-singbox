@@ -35,7 +35,11 @@ done
 exit "${QR_EXIT:-0}"
 FAKE_QRENCODE
 chmod +x "$workdir/bin/qrencode"
-
+cat >"$workdir/bin/apt-get" <<'FAKE_PACKAGE_MANAGER'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$QR_PACKAGE_LOG"
+FAKE_PACKAGE_MANAGER
+chmod +x "$workdir/bin/apt-get"
 fail() {
   echo "FAIL: $1"
   exit 1
@@ -73,11 +77,12 @@ type() {
   builtin type "$@"
 }
 
+export PATH="$QR_BIN:$PATH"
+export QR_PACKAGE_LOG="$CASE_DIR/packages.log"
 source "$CORE_FILE"
 TEST_TTY_SIZE='40 80'
 case_dir=$CASE_DIR
 mkdir -p "$case_dir/conf/.quan-meta"
-export PATH="$QR_BIN:$PATH"
 export QR_LOG="$case_dir/qr-args.log"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -242,6 +247,9 @@ is_dont_show_info=
 info special.json >"$case_dir/missing.out" 2>&1 || fail "missing qrencode must not fail info"
 [[ ! -f $QR_LOG ]] || fail "missing qrencode must not be called"
 [[ $(<"$case_dir/missing.out") == *"qrencode"* && $(<"$case_dir/missing.out") == *"$special_url"* ]] || fail "missing qrencode should show install guidance and retain URL: $(<"$case_dir/missing.out")"
+expected_install_command=$(qrcode_dependency_install_command)
+[[ $(<"$case_dir/missing.out") == *"$expected_install_command"* ]] || fail "missing qrencode should use the system package command: $(<"$case_dir/missing.out")"
+[[ ! -f $QR_PACKAGE_LOG ]] || fail "viewing a node with missing qrencode must not run a package manager"
 QR_MISSING=
 rm -f "$QR_LOG"
 is_dont_show_info=
@@ -264,5 +272,7 @@ if qrencode_bin=$(command -v qrencode); then
   [[ $qr_width == 57 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
   echo "PASS: real qrencode UTF8 dimensions are ${qr_width} columns x ${qr_height} rows"
 fi
+
+bash "$repo_root/tests-qrcode-deps.sh" || fail "QR dependency lifecycle tests failed"
 
 echo "PASS: node share QR tests"
