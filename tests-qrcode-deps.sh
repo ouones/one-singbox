@@ -501,4 +501,157 @@ if grep -Eq '^restart ' "$update_service_log"; then
 fi
 echo 'PASS: active script update aliases, version branches, nonblocking failures, and retries'
 
+homepage_runner=$update_workdir/run-homepage.sh
+cat >"$homepage_runner" <<'RUNNER'
+#!/usr/bin/env bash
+source "$QRCODE_TEST_CORE"
+is_sh_ver=v1.34
+relay_menu_pending=0
+[[ ${1:-} == relay ]] && relay_menu_pending=1
+ask() {
+  case $1 in
+    mainmenu) REPLY=9 ;;
+    list)
+      if [[ $relay_menu_pending == 1 ]]; then
+        REPLY=4
+        relay_menu_pending=0
+      else
+        REPLY=99
+      fi
+      ;;
+  esac
+}
+main "$@"
+RUNNER
+chmod +x "$homepage_runner"
+
+run_homepage() {
+  local output=$1 core=$2 bin=$3 package_log=$4 service_log=$5 installed_marker=$6 bash_env=$7 mode=$8
+  shift 8
+  QRCODE_TEST_CORE=$core \
+    QRCODE_TEST_MODE=$mode \
+    QRCODE_TEST_MANAGER=apt-get \
+    QRCODE_TEST_LATEST_VERSION=v1.34 \
+    QRCODE_TEST_HIDE_WGET=0 \
+    QRCODE_TEST_BIN=$bin \
+    QRCODE_TEST_PACKAGE_LOG=$package_log \
+    QRCODE_TEST_SERVICE_LOG=$service_log \
+    QRCODE_TEST_INSTALLED_MARKER=$installed_marker \
+    BASH_ENV=$bash_env \
+    PATH="$bin:$PATH" \
+    bash "$homepage_runner" "$@" >"$output" 2>&1
+}
+
+run_update_homepage() {
+  local name=$1 mode=$2
+  shift 2
+  run_homepage "$update_workdir/$name.out" "$update_core" "$qrcode_test_bin" "$update_package_log" "$update_service_log" "$QRCODE_TEST_INSTALLED_MARKER" "$workdir/install-mandatory-failure/bin/bash-env" "$mode" "$@"
+}
+
+run_src_homepage() {
+  local name=$1 mode=$2
+  shift 2
+  run_homepage "$update_workdir/$name.out" "$old_homepage_script_dir/src/core.sh" "$qrcode_test_bin" "$update_package_log" "$update_service_log" "$QRCODE_TEST_INSTALLED_MARKER" "$workdir/install-mandatory-failure/bin/bash-env" "$mode" "$@"
+}
+
+# A file-only release extraction does not execute the new migration hook.
+homepage_release=$update_workdir/homepage-release
+homepage_archive=$update_workdir/homepage-release.tar.gz
+mkdir -p "$homepage_release"
+cp "$repo_root/core.sh" "$homepage_release/core.sh"
+cp -R "$repo_root/src" "$homepage_release/src"
+rewrite_paths "$homepage_release/core.sh" "$update_root"
+rewrite_paths "$homepage_release/src/core.sh" "$update_root"
+tar czf "$homepage_archive" -C "$homepage_release" core.sh src || fail "could not create homepage release archive"
+old_homepage_script_dir=$update_root/etc/sing-box/sh
+printf 'old core before file-only update\n' >"$update_core"
+rm -rf "$old_homepage_script_dir/src"
+mkdir -p "$old_homepage_script_dir/src"
+rm -f "$update_root/etc/sing-box/qrcode-dependency-checked" "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+QRCODE_TEST_HOME_ARCHIVE=$homepage_archive \
+  QRCODE_TEST_HOME_SCRIPT_DIR=$old_homepage_script_dir \
+  bash -c 'tar -xzf "$QRCODE_TEST_HOME_ARCHIVE" -C "$QRCODE_TEST_HOME_SCRIPT_DIR"' || fail "file-only update extraction failed"
+[[ -s $update_core ]] || fail "file-only update did not replace core.sh"
+[[ ! -e $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "file-only update created the QR marker"
+[[ ! -s $update_package_log ]] || fail "file-only update attempted a QR package install"
+
+echo 'PASS: file-only update replaces scripts without running the homepage migration'
+
+# Non-home commands leave the one-time migration untouched.
+run_update_homepage non-home success version || fail "non-home version command failed"
+[[ ! -e $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "non-home command consumed the QR migration marker"
+[[ ! -s $update_package_log ]] || fail "non-home command attempted QR dependency installation"
+
+# A failed first homepage attempt records one warning, marks the attempt, and still shows the homepage.
+run_update_homepage first-homepage-failure fail || fail "QR install failure stopped the first homepage"
+[[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "failed homepage attempt did not write the QR marker"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 2 ]] || fail "failed homepage install was not retried after index refresh"
+grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted the QR warning"
+grep -Fq 'apt-get install -y qrencode' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted manual install guidance"
+grep -Fq '主动更新脚本' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted the active update retry path"
+grep -Fq '日志用量' "$update_workdir/first-homepage-failure.out" || fail "failed QR install prevented the homepage from displaying"
+failed_homepage_log_lines=$(wc -l <"$update_package_log")
+run_update_homepage second-homepage success main || fail "second homepage failed"
+[[ $(wc -l <"$update_package_log") == "$failed_homepage_log_lines" ]] || fail "second ordinary homepage retried the failed QR install"
+grep -Fq '日志用量' "$update_workdir/second-homepage.out" || fail "second homepage did not display"
+! grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/second-homepage.out" || fail "second homepage repeated the QR failure warning"
+echo 'PASS: failed homepage migration is nonblocking and ordinary homepages do not retry'
+
+# An explicit update still repairs the dependency after a homepage failure marker exists.
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_active_update v1.34 success U >"$update_workdir/homepage-marker-active-retry.out" 2>&1 || fail "active update could not retry after homepage migration failure"
+[[ -x $qrcode_test_bin/qrencode ]] || fail "active update did not repair QR after homepage migration"
+[[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "active update skipped retry because homepage marker existed"
+rm -f "$qrcode_test_bin/qrencode"
+: >"$update_package_log"
+run_update_homepage home-after-active-retry success || fail "homepage after active retry failed"
+[[ ! -s $update_package_log ]] || fail "ordinary homepage retried after the command was removed"
+echo 'PASS: active updates retry despite the homepage marker; ordinary homepages remain one-shot'
+
+# Each supported route into the actual homepage runs the migration once.
+for entry in no-args explicit-main relay-return src-core; do
+  rm -f "$qrcode_test_bin/qrencode" "$QRCODE_TEST_INSTALLED_MARKER" "$update_root/etc/sing-box/qrcode-dependency-checked"
+  : >"$update_package_log"
+  args=()
+  case $entry in
+    explicit-main) args=(main) ;;
+    relay-return) args=(relay) ;;
+    src-core) args=(main) ;;
+  esac
+  if [[ $entry == src-core ]]; then
+    run_src_homepage "$entry" success "${args[@]}" || fail "$entry homepage failed"
+  else
+    run_update_homepage "$entry" success "${args[@]}" || fail "$entry homepage failed"
+  fi
+  [[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "$entry homepage did not mark the QR check complete"
+  [[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "$entry homepage did not install qrencode once"
+  grep -Fq '日志用量' "$update_workdir/$entry.out" || fail "$entry test did not display the actual homepage"
+done
+echo 'PASS: no-argument, explicit main, and relay-return homepage entries run the migration'
+
+# Replacing script files after a marker exists leaves its one-time state intact.
+entry_install_count=$(wc -l <"$update_package_log")
+QRCODE_TEST_HOME_ARCHIVE=$homepage_archive \
+  QRCODE_TEST_HOME_SCRIPT_DIR=$old_homepage_script_dir \
+  bash -c 'tar -xzf "$QRCODE_TEST_HOME_ARCHIVE" -C "$QRCODE_TEST_HOME_SCRIPT_DIR"' || fail "second file-only update extraction failed"
+[[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "file-only update removed the existing QR marker"
+[[ $(wc -l <"$update_package_log") == "$entry_install_count" ]] || fail "file-only update ran QR package operations"
+echo 'PASS: file-only update preserves an existing QR marker'
+
+# The marker written by a real install suppresses the legacy homepage migration.
+new_install_root=$workdir/install-install-success/root
+new_install_core=$new_install_root/etc/sing-box/sh/core.sh
+new_install_bin=$workdir/install-install-success/bin
+new_install_log=$workdir/install-install-success/packages.log
+new_install_service_log=$workdir/install-install-success/services.log
+new_install_marker=$workdir/install-install-success/package-installed.marker
+rm -f "$new_install_bin/qrencode"
+new_install_log_lines=$(wc -l <"$new_install_log")
+run_homepage "$workdir/new-install-homepage.out" "$new_install_core" "$new_install_bin" "$new_install_log" "$new_install_service_log" "$new_install_marker" "$new_install_bin/bash-env" success || fail "homepage after real install failed"
+[[ -f $new_install_root/etc/sing-box/qrcode-dependency-checked ]] || fail "real install marker was missing before homepage"
+[[ $(wc -l <"$new_install_log") == "$new_install_log_lines" ]] || fail "homepage retried QR installation after a real install"
+grep -Fq '日志用量' "$workdir/new-install-homepage.out" || fail "real install homepage did not display"
+echo 'PASS: the marker from a real install prevents a redundant homepage install'
 echo 'PASS: QR dependency lifecycle tests'

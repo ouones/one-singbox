@@ -4376,6 +4376,9 @@ update() {
 
 # main menu; if no prefer args.
 is_main_menu() {
+    if ! qrcode_dependency_checked; then
+        qrcode_dependency_install || :
+    fi
     core_status_read
     load log.sh
     local is_log_usage_limit is_log_usage_bytes
