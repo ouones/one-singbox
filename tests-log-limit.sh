@@ -102,9 +102,15 @@ log_limit_remove
 grep -qx 'del sing-box-log-limit default' "$workdir/service-calls" || fail 'OpenRC disable on uninstall'
 
 # Exercise the actual menu branches in both distributed core copies.
+qrcode_dependency_checked() { return 0; }
+qrcode_dependency_install() { fail 'unexpected QR migration in isolated menu test'; }
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+    source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
     is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
+    is_systemd= is_openrc=
+    _green() { printf 'GREEN:%s' "$*"; }
+    _red() { printf 'RED:%s' "$*"; }
     msg_ul() { :; }
     load() { [[ $1 == log.sh ]] || fail 'menu loads log module'; }
     ask() {
@@ -119,6 +125,177 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     log_limit_set() { menu_called=1; }
     is_main_menu
     [[ $menu_called == 1 ]] || fail 'menu calls log limit setting'
+
+    menu_output=
+    menu_service_calls="$workdir/home-status-calls"
+    : >"$menu_service_calls"
+    msg() { menu_output+="$*"$'\n'; }
+    systemctl() {
+        printf 'systemctl %s\n' "$*" >>"$menu_service_calls"
+        [[ $* == 'is-active sing-box' ]] || fail "unexpected systemd status command: $*"
+        case $service_state in
+            active) echo active ;;
+            inactive | failed) echo "$service_state"; return 3 ;;
+            *) return 1 ;;
+        esac
+    }
+    rc-service() {
+        printf 'rc-service %s\n' "$*" >>"$menu_service_calls"
+        [[ $* == 'sing-box status' ]] || fail "unexpected OpenRC status command: $*"
+        return "$openrc_status"
+    }
+    run_main_menu_status() {
+        local expected=$1
+        menu_output=
+        menu_called=
+        is_main_menu
+        [[ $menu_called == 1 ]] || fail 'status failure must not stop the main menu'
+        [[ $menu_output == *"sing-box test: $expected"* ]] || fail "wrong homepage status: $menu_output"
+    }
+
+    is_systemd=1
+    is_openrc=
+    service_state=inactive
+    is_core_status=installed
+    run_main_menu_status 'RED:已停止'
+    [[ $is_core_stop == 1 ]] || fail 'stopped systemd service should set the stop marker'
+    [[ $(cat "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should only query systemd status'
+
+    : >"$menu_service_calls"
+    service_state=active
+    is_core_stop=1
+    run_main_menu_status 'GREEN:运行中'
+    [[ -z $is_core_stop ]] || fail 'running systemd service should clear the old stop marker'
+    [[ $(cat "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should refresh systemd status on every display'
+
+    : >"$menu_service_calls"
+    service_state=failed
+    run_main_menu_status 'RED:启动失败'
+    service_state=query-error
+    run_main_menu_status 'RED:状态读取失败'
+
+    is_systemd=
+    is_openrc=1
+    openrc_status=0
+    : >"$menu_service_calls"
+    run_main_menu_status 'GREEN:运行中'
+    [[ $(cat "$menu_service_calls") == 'rc-service sing-box status' ]] || fail 'OpenRC homepage should query rc-service only'
+    openrc_status=3
+    : >"$menu_service_calls"
+    run_main_menu_status 'RED:已停止'
+    openrc_status=32
+    : >"$menu_service_calls"
+    run_main_menu_status 'RED:启动失败'
+    openrc_status=1
+    : >"$menu_service_calls"
+    run_main_menu_status 'RED:状态读取失败'
 done
 
+# Read-only usage counts only first-level regular .log and .log.1 bytes.
+is_log_dir="$workdir/usage-log"
+mkdir -p "$is_log_dir" "$is_log_dir/subdir"
+head -c 1048576 /dev/zero >"$is_log_dir/access.log"
+head -c 524288 /dev/zero >"$is_log_dir/error.log"
+head -c 262144 /dev/zero >"$is_log_dir/access.log.1"
+head -c 2097152 /dev/zero >"$is_log_dir/ignored.log.2"
+head -c 2097152 /dev/zero >"$is_log_dir/ignored.txt"
+head -c 2097152 /dev/zero >"$is_log_dir/subdir/nested.log"
+ln -s "$is_log_dir/error.log" "$is_log_dir/alias.log"
+[[ $(log_usage_read) == 1835008 ]] || fail 'usage includes current and rotated log bytes only'
+is_log_dir="$workdir/no-log-directory"
+[[ $(log_usage_read) == 0 ]] || fail 'missing log directory is empty usage'
+is_log_dir="$workdir/non-stat-log"
+mkdir -p "$is_log_dir/subdir"
+head -c 1048576 /dev/zero >"$is_log_dir/ignored.log.2"
+head -c 1048576 /dev/zero >"$is_log_dir/ignored.txt"
+head -c 1048576 /dev/zero >"$is_log_dir/subdir/nested.log"
+ln -s "$workdir/usage-log/error.log" "$is_log_dir/alias.log"
+[[ $(log_usage_read) == 0 ]] || fail 'non-matching files and symlinks are excluded'
+is_log_dir="$workdir/usage-log"
+usage_stat_failure="$is_log_dir/error.log"
+stat() {
+    [[ ${3-} == "$usage_stat_failure" ]] && return 1
+    command stat "$@"
+}
+if log_usage_read >/dev/null; then fail 'stat failure is not reported as zero usage'; fi
+unset -f stat
+
+echo 200 >"$is_core_dir/log-limit-mb"
+for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+    is_log_dir="$workdir/usage-log"
+    head -c 1048576 /dev/zero >"$is_log_dir/access.log"
+    head -c 524288 /dev/zero >"$is_log_dir/error.log"
+    head -c 262144 /dev/zero >"$is_log_dir/access.log.1"
+    echo 200 >"$is_core_dir/log-limit-mb"
+    source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
+    is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
+    menu_output=
+    msg() { menu_output+="$*"$'\n'; }
+    load() { [[ $1 == log.sh ]] || fail 'menu loads log module'; }
+    ask() {
+        if [[ $1 == mainmenu ]]; then
+            REPLY=9
+        else
+            [[ ${is_tmp_list[5]} == "日志大小限制($(log_limit_read)MB)" ]] || fail 'menu shows persisted limit'
+            REPLY=6
+        fi
+    }
+    menu_called=
+    log_limit_set() { menu_called=1; }
+    service_calls_before=$service_calls
+    size_before=$(command stat -c %s "$is_log_dir/access.log")
+    archive_before=$(command stat -c %s "$is_log_dir/access.log.1")
+    is_main_menu
+    [[ $menu_output == *'日志用量：1.75 / 200 MB'* ]] || fail 'menu displays current usage and limit'
+    [[ $menu_called == 1 ]] || fail 'menu remains usable after usage display'
+    [[ $(command stat -c %s "$is_log_dir/access.log") == "$size_before" && $(command stat -c %s "$is_log_dir/access.log.1") == "$archive_before" && $service_calls == "$service_calls_before" ]] || fail 'usage display does not mutate logs or services'
+
+    head -c 524288 /dev/zero >"$is_log_dir/access.log"
+    echo 100 >"$is_core_dir/log-limit-mb"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：1.25 / 100 MB'* ]] || fail 'menu recomputes usage and limit'
+    echo 1 >"$is_core_dir/log-limit-mb"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：1.25 / 1 MB'* ]] || fail 'usage display is not truncated to limit'
+    echo 100 >"$is_core_dir/log-limit-mb"
+
+    is_log_dir="$workdir/empty-log"
+    mkdir -p "$is_log_dir"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'empty log directory displays zero usage'
+
+    is_log_dir="$workdir/no-log-directory"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'missing log directory displays zero usage'
+
+    is_log_dir="$workdir/non-stat-log"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'directory with no matching logs displays zero usage'
+
+    rm -f "$is_core_dir/log-limit-mb"
+    is_log_dir="$workdir/empty-log"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 200 MB'* ]] || fail 'menu uses default limit without saved value'
+
+    echo 100 >"$is_core_dir/log-limit-mb"
+    is_log_dir="$workdir/usage-log"
+    usage_stat_failure="$is_log_dir/error.log"
+    stat() {
+        [[ ${3-} == "$usage_stat_failure" ]] && return 1
+        command stat "$@"
+    }
+    menu_output=
+    menu_called=
+    is_main_menu
+    [[ $menu_output == *'日志用量：暂不可用 / 100 MB'* ]] || fail 'menu reports unreadable usage without hiding limit'
+    [[ $menu_called == 1 ]] || fail 'menu remains usable after usage read failure'
+    unset -f stat
+    is_log_dir="$workdir/log"
+done
 echo 'PASS: log size limit and service lifecycle'

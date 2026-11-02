@@ -453,6 +453,7 @@ main() {
     mkdir -p $is_conf_dir
 
     load core.sh
+    qrcode_dependency_install || :
     # create a reality config
     add reality
     # wait for background tasks (e.g., OpenRC service start)

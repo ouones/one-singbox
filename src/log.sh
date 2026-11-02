@@ -9,6 +9,22 @@ log_limit_read() {
     printf '%s\n' "$value"
 }
 
+log_usage_read() {
+    local total=0 file size
+    if [[ ! -d $is_log_dir ]]; then
+        printf '0\n'
+        return 0
+    fi
+    [[ -r $is_log_dir && -x $is_log_dir ]] || return 1
+    for file in "$is_log_dir"/*.log "$is_log_dir"/*.log.1; do
+        [[ -f $file && ! -L $file ]] || continue
+        size=$(stat -c %s "$file") || return 1
+        [[ $size =~ ^[0-9]+$ ]] || return 1
+        total=$((total + size))
+    done
+    printf '%s\n' "$total"
+}
+
 # Copy/truncate keeps the core's open log descriptors usable without restarting it.
 log_limit_check() {
     local limit=$(($(log_limit_read) * 1048576)) total=0 file size tmp keep

@@ -60,6 +60,15 @@ load() {
     . $is_sh_dir/src/$1
 }
 
+qrcode_dependency_source=$is_sh_dir/src/qrcode-deps.sh
+if [[ ! -f $qrcode_dependency_source ]]; then
+    qrcode_core_dir=$(dirname -- "$BASH_SOURCE")
+    qrcode_dependency_source=$qrcode_core_dir/qrcode-deps.sh
+    [[ -f $qrcode_dependency_source ]] || qrcode_dependency_source=$qrcode_core_dir/src/qrcode-deps.sh
+fi
+[[ -f $qrcode_dependency_source ]] && . "$qrcode_dependency_source"
+unset qrcode_dependency_source qrcode_core_dir
+
 _wget() {
     [[ $proxy ]] && export https_proxy=$proxy
     wget --no-check-certificate $*
@@ -69,11 +78,6 @@ if [[ -x $is_core_bin ]]; then
     is_core_ver=$($is_core_bin version 2>/dev/null | awk 'NR==1{print $3}')
 fi
 [[ -z $is_core_ver ]] && is_core_ver=unknown
-if [[ -d $is_conf_dir ]] && compgen -G "$is_conf_dir/*.json" >/dev/null; then
-    is_core_status=installed
-else
-    is_core_status=not-installed
-fi
 [[ -x $is_caddy_bin ]] && is_caddy=1
 
 export LC_ALL=C
@@ -4247,7 +4251,7 @@ footer_msg() {
 
 render_qrcode() {
     local url=$1
-    local terminal_size terminal_rows terminal_columns qr_output qr_binary qr_width qr_height
+    local terminal_size terminal_rows terminal_columns qr_output qr_binary qr_width qr_height install_command
     local qr_row next_row cell_bits braille_output braille_bytes braille_char qr_cell_mask row_index column_index
     local qr_rows=()
     msg "------------- $is_config_name & QR code 二维码 -------------"
@@ -4297,7 +4301,8 @@ render_qrcode() {
         msg
         return 0
     else
-        msg "请安装 qrencode: $(_green "$cmd update -y; $cmd install qrencode -y")"
+        install_command=$(qrcode_dependency_install_command) || install_command=qrencode
+        msg "请安装 qrencode: $(_green "$install_command")；当前仍可复制上方链接，也可通过主动更新脚本重试."
     fi
     msg
     return 1
@@ -4361,6 +4366,9 @@ update() {
         err "无法识别 ($1), 请使用: $is_core update [core | sh | caddy] [ver]"
         ;;
     esac
+    if [[ $is_update_name == 'sh' ]]; then
+        qrcode_dependency_install || :
+    fi
     if [[ $2 ]]; then
         if [[ $is_update_name == 'sh' ]]; then
             is_new_ver=$2
@@ -4392,8 +4400,20 @@ update() {
 
 # main menu; if no prefer args.
 is_main_menu() {
+    if ! qrcode_dependency_checked; then
+        qrcode_dependency_install || :
+    fi
+    core_status_read
+    load log.sh
+    local is_log_usage_limit is_log_usage_bytes
+    is_log_usage_limit=$(log_limit_read)
     msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
+    if is_log_usage_bytes=$(log_usage_read); then
+        msg "日志用量：$(awk -v bytes="$is_log_usage_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }') / $is_log_usage_limit MB"
+    else
+        msg "日志用量：暂不可用 / $is_log_usage_limit MB"
+    fi
     msg "群组(Chat): $(msg_ul https://t.me/tg233boy)"
     is_main_start=1
     ask mainmenu
@@ -4430,7 +4450,6 @@ is_main_menu() {
         show_help
         ;;
     9)
-        load log.sh
         is_tmp_list=("启用BBR" "查看日志" "测试运行" "重装脚本" "设置DNS" "日志大小限制($(log_limit_read)MB)")
         ask list is_do_other
         case $REPLY in
@@ -4790,6 +4809,7 @@ main() {
         get $@
         ;;
     s | status)
+        core_status_read
         msg "\n$is_core_name $is_core_ver: $is_core_status\n"
         [[ $is_caddy ]] && msg "Caddy $is_caddy_ver: $is_caddy_status\n"
         ;;
