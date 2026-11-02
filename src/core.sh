@@ -4251,7 +4251,9 @@ footer_msg() {
 
 render_qrcode() {
     local url=$1
-    local terminal_size terminal_rows terminal_columns qr_output qr_width qr_height install_command
+    local terminal_size terminal_rows terminal_columns qr_output qr_binary qr_width qr_height install_command
+    local qr_row next_row cell_bits braille_output braille_bytes braille_char qr_cell_mask row_index column_index
+    local qr_rows=()
     msg "------------- $is_config_name & QR code 二维码 -------------"
     msg
     if [[ $(type -P qrencode) ]]; then
@@ -4266,8 +4268,30 @@ render_qrcode() {
             msg
             return 1
         fi
-        qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | wc -L)
-        qr_height=$(printf '%s\n' "$qr_output" | wc -l)
+        qr_binary=$(printf '%s\n' "$qr_output" | sed -e 's/█/11/g' -e 's/▀/10/g' -e 's/▄/01/g' -e 's/ /00/g')
+        mapfile -t qr_rows <<<"$qr_binary"
+        qr_width=$(( (${#qr_rows[0]} + 3) / 4 ))
+        qr_height=$(( (${#qr_rows[@]} + 1) / 2 ))
+        braille_output=
+        for ((row_index = 0; row_index < ${#qr_rows[@]}; row_index += 2)); do
+            qr_row=${qr_rows[row_index]}
+            next_row=${qr_rows[row_index + 1]:-}
+            while (( ${#qr_row} % 4 != 0 )); do qr_row+=0; done
+            while (( ${#next_row} < ${#qr_row} )); do next_row+=0; done
+            for ((column_index = 0; column_index < ${#qr_row}; column_index += 4)); do
+                cell_bits=${qr_row:column_index:4}${next_row:column_index:4}
+                # Braille bits follow dot columns 1,2,3,7 and 4,5,6,8.
+                qr_cell_mask=$(( ${cell_bits:0:1} | (${cell_bits:1:1} << 1) | (${cell_bits:4:1} << 2) |
+                    (${cell_bits:2:1} << 3) | (${cell_bits:3:1} << 4) | (${cell_bits:6:1} << 5) |
+                    (${cell_bits:5:1} << 6) | (${cell_bits:7:1} << 7) ))
+                # LC_ALL=C is set globally, so construct the Braille UTF-8 bytes directly.
+                printf -v braille_bytes '%02x%02x' "$((0xa0 + (qr_cell_mask >> 6)))" "$((0x80 + (qr_cell_mask & 63)))"
+                printf -v braille_char '%b' "\\xE2\\x${braille_bytes:0:2}\\x${braille_bytes:2:2}"
+                braille_output+=$braille_char
+            done
+            braille_output+=$'\n'
+        done
+        qr_output=${braille_output%$'\n'}
         if ((qr_width >= terminal_columns || qr_height >= terminal_rows)); then
             warn "($is_config_name) 终端空间不足，未显示二维码，请复制上方链接."
             msg
