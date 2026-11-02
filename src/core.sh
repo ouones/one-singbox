@@ -178,15 +178,6 @@ change_list=(
     "更改 Snell 混淆模式"
     "更改 Snell 运行模式"
 )
-servername_list=(
-    www.amazon.com
-    www.ebay.com
-    www.paypal.com
-    www.cloudflare.com
-    dash.cloudflare.com
-    aws.amazon.com
-)
-
 # shuf fallback for systems without shuf (e.g., Alpine BusyBox)
 if ! type -P shuf &>/dev/null; then
     shuf() {
@@ -195,6 +186,8 @@ if ! type -P shuf &>/dev/null; then
             case $1 in
             -i) IFS=- read min max <<<"$2"; shift 2 ;;
             -n) n=$2; shift 2 ;;
+            -n[0-9]*) n=${1#-n}; shift ;;
+            *) shift ;;
             esac
         done
         echo $(( RANDOM % (max - min + 1) + min ))
@@ -202,7 +195,45 @@ if ! type -P shuf &>/dev/null; then
 fi
 
 is_random_ss_method=${ss_method_list[$(shuf -i 4-6 -n1)]} # random only use ss2022
-is_random_servername=${servername_list[$(shuf -i 0-${#servername_list[@]} -n1) - 1]}
+
+reality_sni_pick() {
+    local -a pool=("$@")
+    local index max=$((${#pool[@]} - 1))
+    ((max >= 0)) || return 1
+    index=$(shuf -i 0-$max -n1)
+    [[ $index =~ ^[0-9]+$ ]] && ((index <= max)) || index=0
+    printf '%s\n' "${pool[index]}"
+}
+
+reality_sni_select() {
+    local response country_code city_region
+    local -a pool
+    response=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
+        timeout 10 wget --no-check-certificate -q -O - -T 10 -t 1 'https://my.ippure.com/v1/info' 2>/dev/null) || response=
+    country_code=$(jq -ers 'if length == 1 and (.[0] | type == "object") and (.[0].countryCode | type == "string" and length > 0) then .[0].countryCode else empty end' <<<"$response" 2>/dev/null) || country_code=
+    city_region=$(jq -ers 'if length == 1 and (.[0] | type == "object") and .[0].countryCode == "US" then if .[0].city == "San Jose" then "san-jose" elif .[0].city == "Los Angeles" then "los-angeles" else empty end else empty end' <<<"$response" 2>/dev/null) || city_region=
+    case $country_code/$city_region in
+    US/san-jose)
+        pool=(www.sccoe.org historysanjose.org www.rosicrucianpark.org)
+        ;;
+    US/los-angeles)
+        pool=(lamag.org)
+        ;;
+    DE/*)
+        pool=(www.uni-frankfurt.de www.staedelmuseum.de liebieghaus.de www.schirn.de dff.film)
+        ;;
+    SG/*)
+        pool=(trinitycollege.edu.sg)
+        ;;
+    HK/*)
+        pool=(www.hkapa.edu www.hsu.edu.hk www.hko.gov.hk www.archsd.gov.hk)
+        ;;
+    *)
+        pool=(www.amd.com www.ibm.com www.ebay.com www.tesla.com www.amazon.com)
+        ;;
+    esac
+    reality_sni_pick "${pool[@]}"
+}
 
 msg() {
     echo -e "$@"
@@ -2778,6 +2809,7 @@ create() {
         [[ ${2,,} == snell ]] && is_config_name=snell-${port}.json
         [[ $host ]] && is_listen='listen: "127.0.0.1"'
         is_json_file=$is_conf_dir/$is_config_name
+        [[ ${2,,} == *reality* && ! $is_servername ]] && is_servername=$(reality_sni_select)
         # get json
         [[ $is_change || ! $json_str ]] && get protocol $2
         [[ $net == "reality" ]] && is_add_public_key=",outbounds:[{type:\"direct\"},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
@@ -3152,8 +3184,8 @@ change() {
         # new serverName
         is_new_servername=$3
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改 serverName."
-        [[ $is_auto ]] && is_new_servername=$is_random_servername
-    [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
+        [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
+        [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
         is_servername=$is_new_servername
         add $net
         ;;
@@ -3433,6 +3465,7 @@ manage() {
 
 # add a config
 add() {
+    [[ ! $is_change ]] && is_servername=
     is_lower=${1,,}
     if [[ $is_lower ]]; then
         case $is_lower in
@@ -3978,7 +4011,6 @@ get() {
             ;;
         *reality*)
             net=reality
-            [[ ! $is_servername ]] && is_servername=$is_random_servername
             [[ ! $is_private_key ]] && get_pbk
             is_json_add="tls:{enabled:true,server_name:\"$is_servername\",reality:{enabled:true,handshake:{server:\"$is_servername\",server_port:443},private_key:\"$is_private_key\",short_id:[\"\"]}}"
             [[ $is_lower =~ "http" ]] && {
@@ -4054,6 +4086,7 @@ info() {
     local info_target=${1:-${is_config_file:-$is_config_name}}
     is_surge_str=
     is_url=
+    [[ $is_gen ]] && return
     if [[ $info_target ]]; then
         get info "$info_target"
     elif [[ ! $is_protocol ]]; then
