@@ -121,4 +121,111 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     [[ $menu_called == 1 ]] || fail 'menu calls log limit setting'
 done
 
+# Read-only usage counts only first-level regular .log and .log.1 bytes.
+is_log_dir="$workdir/usage-log"
+mkdir -p "$is_log_dir" "$is_log_dir/subdir"
+head -c 1048576 /dev/zero >"$is_log_dir/access.log"
+head -c 524288 /dev/zero >"$is_log_dir/error.log"
+head -c 262144 /dev/zero >"$is_log_dir/access.log.1"
+head -c 2097152 /dev/zero >"$is_log_dir/ignored.log.2"
+head -c 2097152 /dev/zero >"$is_log_dir/ignored.txt"
+head -c 2097152 /dev/zero >"$is_log_dir/subdir/nested.log"
+ln -s "$is_log_dir/error.log" "$is_log_dir/alias.log"
+[[ $(log_usage_read) == 1835008 ]] || fail 'usage includes current and rotated log bytes only'
+is_log_dir="$workdir/no-log-directory"
+[[ $(log_usage_read) == 0 ]] || fail 'missing log directory is empty usage'
+is_log_dir="$workdir/non-stat-log"
+mkdir -p "$is_log_dir/subdir"
+head -c 1048576 /dev/zero >"$is_log_dir/ignored.log.2"
+head -c 1048576 /dev/zero >"$is_log_dir/ignored.txt"
+head -c 1048576 /dev/zero >"$is_log_dir/subdir/nested.log"
+ln -s "$workdir/usage-log/error.log" "$is_log_dir/alias.log"
+[[ $(log_usage_read) == 0 ]] || fail 'non-matching files and symlinks are excluded'
+is_log_dir="$workdir/usage-log"
+usage_stat_failure="$is_log_dir/error.log"
+stat() {
+    [[ ${3-} == "$usage_stat_failure" ]] && return 1
+    command stat "$@"
+}
+if log_usage_read >/dev/null; then fail 'stat failure is not reported as zero usage'; fi
+unset -f stat
+
+echo 200 >"$is_core_dir/log-limit-mb"
+for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+    is_log_dir="$workdir/usage-log"
+    head -c 1048576 /dev/zero >"$is_log_dir/access.log"
+    head -c 524288 /dev/zero >"$is_log_dir/error.log"
+    head -c 262144 /dev/zero >"$is_log_dir/access.log.1"
+    echo 200 >"$is_core_dir/log-limit-mb"
+    source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
+    is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
+    menu_output=
+    msg() { menu_output+="$*"$'\n'; }
+    load() { [[ $1 == log.sh ]] || fail 'menu loads log module'; }
+    ask() {
+        if [[ $1 == mainmenu ]]; then
+            REPLY=9
+        else
+            [[ ${is_tmp_list[5]} == "日志大小限制($(log_limit_read)MB)" ]] || fail 'menu shows persisted limit'
+            REPLY=6
+        fi
+    }
+    menu_called=
+    log_limit_set() { menu_called=1; }
+    service_calls_before=$service_calls
+    size_before=$(command stat -c %s "$is_log_dir/access.log")
+    archive_before=$(command stat -c %s "$is_log_dir/access.log.1")
+    is_main_menu
+    [[ $menu_output == *'日志用量：1.75 / 200 MB'* ]] || fail 'menu displays current usage and limit'
+    [[ $menu_called == 1 ]] || fail 'menu remains usable after usage display'
+    [[ $(command stat -c %s "$is_log_dir/access.log") == "$size_before" && $(command stat -c %s "$is_log_dir/access.log.1") == "$archive_before" && $service_calls == "$service_calls_before" ]] || fail 'usage display does not mutate logs or services'
+
+    head -c 524288 /dev/zero >"$is_log_dir/access.log"
+    echo 100 >"$is_core_dir/log-limit-mb"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：1.25 / 100 MB'* ]] || fail 'menu recomputes usage and limit'
+    echo 1 >"$is_core_dir/log-limit-mb"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：1.25 / 1 MB'* ]] || fail 'usage display is not truncated to limit'
+    echo 100 >"$is_core_dir/log-limit-mb"
+
+    is_log_dir="$workdir/empty-log"
+    mkdir -p "$is_log_dir"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'empty log directory displays zero usage'
+
+    is_log_dir="$workdir/no-log-directory"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'missing log directory displays zero usage'
+
+    is_log_dir="$workdir/non-stat-log"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'directory with no matching logs displays zero usage'
+
+    rm -f "$is_core_dir/log-limit-mb"
+    is_log_dir="$workdir/empty-log"
+    menu_output=
+    is_main_menu
+    [[ $menu_output == *'日志用量：0.00 / 200 MB'* ]] || fail 'menu uses default limit without saved value'
+
+    echo 100 >"$is_core_dir/log-limit-mb"
+    is_log_dir="$workdir/usage-log"
+    usage_stat_failure="$is_log_dir/error.log"
+    stat() {
+        [[ ${3-} == "$usage_stat_failure" ]] && return 1
+        command stat "$@"
+    }
+    menu_output=
+    menu_called=
+    is_main_menu
+    [[ $menu_output == *'日志用量：暂不可用 / 100 MB'* ]] || fail 'menu reports unreadable usage without hiding limit'
+    [[ $menu_called == 1 ]] || fail 'menu remains usable after usage read failure'
+    unset -f stat
+    is_log_dir="$workdir/log"
+done
 echo 'PASS: log size limit and service lifecycle'
