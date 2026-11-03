@@ -119,6 +119,7 @@ ss_method_list=(
 )
 mainmenu=(
     "节点管理"
+    "443 SNI 前置"
     "TCP/UDP 端口中转"
     "服务控制"
     "更新软件"
@@ -4477,13 +4478,14 @@ is_main_menu() {
     ask mainmenu
     case $REPLY in
     1) node_menu ;;
-    2) relay_menu ;;
-    3) service_menu ;;
-    4) update_menu ;;
-    5) system_tools_menu ;;
-    6) msg; load help.sh; show_help ;;
-    7) load help.sh; about ;;
-    8) uninstall ;;
+    2) load frontend.sh; frontend_menu ;;
+    3) relay_menu ;;
+    4) service_menu ;;
+    5) update_menu ;;
+    6) system_tools_menu ;;
+    7) msg; load help.sh; show_help ;;
+    8) load help.sh; about ;;
+    9) uninstall ;;
     esac
 }
 
@@ -4762,6 +4764,10 @@ main() {
     dns)
         load dns.sh
         dns_set ${@:2}
+        ;;
+    frontend)
+        load frontend.sh
+        frontend_main "${@:2}"
         ;;
     debug)
         is_debug=1
