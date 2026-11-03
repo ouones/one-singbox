@@ -183,7 +183,7 @@ jq -e '.ok == true and .enabled == false and .revision == 0 and .phase == "idle"
 }
 load frontend.sh
 frontend_menu_output=$(printf '0\n' | frontend_menu 2>&1)
-[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用空绑定模式"* && $frontend_menu_output == *"5) 恢复未完成事务"* ]] || {
+[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用前置"* && $frontend_menu_output == *"5) 恢复上次中断的操作"* && $frontend_menu_output == *"不启用"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* ]] || {
     echo "FAIL: the frontend submenu should expose enable and recovery actions: $frontend_menu_output"
     exit 1
 }
@@ -399,6 +399,15 @@ jq -e '.nginx.entry_type == "new_stream"' <<<"$check_output" >/dev/null || {
     echo "FAIL: check should identify a configuration with no stream block: $check_output"
     exit 1
 }
+
+mkdir -p "$CASE_DIR/empty-modules"
+cat >"$FRONTEND_NGINX_CONF" <<EOF
+include $CASE_DIR/empty-modules/*.conf;
+events {}
+http {}
+EOF
+empty_include_output=$(main frontend check --json 2>&1) && fail "empty wildcard include must be reported"
+jq -e --arg pattern "$CASE_DIR/empty-modules/*.conf" '.errors[0].code == "nginx_config_unsupported" and (.errors[0].message | contains($pattern) and contains("未匹配到文件") and contains("检查 Nginx 配置和目录") and contains("不会修改配置"))' <<<"$empty_include_output" >/dev/null || fail "empty include should explain the cause and next steps: $empty_include_output"
 
 cat >"$FRONTEND_NGINX_CONF" <<'EOF'
 events {}
