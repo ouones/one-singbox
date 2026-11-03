@@ -51,6 +51,7 @@ dns_set() {
         fi
     fi
     is_dns_use_bak=$is_dns_use
+    shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
     candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || err "无法创建 DNS 候选配置"
     if [[ $is_dns_use == "none" ]]; then
         jq '.|.dns={}|del(.route.default_domain_resolver)' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
@@ -67,6 +68,7 @@ dns_set() {
         err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
     fi
     rm -f "$candidate_config"
+    shared_config_unlock
     manage restart &
     msg "\n已更新 DNS 为: $(_green $is_dns_use_bak)\n"
 }

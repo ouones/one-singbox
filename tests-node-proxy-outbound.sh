@@ -123,6 +123,7 @@ cleanup() {
 trap cleanup EXIT
 
 source "$CORE_FILE"
+is_core_dir="$case_dir/core"
 
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -891,6 +892,7 @@ fail() {
 }
 source "$CORE_FILE"
 case_dir=$TEST_CASE_DIR
+is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
 is_core_bin="$FAKE_CORE"
@@ -924,6 +926,7 @@ fail() {
 }
 source "$CORE_FILE"
 case_dir=$TEST_CASE_DIR
+is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
 is_core_bin="$FAKE_CORE"

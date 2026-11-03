@@ -1074,6 +1074,10 @@ frontend_refresh_detection() {
 
 frontend_lock_state() {
     local state_dir="$is_core_dir/.frontend-state"
+    if [[ ${frontend_lock_depth:-0} -gt 0 && ${frontend_lock_fd:-} ]]; then
+        frontend_lock_depth=$((frontend_lock_depth + 1))
+        return 0
+    fi
     command -v flock >/dev/null 2>&1 || {
         frontend_set_error lock_unavailable 'The flock utility is required to coordinate frontend changes.'
         return 1
@@ -1103,13 +1107,19 @@ frontend_lock_state() {
         frontend_set_error operation_in_progress 'Another frontend operation is already in progress.'
         return 1
     }
+    frontend_lock_depth=1
 }
 
 frontend_unlock_state() {
     if [[ $frontend_lock_fd ]]; then
+        if [[ ${frontend_lock_depth:-1} -gt 1 ]]; then
+            frontend_lock_depth=$((frontend_lock_depth - 1))
+            return 0
+        fi
         flock -u "$frontend_lock_fd" 2>/dev/null || :
         exec {frontend_lock_fd}>&-
         frontend_lock_fd=
+        frontend_lock_depth=0
     fi
 }
 
@@ -1202,7 +1212,7 @@ frontend_choose_aux_port() {
         }
         while IFS= read -r port; do
             [[ $port =~ ^[0-9]+$ ]] && frontend_used_ports[$port]=1
-        done < <(jq -r '.inbounds[]?.listen_port // empty' "$file")
+        done < <(frontend_config_tcp_ports "$file")
     done
     for ((port = 49152; port <= 65535; port++)); do
         [[ ${frontend_used_ports[$port]+yes} ]] || {
@@ -1514,7 +1524,7 @@ frontend_txn_validate_manifest() {
     local -A seen_paths=()
     jq -e '
         .schema_version == 1 and
-        (.action == "enable" or .action == "disable" or .action == "bind") and
+        (.action == "enable" or .action == "disable" or .action == "bind" or .action == "node") and
         (.phase == "prepared" or .phase == "backend_applied" or .phase == "frontend_applied" or .phase == "verified" or .phase == "rolling_back" or .phase == "recovery_required") and
         ((.nginx_rollback_pending == null) or (.nginx_rollback_pending | type == "boolean")) and
         ((.backend_rollback_pending == null) or (.backend_rollback_pending | type == "boolean")) and
@@ -1590,6 +1600,12 @@ frontend_txn_validate_manifest() {
         backend_config)
             [[ $path == "$is_config_json" || $path == "$is_conf_dir"/*.json || $path == "$is_conf_dir"/.quan-meta/*.meta.json ]] || {
                 frontend_set_error transaction_corrupt 'The frontend transaction backend target is outside node, metadata, or shared-config files.'
+                return 1
+            }
+            ;;
+        node_metadata)
+            [[ $path == "$is_conf_dir"/.quan-meta/*.meta.json ]] || {
+                frontend_set_error transaction_corrupt 'The frontend transaction metadata target is outside node metadata.'
                 return 1
             }
             ;;
@@ -1812,7 +1828,7 @@ frontend_txn_rollback() {
     fi
     for ((index = ${#file_records[@]} - 1; index >= 0; index--)); do
         record=${file_records[$index]}
-        [[ $(jq -r '.role' <<<"$record") == backend_config ]] || continue
+        [[ $(jq -r '.role' <<<"$record") == backend_config || $(jq -r '.role' <<<"$record") == node_metadata ]] || continue
         frontend_txn_restore_record_before "$record" || {
             frontend_txn_set_phase recovery_required || :
             return 1
@@ -1858,7 +1874,7 @@ frontend_txn_commit() {
         frontend_set_error transaction_state_write_failed 'Could not persist the prepared frontend transaction.'
         return 1
     }
-    mapfile -t operation_records < <(jq -c '.[] | select(.role == "backend_config")' <<<"$frontend_txn_files")
+    mapfile -t operation_records < <(jq -c '.[] | select(.role == "backend_config" or .role == "node_metadata")' <<<"$frontend_txn_files")
     for record in "${operation_records[@]}"; do
         frontend_txn_apply_record "$record" || {
             original_code=$frontend_error_code
@@ -1870,7 +1886,7 @@ frontend_txn_commit() {
             fi
             return 1
         }
-        backend_changed=true
+        [[ $(jq -r '.role' <<<"$record") == backend_config ]] && backend_changed=true
     done
     if [[ $backend_changed == true ]]; then
         if ! manage_restart_confirmed; then
@@ -2031,6 +2047,26 @@ frontend_validate_reality_node() {
     frontend_validate_sni "$sni"
 }
 
+frontend_config_has_tcp_port() {
+    local file=$1 port=$2 configured_port
+    while IFS= read -r configured_port; do
+        [[ $configured_port == "$port" ]] && return 0
+    done < <(frontend_config_tcp_ports "$file")
+    return 1
+}
+
+frontend_config_tcp_ports() {
+    jq -r '
+        .inbounds[]?
+        | select(
+            (.network // "") != "udp" and
+            (.transport.type // "") != "quic" and
+            (.type != "hysteria" and .type != "hysteria2" and .type != "tuic")
+        )
+        | .listen_port // empty
+    ' "$1" 2>/dev/null
+}
+
 frontend_assert_user_map_sni_free() {
     local candidate=$1 target map_file rule_file rule_line rule_key rule_kind index candidate_lower=${1,,}
     target=$(jq -r '.map_variable // empty' <<<"$frontend_nginx")
@@ -2117,7 +2153,7 @@ frontend_validate_migration_refs() {
             shopt -u nullglob
             return 1
         }
-        if jq -e 'any(.inbounds[]?; .listen_port == 443)' "$file" >/dev/null 2>&1; then
+        if frontend_config_has_tcp_port "$file" 443; then
             frontend_validate_reality_node "$file" 443 || {
                 shopt -u nullglob
                 return 1
@@ -2171,7 +2207,7 @@ frontend_choose_backend_port() {
         [[ -f $file && ! -L $file ]] || continue
         while IFS= read -r port; do
             [[ $port =~ ^[0-9]+$ ]] && used[$port]=1
-        done < <(jq -r '.inbounds[]?.listen_port // empty' "$file" 2>/dev/null)
+        done < <(frontend_config_tcp_ports "$file")
     done
     shopt -u nullglob
     for ((port = 49152; port <= 65535; port++)); do
@@ -2384,7 +2420,7 @@ frontend_assert_no_unmanaged_443_node() {
             shopt -u nullglob
             return 1
         }
-        if jq -e 'any(.inbounds[]?; .listen_port == 443)' "$file" >/dev/null 2>&1; then
+        if frontend_config_has_tcp_port "$file" 443; then
             frontend_set_error tcp_443_port_conflict "An unmanaged sing-box node still uses port 443: ${file##*/}"
             shopt -u nullglob
             return 1
@@ -2399,7 +2435,7 @@ frontend_assert_no_inline_443_node() {
         frontend_set_error singbox_config_unreadable "Cannot safely inspect shared configuration $is_config_json"
         return 1
     }
-    jq -e 'any(.inbounds[]?; .listen_port == 443)' "$is_config_json" >/dev/null 2>&1 && {
+    frontend_config_has_tcp_port "$is_config_json" 443 && {
         frontend_set_error inline_443_node "The shared sing-box configuration contains a port-443 inbound that cannot be selected by node reference: $is_config_json"
         return 1
     }
@@ -2550,6 +2586,292 @@ frontend_add_public_reality_node() {
         is_config_name=$frontend_created_node_ref
         is_config_file=$frontend_created_node_ref
         printf '节点已加入 443 SNI 前置：%s。\n' "$frontend_created_node_ref"
+    fi
+    frontend_unlock_state
+    return "${status:-0}"
+}
+
+frontend_txn_add_change_if_different() {
+    local path=$1 candidate=${2:-} role=$3 mode=${4:-644} current_hash candidate_hash
+    if [[ $candidate && -f $path ]]; then
+        if [[ $role == backend_config || $role == node_metadata ]] && jq -e . "$path" >/dev/null 2>&1 && jq -e . "$candidate" >/dev/null 2>&1; then
+            [[ $(jq -cS . "$path") != "$(jq -cS . "$candidate")" ]] || return 0
+        fi
+        current_hash=$(sha256sum "$path" | awk '{print $1}') || return 1
+        candidate_hash=$(sha256sum "$candidate" | awk '{print $1}') || return 1
+        [[ $current_hash != "$candidate_hash" ]] || return 0
+    elif [[ ! $candidate && ! -e $path ]]; then
+        return 0
+    fi
+    frontend_txn_add_change "$path" "$candidate" "$role" "$mode"
+}
+
+frontend_apply_node_lifecycle() {
+    local operation=$1 old_ref=$2 new_ref=${3:-} node_json=${4:-} metadata_json=${5:-}
+    local status= binding= old_backend= candidate_port= sni= tag= map_file= map_sha= profile_after= source_config= candidate_node_json= old_meta_path= new_meta_path= old_node_path= new_node_path= old_profile_bindings= profile_changed=false map_changed=false node_is_reality=false
+    local index node_ref record new_revision current_profile_hash candidate_profile_hash
+    local -a changed_refs=() changed_meta_refs=()
+
+    frontend_lock_state || return 1
+    frontend_load_profile || {
+        frontend_set_error "$frontend_profile_error_code" "$frontend_profile_error_message"
+        status=1
+    }
+    if [[ ! $status ]]; then
+        [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null || {
+            frontend_set_error frontend_disabled 'The Nginx Reality frontend must be enabled to edit or delete a bound node.'
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        frontend_read_phase || {
+            frontend_set_error "$frontend_phase_error_code" "$frontend_phase_error_message"
+            status=1
+        }
+        [[ $status ]] || frontend_pending_change || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_refresh_detection || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_assert_profile_map_owned || status=1
+        frontend_assert_no_unmanaged_443_node || status=1
+    fi
+    if [[ ! $status ]]; then
+        old_node_path="$is_conf_dir/$old_ref"
+        [[ $old_ref =~ ^[A-Za-z0-9_.-]+\.json$ && -f $old_node_path && ! -L $old_node_path ]] || {
+            frontend_set_error node_ref_missing "Node reference does not name a regular node file: $old_ref"
+            status=1
+        }
+        if [[ ! $status && ${frontend_node_source_ref:-} == "$old_ref" && ${frontend_node_source_hash:-} =~ ^[0-9a-f]{64}$ ]]; then
+            local current_node_hash
+            current_node_hash=$(sha256sum "$old_node_path" | awk '{print $1}') || status=1
+            if [[ ! $status && $current_node_hash != "$frontend_node_source_hash" ]]; then
+                frontend_set_error config_drift "Bound node changed while the edit was being prepared: $old_ref"
+                status=1
+            fi
+        fi
+        binding=$(jq -c --arg ref "$old_ref" '[.bindings[] | select(.node_ref == $ref)][0] // empty' <<<"$frontend_profile") || status=1
+        [[ ! $binding ]] || old_backend=$(jq -r '.backend_port' <<<"$binding")
+    fi
+    if [[ ! $status && $operation != delete && $operation != replace ]]; then
+        frontend_set_error node_operation_invalid "Unsupported bound-node operation: $operation"
+        status=1
+    fi
+    if [[ ! $status && $operation == replace ]]; then
+        [[ $new_ref =~ ^[A-Za-z0-9_.-]+\.json$ && $node_json ]] || {
+            frontend_set_error node_candidate_invalid 'A bound-node edit requires a valid candidate file reference and node JSON.'
+            status=1
+        }
+        if [[ ! $status ]]; then
+            jq -e 'type == "object" and (.inbounds | type == "array" and length == 1)' <<<"$node_json" >/dev/null 2>&1 || {
+                frontend_set_error node_candidate_invalid 'A bound-node edit must produce exactly one inbound.'
+                status=1
+            }
+        fi
+        if [[ ! $status ]]; then
+            candidate_port=$(jq -r '.inbounds[0].listen_port // empty' <<<"$node_json")
+            node_is_reality=$(jq -r '
+                .inbounds[0].type == "vless" and
+                (.inbounds[0] | has("transport") | not) and
+                .inbounds[0].tls.enabled == true and
+                .inbounds[0].tls.reality.enabled == true and
+                .inbounds[0].tls.reality.handshake.server_port == 443 and
+                (.inbounds[0].tls.server_name | type == "string") and
+                (.inbounds[0].tls.reality.handshake.server == .inbounds[0].tls.server_name)
+            ' <<<"$node_json")
+            [[ $node_is_reality == true ]] || {
+                frontend_set_error node_unsupported 'Move the node off public port 443 before changing its protocol or transport; only ordinary VLESS-REALITY without transport is supported.'
+                status=1
+            }
+        fi
+        if [[ ! $status && $candidate_port != 443 && ( ! $candidate_port =~ ^[0-9]+$ || $candidate_port -lt 1 || $candidate_port -gt 65535 ) ]]; then
+            frontend_set_error node_candidate_invalid 'The candidate node has an invalid public listening port.'
+            status=1
+        fi
+    fi
+    if [[ ! $status ]]; then
+        frontend_original_files=("${frontend_scan_source_files[@]}")
+        frontend_original_hashes=("${frontend_scan_source_hashes[@]}")
+        frontend_txn_dir="$is_core_dir/.frontend-state/txn.$$.$RANDOM"
+        mkdir -m 700 "$frontend_txn_dir" || {
+            frontend_set_error state_unwritable 'Could not create a private frontend transaction directory.'
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        declare -gA frontend_reserved_backend_ports
+        frontend_reserved_backend_ports=()
+        frontend_candidate_nodes="$frontend_txn_dir/nodes"
+        frontend_candidate_config="$frontend_txn_dir/sing-box-config.after"
+        frontend_candidate_map="$frontend_txn_dir/candidate-reality-map.conf"
+        mkdir -p "$frontend_candidate_nodes" && cp -a "$is_conf_dir/." "$frontend_candidate_nodes/" || {
+            frontend_set_error node_candidate_failed 'Could not stage the complete candidate node directory.'
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        if [[ ! $binding && $operation == delete ]]; then
+            frontend_set_error binding_missing "Node is not bound to the enabled frontend: $old_ref"
+            status=1
+        elif [[ ! $binding && $candidate_port != 443 ]]; then
+            frontend_set_error binding_missing "Node is not bound to the enabled frontend: $old_ref"
+            status=1
+        fi
+    fi
+    if [[ ! $status ]]; then
+        old_meta_path=$(meta_file "$old_ref")
+        new_node_path="$is_conf_dir/$new_ref"
+        new_meta_path=$(meta_file "$new_ref")
+        if [[ $operation == replace && $new_ref != "$old_ref" ]]; then
+            [[ ! -e $new_node_path && ! -L $new_node_path && ! -e $new_meta_path && ! -L $new_meta_path ]] || {
+                frontend_set_error node_ref_conflict "Target node file or metadata already exists: $new_ref"
+                status=1
+            }
+            if [[ ! $status ]]; then
+                mv -f "$frontend_candidate_nodes/$old_ref" "$frontend_candidate_nodes/$new_ref" || status=1
+                if [[ -f $frontend_candidate_nodes/.quan-meta/$old_ref.meta.json ]]; then
+                    mv -f "$frontend_candidate_nodes/.quan-meta/$old_ref.meta.json" "$frontend_candidate_nodes/.quan-meta/$new_ref.meta.json" || status=1
+                fi
+            fi
+        fi
+        if [[ ! $status && $operation == delete ]]; then
+            rm -f "$frontend_candidate_nodes/$old_ref" "$frontend_candidate_nodes/.quan-meta/$old_ref.meta.json" || status=1
+            [[ $status ]] || frontend_new_bindings=$(jq -c --arg ref "$old_ref" '.bindings | map(select(.node_ref != $ref))' <<<"$frontend_profile") || status=1
+        elif [[ ! $status ]]; then
+            if [[ $candidate_port == 443 ]]; then
+                frontend_assert_unique_sni "$(jq -r '.inbounds[0].tls.server_name' <<<"$node_json")" "$old_ref" || status=1
+                sni=$(jq -r '.inbounds[0].tls.server_name' <<<"$node_json")
+                if [[ ! $status ]]; then
+                    if [[ $binding ]]; then
+                        tag=$(jq -r '.inbounds[0].tag' "$old_node_path")
+                        old_backend=$(jq -r '.backend_port' <<<"$binding")
+                    else
+                        frontend_choose_backend_port || status=1
+                        old_backend=$frontend_backend_port
+                        tag=$(jq -r '.inbounds[0].tag // empty' <<<"$node_json")
+                        [[ $tag ]] || tag=$new_ref
+                    fi
+                fi
+                if [[ ! $status ]]; then
+                    candidate_node_json=$(jq -c --arg tag "$tag" --argjson port "$old_backend" \
+                        '.inbounds[0].tag=$tag | .inbounds[0].listen="127.0.0.1" | .inbounds[0].listen_port=$port' <<<"$node_json") || status=1
+                    frontend_new_bindings=$(jq -cn --argjson bindings "$(jq -c --arg ref "$old_ref" '.bindings | map(select(.node_ref != $ref))' <<<"$frontend_profile")" --arg ref "$new_ref" --argjson port "$old_backend" \
+                        '$bindings + [{node_ref:$ref,public_port:443,backend_host:"127.0.0.1",backend_port:$port}]') || status=1
+                    declare -gA frontend_reserved_backend_ports
+                    frontend_reserved_backend_ports[$old_backend]=1
+                fi
+            else
+                candidate_node_json=$node_json
+                frontend_new_bindings=$(jq -c --arg ref "$old_ref" '.bindings | map(select(.node_ref != $ref))' <<<"$frontend_profile") || status=1
+            fi
+            if [[ ! $status ]]; then
+                printf '%s\n' "$candidate_node_json" >"$frontend_candidate_nodes/$new_ref" || status=1
+                if [[ $metadata_json ]]; then
+                    mkdir -p "$frontend_candidate_nodes/.quan-meta" || status=1
+                    printf '%s\n' "$metadata_json" >"$frontend_candidate_nodes/.quan-meta/$new_ref.meta.json" || status=1
+                fi
+            fi
+        else
+            frontend_new_bindings=$(jq -c --arg ref "$old_ref" '.bindings | map(select(.node_ref != $ref))' <<<"$frontend_profile") || status=1
+        fi
+    fi
+    if [[ ! $status ]]; then
+        source_config="$frontend_txn_dir/config.source"
+        if [[ -f $is_config_json ]]; then
+            cp -p "$is_config_json" "$source_config" || status=1
+        else
+            default_runtime_config >"$source_config" || {
+                frontend_set_error node_candidate_failed 'Could not construct the shared sing-box configuration.'
+                status=1
+            }
+        fi
+        if [[ ! $status ]] && ! render_runtime_node_outbound_modes "$source_config" "$frontend_candidate_config" '' '' "$frontend_candidate_nodes"; then
+            frontend_set_error node_candidate_failed "Could not render shared outbound configuration: ${runtime_sync_error:-unknown error}"
+            status=1
+        fi
+        if [[ ! $status ]] && ! "$is_core_bin" check -c "$frontend_candidate_config" -C "$frontend_candidate_nodes" >"$frontend_txn_dir/sing-box-check.log" 2>&1; then
+            frontend_set_error singbox_candidate_invalid 'The complete candidate sing-box configuration failed validation.'
+            status=1
+        fi
+    fi
+    if [[ ! $status ]]; then
+        frontend_render_reality_map "$frontend_new_bindings" "$frontend_candidate_nodes" "$frontend_candidate_map" || status=1
+    fi
+    if [[ ! $status ]]; then
+        map_file=$(jq -r '.ownership.map_file' <<<"$frontend_profile")
+        local old_map_sha new_map_sha
+        old_map_sha=$(sha256sum "$map_file" | awk '{print $1}') || status=1
+        new_map_sha=$(sha256sum "$frontend_candidate_map" | awk '{print $1}') || status=1
+        [[ $old_map_sha == "$new_map_sha" ]] || map_changed=true
+        old_profile_bindings=$(jq -c '.bindings' <<<"$frontend_profile") || status=1
+        [[ $old_profile_bindings == "$frontend_new_bindings" ]] || profile_changed=true
+        if [[ $map_changed == true ]]; then
+            frontend_check_binding_map_candidate || status=1
+            profile_changed=true
+        fi
+    fi
+    if [[ ! $status && $profile_changed == true ]]; then
+        map_sha=$(sha256sum "$frontend_candidate_map" | awk '{print $1}') || status=1
+        new_revision=$(( $(jq -r '.revision' <<<"$frontend_profile") + 1 ))
+        profile_after="$frontend_txn_dir/profile.after"
+        jq -c --argjson revision "$new_revision" --argjson bindings "$frontend_new_bindings" --arg path "$map_file" --arg sha "$map_sha" '
+            .revision=$revision
+            | .bindings=$bindings
+            | .ownership.map_sha256=$sha
+            | .ownership.files |= map(if .path == $path then .sha256=$sha else . end)
+        ' <<<"$frontend_profile" >"$profile_after" || status=1
+        chmod 600 "$profile_after" 2>/dev/null || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_txn_action=node
+        frontend_txn_files='[]'
+        frontend_txn_paths=()
+        frontend_guard_paths=()
+        frontend_changed_targets=("$is_config_json" "$is_conf_dir/$old_ref" "$is_conf_dir/$new_ref" "$old_meta_path" "$new_meta_path" "$map_file" "$is_core_dir/frontend.json")
+        frontend_make_guards "$map_file" || status=1
+        frontend_verify_original_sources || status=1
+    fi
+    if [[ ! $status ]]; then
+        if [[ $operation == delete || $new_ref != "$old_ref" ]]; then
+            frontend_txn_add_change_if_different "$is_conf_dir/$old_ref" '' backend_config || status=1
+        fi
+        if [[ ! $status && $operation == replace ]]; then
+            frontend_txn_add_change_if_different "$is_conf_dir/$new_ref" "$frontend_candidate_nodes/$new_ref" backend_config 644 || status=1
+        fi
+        if [[ ! $status && ( $operation == delete || $new_ref != "$old_ref" ) && -e $old_meta_path ]]; then
+            frontend_txn_add_change_if_different "$old_meta_path" '' node_metadata || status=1
+        fi
+        if [[ ! $status && $operation == replace && -f $frontend_candidate_nodes/.quan-meta/$new_ref.meta.json ]]; then
+            frontend_txn_add_change_if_different "$new_meta_path" "$frontend_candidate_nodes/.quan-meta/$new_ref.meta.json" node_metadata 600 || status=1
+        fi
+        if [[ ! $status ]]; then
+            frontend_txn_add_change_if_different "$is_config_json" "$frontend_candidate_config" backend_config 600 || status=1
+        fi
+        if [[ ! $status && $map_changed == true ]]; then
+            frontend_txn_add_change_if_different "$map_file" "$frontend_candidate_map" project_file 644 || status=1
+        fi
+        if [[ ! $status && $profile_changed == true ]]; then
+            frontend_txn_add_change_if_different "$is_core_dir/frontend.json" "$profile_after" profile 600 || status=1
+        fi
+        if [[ ! $status && ${#frontend_txn_paths[@]} -gt 0 ]]; then
+            frontend_verify_original_sources || status=1
+            [[ $status ]] || frontend_txn_commit || status=1
+        elif [[ ! $status ]]; then
+            rm -rf -- "$frontend_txn_dir"
+        fi
+    fi
+    if [[ $status ]]; then
+        local original_code=$frontend_error_code original_message=$frontend_error_message
+        frontend_read_phase || :
+        if [[ $frontend_txn_dir && $frontend_phase != recovery_required ]]; then
+            rm -rf -- "${frontend_txn_dir:-}"
+        fi
+        frontend_error_code=$original_code
+        frontend_error_message=$original_message
+    else
+        is_config_file=$new_ref
+        is_config_name=$new_ref
     fi
     frontend_unlock_state
     return "${status:-0}"
@@ -3156,7 +3478,7 @@ frontend_menu_enable() {
     shopt -s nullglob
     for file in "$is_conf_dir"/*.json; do
         [[ -f $file && ! -L $file ]] || continue
-        jq -e 'any(.inbounds[]?; .listen_port == 443)' "$file" >/dev/null 2>&1 && nodes+=("${file##*/}")
+        frontend_config_has_tcp_port "$file" 443 && nodes+=("${file##*/}")
     done
     shopt -u nullglob
     if ((${#nodes[@]} == 0)); then

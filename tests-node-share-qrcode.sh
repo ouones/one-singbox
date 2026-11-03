@@ -102,6 +102,7 @@ type() {
 export PATH="$QR_BIN:$PATH"
 export QR_PACKAGE_LOG="$CASE_DIR/packages.log"
 source "$CORE_FILE"
+is_core_dir="$CASE_DIR/core"
 full_qr_cell='█'
 TEST_TTY_SIZE='40 80'
 case_dir=$CASE_DIR
