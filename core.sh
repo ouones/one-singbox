@@ -518,8 +518,16 @@ ask() {
                     continue
                 }
                 if [[ $(is_test port_used $REPLY) && $is_ask_set != 'door_port' ]]; then
-                    msg "$is_err 无法使用 ($REPLY) 端口."
-                    continue
+                    if [[ $REPLY == 443 && $is_new_protocol == VLESS-REALITY && -e $is_core_dir/frontend.json ]]; then
+                        load frontend.sh
+                        frontend_public_443_ready || {
+                            msg "$is_err ${frontend_error_message:-无法使用 ($REPLY) 端口.}"
+                            continue
+                        }
+                    else
+                        msg "$is_err 无法使用 ($REPLY) 端口."
+                        continue
+                    fi
                 fi
             }
             [[ $(grep path <<<$is_ask_set) && ! $(is_test path "$REPLY") ]] && {
@@ -2835,6 +2843,13 @@ create() {
             msg
             return
         }
+        if [[ $is_frontend_public_443_add == 1 ]]; then
+            [[ ${2,,} == vless-reality && ! $is_change ]] || err 'Only new ordinary VLESS-REALITY nodes can be added through the public 443 frontend.'
+            load frontend.sh
+            frontend_add_public_reality_node "$is_new_json" "$is_custom_node_name" || err "$frontend_error_message"
+            is_frontend_transaction_applied=1
+            return 0
+        fi
         previous_config_file=$is_config_file
         node_migration_applied=
         if [[ $is_change && $previous_config_file ]]; then
@@ -3448,6 +3463,7 @@ manage() {
 
 # add a config
 add() {
+    is_frontend_public_443_add=
     is_lower=${1,,}
     if [[ $is_lower ]]; then
         case $is_lower in
@@ -3606,9 +3622,14 @@ add() {
             [[ ! $(is_test port ${is_use_port}) ]] && {
                 err "($is_use_port) 不是一个有效的端口. $is_err_tips"
             }
-            [[ $(is_test port_used $is_use_port) && ! $is_gen && ${is_new_protocol,,} != snell ]] && {
-                err "无法使用 ($is_use_port) 端口. $is_err_tips"
-            }
+            if [[ $(is_test port_used $is_use_port) && ! $is_gen && ${is_new_protocol,,} != snell ]]; then
+                if [[ $is_use_port == 443 && $is_new_protocol == VLESS-REALITY ]]; then
+                    load frontend.sh
+                    frontend_public_443_ready || err "$frontend_error_message"
+                else
+                    err "无法使用 ($is_use_port) 端口. $is_err_tips"
+                fi
+            fi
             port=$is_use_port
         fi
         if [[ $is_use_door_port ]]; then
@@ -3731,6 +3752,25 @@ add() {
         fi
     fi
 
+    if [[ $port == 443 && $is_new_protocol == VLESS-REALITY && ! $is_gen && ( -e $is_core_dir/frontend.json || -L $is_core_dir/frontend.json ) ]]; then
+        load frontend.sh
+        frontend_load_profile || err "$frontend_profile_error_message"
+        if [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null; then
+            frontend_public_443_ready || err "$frontend_error_message"
+            is_frontend_public_443_add=1
+            if [[ ! $is_use_servername ]]; then
+                if [[ -t 0 ]]; then
+                    ask string is_servername "请输入用于 443 前置的 SNI 域名:"
+                    is_use_servername=$is_servername
+                else
+                    err "443 前置节点必须显式指定 SNI 域名: $is_core add reality 443 [uuid] [sni]"
+                fi
+            fi
+            is_servername=$is_use_servername
+            frontend_validate_sni "$is_servername" || err "$frontend_error_message"
+        fi
+    fi
+
     if [[ ${is_new_protocol,,} == snell ]]; then
         [[ ! $port ]] && get_port && port=$tmp_port
         [[ ! $snell_psk ]] && snell_psk=$(get_snell_psk)
@@ -3790,10 +3830,12 @@ add() {
 
     # create json
     create server $is_new_protocol
-    [[ $is_custom_node_name && $is_config_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
+    [[ $is_custom_node_name && $is_config_name && ! $is_frontend_transaction_applied ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
 
     # show config info.
     info
+    is_frontend_public_443_add=
+    is_frontend_transaction_applied=
 }
 
 # get config info
@@ -3801,14 +3843,32 @@ add() {
 get() {
     case $1 in
     addr)
+        is_public_port=$port
         is_addr=$host
-        [[ ! $is_addr && $is_config_file ]] && is_addr=$(meta_get "$is_config_file" '.entry_addr')
-        [[ ! $is_addr && $is_listen_addr && $is_listen_addr != "::" && $is_listen_addr != "0.0.0.0" ]] && is_addr=$is_listen_addr
-        [[ ! $is_addr ]] && {
+        is_frontend_bound_node=
+        if [[ $is_config_file && -e $is_core_dir/frontend.json ]]; then
+            load frontend.sh
+            frontend_load_profile || err "$frontend_profile_error_message"
+            if [[ $frontend_profile ]] && jq -e --arg node_ref "$is_config_file" '.enabled == true and any(.bindings[]?; .node_ref == $node_ref)' <<<"$frontend_profile" >/dev/null; then
+                is_frontend_bound_node=1
+                is_public_port=443
+                [[ $is_addr ]] || is_addr=$(meta_get "$is_config_file" '.entry_addr')
+            fi
+        fi
+        if [[ $is_frontend_bound_node ]]; then
+            [[ $is_addr ]] || {
+                get_ip
+                is_addr=$ip
+            }
+        else
+            [[ ! $is_addr && $is_config_file ]] && is_addr=$(meta_get "$is_config_file" '.entry_addr')
+            [[ ! $is_addr && $is_listen_addr && $is_listen_addr != "::" && $is_listen_addr != "0.0.0.0" ]] && is_addr=$is_listen_addr
+            [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
             [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
-        }
+            }
+        fi
         # IPv6 地址加方括号 (URL 格式要求)
         [[ $is_addr == *:* && $is_addr != \[*\] ]] && is_addr="[$is_addr]"
         ;;
@@ -4156,8 +4216,8 @@ info() {
             is_net_type=h2
             is_info_show=(${is_info_show[@]/15/})
         }
-        is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
-        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
+        is_info_str=($is_protocol $is_addr "${is_public_port:-$port}" $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
+        is_url="$is_protocol://$uuid@$is_addr:${is_public_port:-$port}?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
         ;;
     anytls)
         is_can_change=(0 1 4 12 13 14 15)

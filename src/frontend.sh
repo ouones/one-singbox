@@ -93,7 +93,7 @@ frontend_read_phase() {
     fi
     frontend_phase=$(jq -r '.phase' "$transaction_file")
     case $frontend_phase in
-    prepared | frontend_applied | verified | committed | rolling_back | rolled_back | recovery_required) ;;
+    prepared | backend_applied | frontend_applied | verified | committed | rolling_back | rolled_back | recovery_required) ;;
     *)
         frontend_phase_error_code=transaction_corrupt
         frontend_phase_error_message="The saved frontend transaction has an unknown phase: $frontend_phase"
@@ -121,7 +121,7 @@ frontend_status() {
         else
             phase=$frontend_phase
             case $phase in
-            prepared | frontend_applied | verified | rolling_back | recovery_required)
+            prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
                 errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("An interrupted frontend transaction is in phase " + $phase + ". Run frontend recover before changing it.")}]')
                 ;;
             *) errors='[]' ;;
@@ -137,7 +137,7 @@ frontend_status() {
         phase=$frontend_phase
         errors='[]'
         case $phase in
-        prepared | frontend_applied | verified | rolling_back | recovery_required)
+        prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
             errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("An interrupted frontend transaction is in phase " + $phase + ". Run frontend recover before changing it.")}]')
             ;;
         esac
@@ -352,7 +352,7 @@ frontend_detect_nginx_service() {
 }
 
 frontend_scan_config_file() {
-    local file=$1 context=$2 records kind a b c d child include_pattern
+    local file=$1 context=$2 inherited_map_target=${3:-} records kind a b c d e f child include_pattern include_map_target
     local -a includes
 
     [[ ${frontend_scan_active[$file]+yes} ]] && {
@@ -362,7 +362,7 @@ frontend_scan_config_file() {
     frontend_scan_active[$file]=1
     frontend_scan_source_files+=("$file")
     frontend_scan_source_hashes+=("$(sha256sum "$file" | awk '{print $1}')")
-    records=$(awk -v initial_context="$context" -v source_file="$file" '
+    records=$(awk -v initial_context="$context" -v initial_map_target="$inherited_map_target" -v source_file="$file" '
         function flush_token() {
             if (token != "") {
                 words[++word_count] = token
@@ -375,6 +375,14 @@ frontend_scan_config_file() {
             for (i = 1; i <= depth; i++) if (stack[i] == wanted) return 1
             return 0
         }
+        function current_map_target(i, j) {
+            for (i = depth; i > 0; i--) {
+                if (stack[i] != "map") continue
+                for (j = 1; j <= map_count; j++) if (map_depth[j] == i) return map_target[j]
+                return initial_map_target
+            }
+            return ""
+        }
         function output_server(i) {
             if (has_context("stream")) {
                 printf "STREAMSERVER\t%d\t%d\t%d\t%s\t%s\t%s\n", server_has_tcp443[i], server_has_udp443[i], server_preread[i], server_proxy[i], server_ports[i], server_addresses[i]
@@ -382,7 +390,7 @@ frontend_scan_config_file() {
                 printf "HTTPSERVER\t%d\t%s\n", server_has_tcp443[i], server_ports[i]
             }
         }
-        function process_statement(i, port, udp, active_server, include_context, address, extracted_port) {
+        function process_statement(i, port, udp, active_server, include_context, address, extracted_port, target, key, rule_kind) {
             if (word_count == 0) return
             if (words[1] == "include") {
                 include_context = "top"
@@ -390,7 +398,18 @@ frontend_scan_config_file() {
                 else if (has_context("stream")) include_context = "stream"
                 else if (has_context("server")) include_context = "server"
                 else if (has_context("http")) include_context = "http"
-                printf "INCLUDE\t%d\t%d\t%d\t%s\t%s\n", FNR, word_starts[1], char_index, include_context, words[2]
+                printf "INCLUDE\t%d\t%d\t%d\t%s\t%s\t%s\n", FNR, word_starts[1], char_index, include_context, words[2], current_map_target()
+            }
+            if (has_context("map") && words[1] != "include") {
+                target = current_map_target()
+                key = words[1]
+                rule_kind = "exact"
+                if (key == "hostnames") rule_kind = "hostnames"
+                else if (key ~ /^~/) rule_kind = "regex"
+                else if (key ~ /\*/ || key ~ /^\./) rule_kind = "wildcard"
+                else if (key == "volatile") rule_kind = "directive"
+                else if (key ~ /\\/ || key ~ /\$/) rule_kind = "complex"
+                if (target != "" && rule_kind != "directive") printf "MAP_RULE\t%d\t%s\t%s\t%s\n", FNR, target, key, rule_kind
             }
             if (words[1] == "listen" && has_context("server")) {
                 port = 0
@@ -510,6 +529,11 @@ frontend_scan_config_file() {
                         server_addresses[depth] = ""
                     }
                 }
+                if (initial_context == "map") {
+                    map_count = 1
+                    map_depth[1] = depth
+                    map_target[1] = initial_map_target
+                }
             }
             base_depth = depth
         }
@@ -578,6 +602,13 @@ frontend_scan_config_file() {
             frontend_scan_map_sources+=("$c")
             frontend_scan_map_targets+=("$d")
             ;;
+        MAP_RULE)
+            frontend_scan_map_rule_files+=("$file")
+            frontend_scan_map_rule_lines+=("$a")
+            frontend_scan_map_rule_targets+=("$b")
+            frontend_scan_map_rule_keys+=("$c")
+            frontend_scan_map_rule_kinds+=("$d")
+            ;;
         STREAMSERVER)
             frontend_scan_server_443+=("$a")
             frontend_scan_server_udp443+=("$b")
@@ -594,6 +625,7 @@ frontend_scan_config_file() {
             local include_line=$a include_start=$b include_end=$c include_context=$d
             child=$include_context
             include_pattern=$e
+            include_map_target=$f
             [[ $include_pattern && $include_pattern != *'$'* && $include_pattern != *[[:space:]]* ]] || {
                 frontend_set_error nginx_config_unsupported "Dynamic or empty Nginx include cannot be followed from $file"
                 unset 'frontend_scan_active[$file]'
@@ -629,7 +661,7 @@ frontend_scan_config_file() {
                     return 1
                 }
                 frontend_scan_include_edges+=("$include_index:$canonical_file")
-                if ! frontend_scan_config_file "$canonical_file" "$child"; then
+                if ! frontend_scan_config_file "$canonical_file" "$child" "$include_map_target"; then
                     unset 'frontend_scan_active[$file]'
                     return 1
                 fi
@@ -678,7 +710,11 @@ frontend_flatten_file() {
             }
             for child in "${line_children[@]}"; do
                 printf '\n' >>"$output"
-                frontend_flatten_file "$child" "$output" || return 1
+                if [[ $child == "${frontend_flatten_override_file:-}" && $frontend_flatten_override_content ]]; then
+                    cat "$frontend_flatten_override_content" >>"$output" || return 1
+                else
+                    frontend_flatten_file "$child" "$output" || return 1
+                fi
                 printf '\n' >>"$output"
             done
             position=$end
@@ -825,6 +861,11 @@ frontend_scan_config_tree() {
     frontend_scan_map_ends=()
     frontend_scan_map_sources=()
     frontend_scan_map_targets=()
+    frontend_scan_map_rule_files=()
+    frontend_scan_map_rule_lines=()
+    frontend_scan_map_rule_targets=()
+    frontend_scan_map_rule_keys=()
+    frontend_scan_map_rule_kinds=()
     frontend_scan_server_443=()
     frontend_scan_server_udp443=()
     frontend_scan_server_preread=()
@@ -905,8 +946,23 @@ frontend_scan_config_tree() {
     return 0
 }
 
+frontend_managed_core_pid() {
+    local pid=$1 main_pid args
+    if [[ $is_systemd ]]; then
+        main_pid=$(systemctl show -p MainPID --value "$is_core" 2>/dev/null) || return 1
+        [[ $main_pid == "$pid" && $main_pid =~ ^[1-9][0-9]*$ ]]
+        return $?
+    fi
+    if [[ $is_openrc ]]; then
+        args=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || return 1
+        [[ $args == *"$is_core_dir"* ]]
+        return $?
+    fi
+    return 1
+}
+
 frontend_read_tcp_listeners() {
-    local output line state recv send local_address peer process port owner_pid owner_exe
+    local output line state recv send local_address peer process port owner_pid owner_exe core_binary_real migration_direct_443=0
     frontend_error_code=
     frontend_error_message=
     declare -gA frontend_bound_ports=()
@@ -916,6 +972,7 @@ frontend_read_tcp_listeners() {
     frontend_running_443=0
     frontend_nginx_pid=$(jq -r '.pid' <<<"$frontend_nginx")
     frontend_nginx_binary_real=$(readlink -f "$(jq -r '.binary' <<<"$frontend_nginx")" 2>/dev/null) || frontend_nginx_binary_real=
+    core_binary_real=$(readlink -f "$is_core_bin" 2>/dev/null) || core_binary_real=
     [[ $frontend_nginx_binary_real ]] || {
         frontend_set_error nginx_listener_check_failed 'Could not identify the active Nginx binary for listener ownership checks.'
         return 1
@@ -934,14 +991,22 @@ frontend_read_tcp_listeners() {
             frontend_set_error tcp_443_owner_unknown 'TCP 443 is occupied, but ss did not report the owning process.'
             return 1
         }
-        local found_owner=0 owner_is_nginx=1
+        local found_owner=0 owner_is_nginx=1 owner_is_core=1 owner_is_managed_core=1
         while [[ $process =~ pid=([0-9]+) ]]; do
             owner_pid=${BASH_REMATCH[1]}
             found_owner=1
             owner_exe=$(readlink -f "/proc/$owner_pid/exe" 2>/dev/null) || owner_exe=
             [[ $owner_exe == "$frontend_nginx_binary_real" ]] || owner_is_nginx=0
+            [[ $core_binary_real && $owner_exe == "$core_binary_real" ]] || owner_is_core=0
+            if [[ $core_binary_real && $owner_exe == "$core_binary_real" ]] && ! frontend_managed_core_pid "$owner_pid"; then
+                owner_is_managed_core=0
+            fi
             process=${process#*"pid=$owner_pid"}
         done
+        if [[ $found_owner == 1 && $owner_is_core == 1 && $owner_is_managed_core == 1 && ${frontend_migration_active:-0} == 1 ]]; then
+            migration_direct_443=1
+            continue
+        fi
         [[ $found_owner == 1 && $owner_is_nginx == 1 ]] || {
             frontend_set_error tcp_443_port_conflict 'TCP 443 is owned by a process outside the selected Nginx instance.'
             return 1
@@ -958,7 +1023,7 @@ frontend_read_tcp_listeners() {
             [[ $configured_port == 443 ]] && configured_443=1
         done
     done
-    if [[ $configured_443 == 1 && $frontend_running_443 != 1 ]]; then
+    if [[ $configured_443 == 1 && $frontend_running_443 != 1 && $migration_direct_443 != 1 && ${frontend_migration_handoff:-0} != 1 ]]; then
         frontend_set_error nginx_listener_missing 'Nginx configuration contains a TCP 443 listener, but the selected service does not own a running TCP 443 socket.'
         return 1
     fi
@@ -1050,7 +1115,7 @@ frontend_unlock_state() {
 
 frontend_pending_change() {
     case ${frontend_phase:-idle} in
-    prepared | frontend_applied | verified | rolling_back | recovery_required)
+        prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
         frontend_set_error recovery_required "A frontend transaction is in phase $frontend_phase. Run frontend recover before changing it."
         return 1
         ;;
@@ -1272,7 +1337,7 @@ frontend_txn_write_record() {
         --argjson files "$frontend_txn_files" \
         --argjson guards "$frontend_txn_guards" \
         --argjson nginx "$frontend_nginx" \
-        '{schema_version:1,action:$action,phase:$phase,dir:$dir,files:$files,guards:$guards,nginx:$nginx}') || return 1
+        '{schema_version:1,action:$action,phase:$phase,dir:$dir,files:$files,guards:$guards,nginx:$nginx,nginx_rollback_pending:false,backend_rollback_pending:false}') || return 1
     frontend_atomic_write "$transaction_file" "$json"$'\n' 600
 }
 
@@ -1281,6 +1346,18 @@ frontend_txn_set_phase() {
     json=$(jq -c --arg phase "$phase" '.phase=$phase' "$transaction_file") || return 1
     frontend_atomic_write "$transaction_file" "$json"$'\n' 600 || return 1
     frontend_phase=$phase
+}
+
+frontend_txn_set_nginx_rollback_pending() {
+    local pending=$1 transaction_file="$is_core_dir/.frontend-state/transaction.json" json
+    json=$(jq -c --argjson pending "$pending" '.nginx_rollback_pending=$pending' "$transaction_file") || return 1
+    frontend_atomic_write "$transaction_file" "$json"$'\n' 600
+}
+
+frontend_txn_set_backend_rollback_pending() {
+    local pending=$1 transaction_file="$is_core_dir/.frontend-state/transaction.json" json
+    json=$(jq -c --argjson pending "$pending" '.backend_rollback_pending=$pending' "$transaction_file") || return 1
+    frontend_atomic_write "$transaction_file" "$json"$'\n' 600
 }
 
 frontend_record_file_state() {
@@ -1437,8 +1514,10 @@ frontend_txn_validate_manifest() {
     local -A seen_paths=()
     jq -e '
         .schema_version == 1 and
-        (.action == "enable" or .action == "disable") and
-        (.phase == "prepared" or .phase == "frontend_applied" or .phase == "verified" or .phase == "rolling_back" or .phase == "recovery_required") and
+        (.action == "enable" or .action == "disable" or .action == "bind") and
+        (.phase == "prepared" or .phase == "backend_applied" or .phase == "frontend_applied" or .phase == "verified" or .phase == "rolling_back" or .phase == "recovery_required") and
+        ((.nginx_rollback_pending == null) or (.nginx_rollback_pending | type == "boolean")) and
+        ((.backend_rollback_pending == null) or (.backend_rollback_pending | type == "boolean")) and
         (.files | type == "array" and length > 0) and
         (.guards | type == "array") and
         (.nginx | type == "object" and
@@ -1508,6 +1587,12 @@ frontend_txn_validate_manifest() {
                 return 1
             }
             ;;
+        backend_config)
+            [[ $path == "$is_config_json" || $path == "$is_conf_dir"/*.json || $path == "$is_conf_dir"/.quan-meta/*.meta.json ]] || {
+                frontend_set_error transaction_corrupt 'The frontend transaction backend target is outside node, metadata, or shared-config files.'
+                return 1
+            }
+            ;;
         *)
             frontend_set_error transaction_corrupt 'The frontend transaction contains an unknown file role.'
             return 1
@@ -1563,8 +1648,53 @@ frontend_txn_validate_manifest() {
     return 0
 }
 
+frontend_txn_restore_record_before() {
+    local record=$1 path before_exists before_sha before_file before_mode before_owner after_exists after_sha after_mode after_owner current_exists current_sha current_mode current_owner temp
+    path=$(jq -r '.path' <<<"$record")
+    before_exists=$(jq -r '.before_exists' <<<"$record")
+    before_sha=$(jq -r '.before_sha256' <<<"$record")
+    before_mode=$(jq -r '.before_mode' <<<"$record")
+    before_owner=$(jq -r '.before_owner' <<<"$record")
+    after_exists=$(jq -r '.after_exists' <<<"$record")
+    after_sha=$(jq -r '.after_sha256' <<<"$record")
+    after_mode=$(jq -r '.after_mode' <<<"$record")
+    after_owner=$(jq -r '.after_owner' <<<"$record")
+    current_exists=false
+    [[ -e $path ]] && current_exists=true
+    current_sha=
+    current_mode=
+    current_owner=
+    if [[ $current_exists == true ]]; then
+        current_sha=$(sha256sum "$path" | awk '{print $1}') || return 1
+        current_mode=$(stat -c '%a' "$path") || return 1
+        current_owner=$(stat -c '%u:%g' "$path") || return 1
+    fi
+    if [[ $current_exists == "$before_exists" && ( $before_exists == false || ( $current_sha == "$before_sha" && $current_mode == "$before_mode" && $current_owner == "$before_owner" ) ) ]]; then
+        return 0
+    fi
+    [[ $current_exists == "$after_exists" && ( $after_exists == false || ( $current_sha == "$after_sha" && $current_mode == "$after_mode" && $current_owner == "$after_owner" ) ) ]] || {
+        frontend_set_error config_drift "File changed during frontend recovery; refusing to overwrite $path"
+        return 1
+    }
+    if [[ $before_exists == true ]]; then
+        before_file=$(jq -r '.before_file' <<<"$record")
+        mkdir -p -- "$(dirname -- "$path")" || return 1
+        temp="${path}.one-singbox-recover.$$"
+        cp -p -- "$before_file" "$temp" && chmod "$before_mode" "$temp" && chown "$before_owner" "$temp" && mv -f -- "$temp" "$path" || {
+            rm -f "$temp"
+            frontend_set_error recovery_failed "Could not restore $path from its transaction backup."
+            return 1
+        }
+    else
+        rm -f -- "$path" || {
+            frontend_set_error recovery_failed "Could not remove the transaction-created file $path."
+            return 1
+        }
+    fi
+}
+
 frontend_txn_rollback() {
-    local transaction_file="$is_core_dir/.frontend-state/transaction.json" record path role before_exists before_sha before_file before_mode before_owner after_exists after_sha after_mode after_owner current_sha current_mode current_owner current_exists temp applied_config=false index
+    local transaction_file="$is_core_dir/.frontend-state/transaction.json" record path role before_exists before_sha before_mode before_owner after_exists after_sha after_mode after_owner current_sha current_mode current_owner current_exists applied_nginx=false applied_backend=false nginx_rollback_pending backend_rollback_pending nginx_config nginx_prefix index
     local -a file_records=()
     [[ -f $transaction_file && ! -L $transaction_file ]] || {
         frontend_set_error transaction_corrupt 'The frontend transaction record is unavailable for recovery.'
@@ -1572,6 +1702,8 @@ frontend_txn_rollback() {
     }
     frontend_txn_validate_manifest || return 1
     frontend_nginx=$(jq -c '.nginx' "$transaction_file") || return 1
+    nginx_rollback_pending=$(jq -r '.nginx_rollback_pending // false' "$transaction_file") || return 1
+    backend_rollback_pending=$(jq -r '.backend_rollback_pending // false' "$transaction_file") || return 1
     frontend_txn_validate_guards || {
         frontend_txn_set_phase recovery_required || :
         return 1
@@ -1616,7 +1748,10 @@ frontend_txn_rollback() {
         fi
         if [[ $current_exists == "$after_exists" && ( $after_exists == false || ( $current_sha == "$after_sha" && $current_mode == "$after_mode" && $current_owner == "$after_owner" ) ) ]]; then
             role=$(jq -r '.role' <<<"$record")
-            [[ $role == nginx_config ]] && applied_config=true
+            case $role in
+            nginx_config | project_file) applied_nginx=true ;;
+            backend_config) applied_backend=true ;;
+            esac
         elif [[ $current_exists == "$before_exists" && ( $before_exists == false || ( $current_sha == "$before_sha" && $current_mode == "$before_mode" && $current_owner == "$before_owner" ) ) ]]; then
             :
         else
@@ -1625,56 +1760,84 @@ frontend_txn_rollback() {
             return 1
         fi
     done
+    [[ $nginx_rollback_pending == true ]] && applied_nginx=true
+    [[ $backend_rollback_pending == true ]] && applied_backend=true
 
     frontend_txn_set_phase rolling_back || {
         frontend_set_error transaction_state_write_failed 'Could not persist the rolling_back transaction phase.'
         return 1
     }
-    for ((index = ${#file_records[@]} - 1; index >= 0; index--)); do
-        record=${file_records[$index]}
-        path=$(jq -r '.path' <<<"$record")
-        before_exists=$(jq -r '.before_exists' <<<"$record")
-        before_sha=$(jq -r '.before_sha256' <<<"$record")
-        after_exists=$(jq -r '.after_exists' <<<"$record")
-        after_sha=$(jq -r '.after_sha256' <<<"$record")
-        current_exists=false
-        [[ -e $path ]] && current_exists=true
-        current_sha=
-        [[ $current_exists == true ]] && current_sha=$(sha256sum "$path" | awk '{print $1}')
-        if [[ $current_exists == "$before_exists" && ( $before_exists == false || $current_sha == "$before_sha" ) ]]; then
-            continue
-        fi
-        if [[ $before_exists == true ]]; then
-            before_file=$(jq -r '.before_file' <<<"$record")
-            before_mode=$(jq -r '.before_mode' <<<"$record")
-            before_owner=$(jq -r '.before_owner' <<<"$record")
-            mkdir -p -- "$(dirname -- "$path")" || {
-                frontend_set_error recovery_failed "Could not create the parent directory for $path."
-                frontend_txn_set_phase recovery_required || :
-                return 1
-            }
-            temp="${path}.one-singbox-recover.$$"
-            cp -p -- "$before_file" "$temp" && chmod "$before_mode" "$temp" && chown "$before_owner" "$temp" && mv -f -- "$temp" "$path" || {
-                rm -f "$temp"
-                frontend_set_error recovery_failed "Could not restore $path from its transaction backup."
-                frontend_txn_set_phase recovery_required || :
-                return 1
-            }
-        else
-            rm -f -- "$path" || {
-                frontend_set_error recovery_failed "Could not remove the transaction-created file $path."
-                frontend_txn_set_phase recovery_required || :
-                return 1
-            }
-        fi
-    done
-    if [[ $applied_config == true ]]; then
-        frontend_reload_and_confirm "$frontend_nginx" || {
-            frontend_set_error recovery_failed "Files were restored, but Nginx recovery could not be verified: $frontend_error_message"
+    if [[ $applied_nginx == true ]]; then
+        frontend_txn_set_nginx_rollback_pending true || {
+            frontend_set_error transaction_state_write_failed 'Could not persist the pending Nginx rollback reload.'
             frontend_txn_set_phase recovery_required || :
             return 1
         }
     fi
+    for role in nginx_config project_file; do
+        for ((index = ${#file_records[@]} - 1; index >= 0; index--)); do
+            record=${file_records[$index]}
+            [[ $(jq -r '.role' <<<"$record") == "$role" ]] || continue
+            frontend_txn_restore_record_before "$record" || {
+                frontend_txn_set_phase recovery_required || :
+                return 1
+            }
+        done
+    done
+    if [[ $applied_nginx == true ]]; then
+        frontend_reload_and_confirm "$frontend_nginx" || {
+            frontend_set_error recovery_failed "Nginx recovery could not be verified; sing-box files were left untouched: $frontend_error_message"
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+        nginx_config=$(jq -r '.config' <<<"$frontend_nginx")
+        nginx_prefix=$(jq -r '.prefix' <<<"$frontend_nginx")
+        if ! frontend_scan_config_tree "$nginx_config" "$nginx_prefix" || ! frontend_read_tcp_listeners; then
+            frontend_set_error recovery_failed "Nginx recovery listener could not be confirmed; sing-box files were left untouched: $frontend_error_message"
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        fi
+        frontend_txn_set_nginx_rollback_pending false || {
+            frontend_set_error transaction_state_write_failed 'Nginx recovery succeeded, but its confirmation could not be persisted.'
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+    fi
+    if [[ $applied_backend == true ]]; then
+        frontend_txn_set_backend_rollback_pending true || {
+            frontend_set_error transaction_state_write_failed 'Could not persist the pending sing-box rollback restart.'
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+    fi
+    for ((index = ${#file_records[@]} - 1; index >= 0; index--)); do
+        record=${file_records[$index]}
+        [[ $(jq -r '.role' <<<"$record") == backend_config ]] || continue
+        frontend_txn_restore_record_before "$record" || {
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+    done
+    if [[ $applied_backend == true ]] && ! manage_restart_confirmed; then
+        frontend_set_error recovery_failed 'sing-box files were restored, but the original service could not be confirmed running.'
+        frontend_txn_set_phase recovery_required || :
+        return 1
+    fi
+    if [[ $applied_backend == true ]]; then
+        frontend_txn_set_backend_rollback_pending false || {
+            frontend_set_error transaction_state_write_failed 'sing-box recovery succeeded, but its confirmation could not be persisted.'
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+    fi
+    for ((index = ${#file_records[@]} - 1; index >= 0; index--)); do
+        record=${file_records[$index]}
+        [[ $(jq -r '.role' <<<"$record") == profile ]] || continue
+        frontend_txn_restore_record_before "$record" || {
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+    done
     frontend_txn_set_phase rolled_back || {
         frontend_set_error transaction_state_write_failed 'Could not persist the rolled_back transaction phase.'
         return 1
@@ -1689,13 +1852,13 @@ frontend_txn_rollback() {
 }
 
 frontend_txn_commit() {
-    local record original_code original_message index
+    local record original_code original_message status backend_changed=false nginx_changed=false
     local -a operation_records=()
     frontend_txn_write_record prepared || {
         frontend_set_error transaction_state_write_failed 'Could not persist the prepared frontend transaction.'
         return 1
     }
-    mapfile -t operation_records < <(jq -c '.[] | select(.role != "profile")' <<<"$frontend_txn_files")
+    mapfile -t operation_records < <(jq -c '.[] | select(.role == "backend_config")' <<<"$frontend_txn_files")
     for record in "${operation_records[@]}"; do
         frontend_txn_apply_record "$record" || {
             original_code=$frontend_error_code
@@ -1707,13 +1870,62 @@ frontend_txn_commit() {
             fi
             return 1
         }
+        backend_changed=true
+    done
+    if [[ $backend_changed == true ]]; then
+        if ! manage_restart_confirmed; then
+            frontend_set_error backend_restart_failed 'The candidate sing-box service did not restart and become active.'
+            original_code=$frontend_error_code
+            original_message=$frontend_error_message
+            if frontend_txn_rollback; then
+                frontend_set_error "$original_code" "$original_message"
+            else
+                frontend_set_error recovery_required "$original_message Recovery is required: $frontend_error_message"
+            fi
+            return 1
+        fi
+        frontend_migration_active=0
+        if [[ $frontend_txn_action == enable && ${#frontend_migration_refs[@]} -gt 0 ]]; then
+            frontend_migration_handoff=1
+        fi
+        frontend_read_tcp_listeners || {
+            frontend_migration_handoff=0
+            original_code=$frontend_error_code
+            original_message=$frontend_error_message
+            if frontend_txn_rollback; then
+                frontend_set_error "$original_code" "$original_message"
+            else
+                frontend_set_error recovery_required "$original_message Recovery is required: $frontend_error_message"
+            fi
+            return 1
+        }
+        frontend_migration_handoff=0
+        frontend_txn_set_phase backend_applied || {
+            frontend_set_error transaction_state_write_failed 'Could not persist the backend_applied transaction phase.'
+            frontend_txn_rollback || :
+            return 1
+        }
+    fi
+    mapfile -t operation_records < <(jq -c '.[] | select(.role == "project_file" or .role == "nginx_config")' <<<"$frontend_txn_files")
+    for record in "${operation_records[@]}"; do
+        frontend_txn_apply_record "$record" || {
+            original_code=$frontend_error_code
+            original_message=$frontend_error_message
+            if frontend_txn_rollback; then
+                frontend_set_error "$original_code" "$original_message"
+            else
+                frontend_set_error recovery_required "$original_message Recovery is required: $frontend_error_message"
+            fi
+            return 1
+        }
+        nginx_changed=true
     done
     frontend_txn_set_phase frontend_applied || {
         frontend_set_error transaction_state_write_failed 'Could not persist the frontend_applied transaction phase.'
         frontend_txn_rollback || :
         return 1
     }
-    if ! frontend_reload_and_confirm "$frontend_nginx"; then
+    if [[ $nginx_changed == true ]] && ! frontend_reload_and_confirm "$frontend_nginx"; then
         original_code=$frontend_error_code
         original_message=$frontend_error_message
         if frontend_txn_rollback; then
@@ -1722,6 +1934,18 @@ frontend_txn_commit() {
             frontend_set_error recovery_required "$original_message Recovery is required: $frontend_error_message"
         fi
         return 1
+    fi
+    if [[ $backend_changed == true && $nginx_changed == true ]]; then
+        frontend_refresh_detection || {
+            original_code=$frontend_error_code
+            original_message=$frontend_error_message
+            if frontend_txn_rollback; then
+                frontend_set_error "$original_code" "$original_message"
+            else
+                frontend_set_error recovery_required "$original_message Recovery is required: $frontend_error_message"
+            fi
+            return 1
+        }
     fi
     frontend_txn_set_phase verified || {
         frontend_set_error transaction_state_write_failed 'Could not persist the verified transaction phase.'
@@ -1778,6 +2002,559 @@ frontend_choose_map_variable() {
     return 1
 }
 
+frontend_validate_sni() {
+    local sni=$1
+    [[ ${#sni} -le 253 && $sni =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || {
+        frontend_set_error invalid_sni 'Reality SNI must be an exact ASCII domain name with valid labels.'
+        return 1
+    }
+}
+
+frontend_validate_reality_node() {
+    local node_file=$1 public_port=$2 sni
+    jq -e --argjson port "$public_port" '
+        type == "object" and
+        (.inbounds | type == "array" and length == 1) and
+        .inbounds[0].type == "vless" and
+        .inbounds[0].listen_port == $port and
+        (.inbounds[0] | has("transport") | not) and
+        .inbounds[0].tls.enabled == true and
+        .inbounds[0].tls.reality.enabled == true and
+        .inbounds[0].tls.reality.handshake.server_port == 443 and
+        (.inbounds[0].tls.server_name | type == "string") and
+        (.inbounds[0].tls.reality.handshake.server == .inbounds[0].tls.server_name)
+    ' "$node_file" >/dev/null 2>&1 || {
+        frontend_set_error node_unsupported "Only a single ordinary VLESS-REALITY inbound without transport can be bound: ${node_file##*/}"
+        return 1
+    }
+    sni=$(jq -r '.inbounds[0].tls.server_name' "$node_file") || return 1
+    frontend_validate_sni "$sni"
+}
+
+frontend_assert_user_map_sni_free() {
+    local candidate=$1 target map_file rule_file rule_line rule_key rule_kind index candidate_lower=${1,,}
+    target=$(jq -r '.map_variable // empty' <<<"$frontend_nginx")
+    [[ $target ]] || return 0
+    map_file=
+    [[ $frontend_profile ]] && map_file=$(jq -r '.ownership.map_file // empty' <<<"$frontend_profile")
+    for index in "${!frontend_scan_map_rule_targets[@]}"; do
+        [[ ${frontend_scan_map_rule_targets[$index]} == "$target" ]] || continue
+        rule_file=${frontend_scan_map_rule_files[$index]}
+        [[ $map_file && $rule_file == "$map_file" ]] && continue
+        rule_line=${frontend_scan_map_rule_lines[$index]}
+        rule_key=${frontend_scan_map_rule_keys[$index]}
+        rule_kind=${frontend_scan_map_rule_kinds[$index]}
+        case $rule_kind in
+        exact)
+            [[ $rule_key == default ]] && continue
+            [[ ${rule_key,,} != "$candidate_lower" ]] || {
+                frontend_set_error duplicate_sni "Reality SNI conflicts with a user Nginx map entry at $rule_file:$rule_line: $candidate"
+                return 1
+            }
+            ;;
+        hostnames | wildcard | regex | complex)
+            frontend_set_error nginx_map_overlap "Cannot prove that Reality SNI $candidate does not overlap the user Nginx map rule at $rule_file:$rule_line: $rule_key"
+            return 1
+            ;;
+        esac
+    done
+}
+
+frontend_assert_unique_sni() {
+    local candidate=$1 skip_ref=${2:-} binding node_ref node_file existing_sni
+    local candidate_lower=${candidate,,}
+    frontend_validate_sni "$candidate" || return 1
+    while IFS= read -r binding; do
+        [[ $binding ]] || continue
+        node_ref=$(jq -r '.node_ref' <<<"$binding")
+        [[ $node_ref == "$skip_ref" ]] && continue
+        node_file="$is_conf_dir/$node_ref"
+        [[ -f $node_file && ! -L $node_file ]] || {
+            frontend_set_error binding_drift "Bound node is missing or unsafe: $node_ref"
+            return 1
+        }
+        frontend_validate_reality_node "$node_file" "$(jq -r '.inbounds[0].listen_port' "$node_file")" || return 1
+        existing_sni=$(jq -r '.inbounds[0].tls.server_name' "$node_file")
+        [[ ${existing_sni,,} != "$candidate_lower" ]] || {
+            frontend_set_error duplicate_sni "Reality SNI is already bound by $node_ref: $candidate"
+            return 1
+        }
+    done < <(jq -c '.bindings[]?' <<<"$frontend_profile")
+    frontend_assert_user_map_sni_free "$candidate"
+}
+
+frontend_validate_migration_refs() {
+    local node_ref node_file port binding ref file
+    local -a all_443=()
+    local -A requested=()
+    frontend_migration_refs=()
+    frontend_assert_no_inline_443_node || return 1
+    for node_ref in "$@"; do
+        [[ $node_ref =~ ^[A-Za-z0-9_.-]+\.json$ ]] || {
+            frontend_set_error node_ref_invalid "Invalid node reference: $node_ref"
+            return 1
+        }
+        [[ ! ${requested[$node_ref]+yes} ]] || {
+            frontend_set_error node_ref_duplicate "Node reference was selected more than once: $node_ref"
+            return 1
+        }
+        requested[$node_ref]=1
+        node_file="$is_conf_dir/$node_ref"
+        [[ -f $node_file && ! -L $node_file ]] || {
+            frontend_set_error node_ref_missing "Node reference does not name a regular node file: $node_ref"
+            return 1
+        }
+        frontend_validate_reality_node "$node_file" 443 || return 1
+        frontend_migration_refs+=("$node_ref")
+    done
+
+    shopt -s nullglob
+    for file in "$is_conf_dir"/*.json; do
+        [[ -f $file && ! -L $file ]] || continue
+        [[ ${file##*/} =~ ^dynamic-port-.*-link$ || ${file##*/} == relay-*.json ]] && continue
+        jq -e 'type == "object" and (.inbounds // [] | type == "array")' "$file" >/dev/null 2>&1 || {
+            frontend_set_error singbox_config_unreadable "Cannot safely inspect node configuration $file"
+            shopt -u nullglob
+            return 1
+        }
+        if jq -e 'any(.inbounds[]?; .listen_port == 443)' "$file" >/dev/null 2>&1; then
+            frontend_validate_reality_node "$file" 443 || {
+                shopt -u nullglob
+                return 1
+            }
+            all_443+=("${file##*/}")
+        fi
+    done
+    shopt -u nullglob
+
+    if ((${#all_443[@]} == 0 && ${#frontend_migration_refs[@]} > 0)); then
+        frontend_set_error node_not_on_public_443 'Selected nodes are not configured on public port 443.'
+        return 1
+    fi
+    for node_ref in "${all_443[@]}"; do
+        [[ ${requested[$node_ref]+yes} ]] || {
+            frontend_set_error unselected_443_nodes "Select every existing port-443 node before enabling the frontend: $node_ref"
+            return 1
+        }
+    done
+    for node_ref in "${frontend_migration_refs[@]}"; do
+        [[ ${requested[$node_ref]+yes} ]] || {
+            frontend_set_error node_ref_invalid "Could not resolve selected node reference: $node_ref"
+            return 1
+        }
+    done
+
+    frontend_migration_active=0
+    ((${#frontend_migration_refs[@]} == 0)) || frontend_migration_active=1
+    return 0
+}
+
+frontend_choose_backend_port() {
+    local port file
+    local -A used=()
+    for port in "${!frontend_bound_ports[@]}" "${!frontend_configured_ports[@]}"; do
+        [[ $port =~ ^[0-9]+$ ]] && used[$port]=1
+    done
+    for port in "${!frontend_reserved_backend_ports[@]}"; do
+        [[ $port =~ ^[0-9]+$ ]] && used[$port]=1
+    done
+    [[ ${frontend_aux_port:-} =~ ^[0-9]+$ ]] && used[$frontend_aux_port]=1
+    if [[ $frontend_profile ]]; then
+        port=$(jq -r '.ownership.reject_port // empty' <<<"$frontend_profile")
+        [[ $port =~ ^[0-9]+$ ]] && used[$port]=1
+        while IFS= read -r port; do
+            [[ $port =~ ^[0-9]+$ ]] && used[$port]=1
+        done < <(jq -r '.bindings[].backend_port' <<<"$frontend_profile")
+    fi
+    shopt -s nullglob
+    for file in "$is_conf_dir"/*.json; do
+        [[ -f $file && ! -L $file ]] || continue
+        while IFS= read -r port; do
+            [[ $port =~ ^[0-9]+$ ]] && used[$port]=1
+        done < <(jq -r '.inbounds[]?.listen_port // empty' "$file" 2>/dev/null)
+    done
+    shopt -u nullglob
+    for ((port = 49152; port <= 65535; port++)); do
+        [[ ${used[$port]+yes} ]] || {
+            frontend_backend_port=$port
+            return 0
+        }
+    done
+    frontend_set_error backend_port_unavailable 'No free loopback backend port is available.'
+    return 1
+}
+
+frontend_render_reality_map() {
+    local bindings=$1 node_dir=$2 destination=$3 binding node_ref node_file sni port lower
+    local -A seen=()
+    : >"$destination" || return 1
+    while IFS= read -r binding; do
+        [[ $binding ]] || continue
+        node_ref=$(jq -r '.node_ref' <<<"$binding")
+        node_file="$node_dir/$node_ref"
+        [[ -f $node_file && ! -L $node_file ]] || {
+            frontend_set_error binding_drift "Bound node is missing or unsafe: $node_ref"
+            return 1
+        }
+        jq -e --argjson port "$(jq -r '.backend_port' <<<"$binding")" '
+            .inbounds[0].type == "vless" and
+            .inbounds[0].listen == "127.0.0.1" and
+            .inbounds[0].listen_port == $port and
+            .inbounds[0].tls.enabled == true and
+            .inbounds[0].tls.reality.enabled == true and
+            (.inbounds[0] | has("transport") | not)
+        ' "$node_file" >/dev/null 2>&1 || {
+            frontend_set_error binding_drift "Bound node does not match its saved loopback backend: $node_ref"
+            return 1
+        }
+        sni=$(jq -r '.inbounds[0].tls.server_name' "$node_file") || return 1
+        frontend_validate_sni "$sni" || return 1
+        lower=${sni,,}
+        [[ ! ${seen[$lower]+yes} ]] || {
+            frontend_set_error duplicate_sni "Reality SNI is already used by another binding: $sni"
+            return 1
+        }
+        seen[$lower]=1
+        port=$(jq -r '.backend_port' <<<"$binding")
+        printf '%s 127.0.0.1:%s;\n' "$sni" "$port" >>"$destination" || return 1
+    done < <(jq -c '.[]' <<<"$bindings")
+}
+
+frontend_prepare_binding_bundle() {
+    local candidate_json=${1:-} node_name=${2:-} node_ref node_file backend port sni meta_path source_config check_output file tag_conflict
+    local candidate_node_json candidate_meta_json
+    frontend_candidate_nodes="$frontend_txn_dir/nodes"
+    frontend_candidate_config="$frontend_txn_dir/sing-box-config.after"
+    frontend_candidate_map="$frontend_txn_dir/candidate-reality-map.conf"
+    frontend_candidate_node_refs=()
+    frontend_candidate_meta_refs=()
+    declare -gA frontend_reserved_backend_ports
+    frontend_reserved_backend_ports=()
+    mkdir -p "$frontend_candidate_nodes" || return 1
+    cp -a "$is_conf_dir/." "$frontend_candidate_nodes/" || {
+        frontend_set_error node_candidate_failed 'Could not stage the complete candidate node directory.'
+        return 1
+    }
+    frontend_new_bindings='[]'
+    if [[ $frontend_profile ]]; then
+        frontend_new_bindings=$(jq -c '.bindings' <<<"$frontend_profile") || return 1
+    fi
+
+    for node_ref in "${frontend_migration_refs[@]}"; do
+        node_file="$is_conf_dir/$node_ref"
+        sni=$(jq -r '.inbounds[0].tls.server_name' "$node_file") || return 1
+        frontend_assert_user_map_sni_free "$sni" || return 1
+        frontend_choose_backend_port || return 1
+        backend=$frontend_backend_port
+        frontend_reserved_backend_ports[$backend]=1
+        candidate_node_json=$(jq -c --argjson port "$backend" \
+            '.inbounds[0].listen="127.0.0.1" | .inbounds[0].listen_port=$port' \
+            "$node_file") || {
+            frontend_set_error node_candidate_failed "Could not build the migrated node candidate: $node_ref"
+            return 1
+        }
+        printf '%s\n' "$candidate_node_json" >"$frontend_candidate_nodes/$node_ref" || return 1
+        frontend_candidate_node_refs+=("$node_ref")
+        meta_path="$(meta_file "$node_ref")"
+        [[ -f $meta_path ]] && frontend_candidate_meta_refs+=("$node_ref")
+        frontend_new_bindings=$(jq -cn --argjson bindings "$frontend_new_bindings" --arg node_ref "$node_ref" --argjson port "$backend" \
+            '$bindings + [{node_ref:$node_ref,public_port:443,backend_host:"127.0.0.1",backend_port:$port}]') || return 1
+    done
+
+    if [[ $candidate_json ]]; then
+        jq -e '
+            type == "object" and
+            (.inbounds | type == "array" and length == 1) and
+            .inbounds[0].type == "vless" and
+            .inbounds[0].listen_port == 443 and
+            (.inbounds[0] | has("transport") | not) and
+            .inbounds[0].tls.enabled == true and
+            .inbounds[0].tls.reality.enabled == true and
+            .inbounds[0].tls.reality.handshake.server_port == 443 and
+            (.inbounds[0].tls.server_name | type == "string") and
+            (.inbounds[0].tls.reality.handshake.server == .inbounds[0].tls.server_name)
+        ' <<<"$candidate_json" >/dev/null 2>&1 || {
+            frontend_set_error node_unsupported 'Only a single ordinary VLESS-REALITY node without transport can use the public 443 frontend.'
+            return 1
+        }
+        sni=$(jq -r '.inbounds[0].tls.server_name // empty' <<<"$candidate_json") || return 1
+        frontend_assert_unique_sni "$sni" || return 1
+        while :; do
+            frontend_choose_backend_port || return 1
+            backend=$frontend_backend_port
+            node_ref="vless-reality-front-$backend.json"
+            meta_path="$(meta_file "$node_ref")"
+            tag_conflict=0
+            for file in "$frontend_candidate_nodes"/*.json; do
+                [[ -f $file && ! -L $file ]] || continue
+                if jq -e --arg tag "$node_ref" 'any(.inbounds[]?; .tag == $tag)' "$file" >/dev/null 2>&1; then
+                    tag_conflict=1
+                    break
+                fi
+            done
+            if [[ -e $is_conf_dir/$node_ref || -L $is_conf_dir/$node_ref || -e $meta_path || -L $meta_path || $tag_conflict == 1 ]]; then
+                frontend_reserved_backend_ports[$backend]=1
+                continue
+            fi
+            break
+        done
+        frontend_reserved_backend_ports[$backend]=1
+        candidate_node_json=$(jq -c --arg tag "$node_ref" --argjson port "$backend" \
+            '.inbounds[0].tag=$tag | .inbounds[0].listen="127.0.0.1" | .inbounds[0].listen_port=$port' \
+            <<<"$candidate_json") || {
+            frontend_set_error node_candidate_failed "Could not build a loopback candidate for $node_ref"
+            return 1
+        }
+        printf '%s\n' "$candidate_node_json" >"$frontend_candidate_nodes/$node_ref" || return 1
+        frontend_candidate_node_refs+=("$node_ref")
+        if [[ $node_name ]]; then
+            candidate_meta_json=$(jq -cn --arg name "$node_name" '{node_name:$name}') || return 1
+            mkdir -p "$frontend_candidate_nodes/.quan-meta" || return 1
+            printf '%s\n' "$candidate_meta_json" >"$frontend_candidate_nodes/.quan-meta/$node_ref.meta.json" || return 1
+            frontend_candidate_meta_refs+=("$node_ref")
+        fi
+        frontend_new_bindings=$(jq -cn --argjson bindings "$frontend_new_bindings" --arg node_ref "$node_ref" --argjson port "$backend" \
+            '$bindings + [{node_ref:$node_ref,public_port:443,backend_host:"127.0.0.1",backend_port:$port}]') || return 1
+        frontend_created_node_ref=$node_ref
+    fi
+
+    source_config="$frontend_txn_dir/config.source"
+    if [[ -f $is_config_json ]]; then
+        cp -p "$is_config_json" "$source_config" || return 1
+    else
+        default_runtime_config >"$source_config" || {
+            frontend_set_error node_candidate_failed 'Could not construct the shared sing-box configuration.'
+            return 1
+        }
+    fi
+    if ! render_runtime_node_outbound_modes "$source_config" "$frontend_candidate_config" '' '' "$frontend_candidate_nodes"; then
+        frontend_set_error node_candidate_failed "Could not render shared outbound configuration: ${runtime_sync_error:-unknown error}"
+        return 1
+    fi
+    check_output=$("$is_core_bin" check -c "$frontend_candidate_config" -C "$frontend_candidate_nodes" 2>&1) || {
+        frontend_set_error singbox_candidate_invalid 'The complete candidate sing-box configuration failed validation.'
+        return 1
+    }
+    frontend_render_reality_map "$frontend_new_bindings" "$frontend_candidate_nodes" "$frontend_candidate_map" || return 1
+}
+
+frontend_check_binding_map_candidate() {
+    local config_file flat_config
+    config_file=$(jq -r '.config' <<<"$frontend_nginx")
+    flat_config="$frontend_txn_dir/candidate-map-tree.conf"
+    : >"$flat_config" || return 1
+    frontend_flatten_override_file=$(jq -r '.ownership.map_file' <<<"$frontend_profile")
+    frontend_flatten_override_content=$frontend_candidate_map
+    frontend_flatten_file "$config_file" "$flat_config"
+    local status=$?
+    frontend_flatten_override_file=
+    frontend_flatten_override_content=
+    ((status == 0)) || return 1
+    frontend_candidate_check "$flat_config"
+}
+
+frontend_assert_profile_map_owned() {
+    local map_file expected actual
+    map_file=$(jq -r '.ownership.map_file // empty' <<<"$frontend_profile")
+    expected=$(jq -r '.ownership.map_sha256 // empty' <<<"$frontend_profile")
+    [[ $map_file == /* && $expected =~ ^[0-9a-f]{64}$ && -f $map_file && ! -L $map_file ]] || {
+        frontend_set_error owned_file_drift 'The frontend Reality map is missing or has invalid ownership metadata.'
+        return 1
+    }
+    actual=$(sha256sum "$map_file" | awk '{print $1}') || return 1
+    [[ $actual == "$expected" ]] || {
+        frontend_set_error owned_file_drift "The managed Reality map changed outside one-singbox: $map_file"
+        return 1
+    }
+    jq -e --arg path "$map_file" --arg sha "$expected" '.ownership.files | any(.path == $path and .sha256 == $sha)' <<<"$frontend_profile" >/dev/null || {
+        frontend_set_error invalid_profile 'The frontend profile does not own its saved Reality map.'
+        return 1
+    }
+}
+
+frontend_assert_no_unmanaged_443_node() {
+    local file
+    frontend_assert_no_inline_443_node || return 1
+    shopt -s nullglob
+    for file in "$is_conf_dir"/*.json; do
+        [[ -f $file && ! -L $file ]] || continue
+        [[ ${file##*/} =~ ^dynamic-port-.*-link$ || ${file##*/} == relay-*.json ]] && continue
+        jq -e 'type == "object" and (.inbounds // [] | type == "array")' "$file" >/dev/null 2>&1 || {
+            frontend_set_error singbox_config_unreadable "Cannot safely inspect node configuration $file"
+            shopt -u nullglob
+            return 1
+        }
+        if jq -e 'any(.inbounds[]?; .listen_port == 443)' "$file" >/dev/null 2>&1; then
+            frontend_set_error tcp_443_port_conflict "An unmanaged sing-box node still uses port 443: ${file##*/}"
+            shopt -u nullglob
+            return 1
+        fi
+    done
+    shopt -u nullglob
+}
+
+frontend_assert_no_inline_443_node() {
+    [[ -f $is_config_json ]] || return 0
+    jq -e 'type == "object" and ((.inbounds // []) | type == "array")' "$is_config_json" >/dev/null 2>&1 || {
+        frontend_set_error singbox_config_unreadable "Cannot safely inspect shared configuration $is_config_json"
+        return 1
+    }
+    jq -e 'any(.inbounds[]?; .listen_port == 443)' "$is_config_json" >/dev/null 2>&1 && {
+        frontend_set_error inline_443_node "The shared sing-box configuration contains a port-443 inbound that cannot be selected by node reference: $is_config_json"
+        return 1
+    }
+    return 0
+}
+
+frontend_public_443_ready() {
+    frontend_load_profile || {
+        frontend_set_error "$frontend_profile_error_code" "$frontend_profile_error_message"
+        return 1
+    }
+    [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null || {
+        frontend_set_error frontend_disabled 'Port 443 is available for Reality only while the Nginx frontend mode is enabled.'
+        return 1
+    }
+    frontend_read_phase || {
+        frontend_set_error "$frontend_phase_error_code" "$frontend_phase_error_message"
+        return 1
+    }
+    frontend_pending_change || return 1
+    frontend_refresh_detection || return 1
+    frontend_assert_profile_map_owned || return 1
+    frontend_assert_no_unmanaged_443_node
+}
+
+frontend_add_public_reality_node() {
+    local node_json=$1 node_name=${2:-} status= map_file map_sha profile_after next_revision metadata_ref
+    frontend_lock_state || return 1
+    frontend_load_profile || {
+        frontend_set_error "$frontend_profile_error_code" "$frontend_profile_error_message"
+        status=1
+    }
+    if [[ ! $status ]]; then
+        [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null || {
+            frontend_set_error frontend_disabled 'The Nginx Reality frontend is not enabled.'
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        frontend_read_phase || {
+            frontend_set_error "$frontend_phase_error_code" "$frontend_phase_error_message"
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        frontend_pending_change || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_refresh_detection || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_assert_profile_map_owned || status=1
+        frontend_assert_no_unmanaged_443_node || status=1
+    fi
+    if [[ ! $status ]]; then
+        jq -e '
+            type == "object" and
+            (.inbounds | type == "array" and length == 1) and
+            .inbounds[0].type == "vless" and
+            .inbounds[0].listen_port == 443 and
+            (.inbounds[0] | has("transport") | not) and
+            .inbounds[0].tls.enabled == true and
+            .inbounds[0].tls.reality.enabled == true and
+            .inbounds[0].tls.reality.handshake.server_port == 443 and
+            (.inbounds[0].tls.server_name | type == "string") and
+            (.inbounds[0].tls.reality.handshake.server == .inbounds[0].tls.server_name)
+        ' <<<"$node_json" >/dev/null 2>&1 || {
+            frontend_set_error node_unsupported 'Only a single ordinary VLESS-REALITY node without transport can use the public 443 frontend.'
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        frontend_assert_unique_sni "$(jq -r '.inbounds[0].tls.server_name' <<<"$node_json")" || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_original_files=("${frontend_scan_source_files[@]}")
+        frontend_original_hashes=("${frontend_scan_source_hashes[@]}")
+        frontend_migration_refs=()
+        frontend_txn_dir="$is_core_dir/.frontend-state/txn.$$.$RANDOM"
+        mkdir -m 700 "$frontend_txn_dir" || {
+            frontend_set_error state_unwritable 'Could not create a private frontend transaction directory.'
+            status=1
+        }
+    fi
+    if [[ ! $status ]]; then
+        frontend_prepare_binding_bundle "$node_json" "$node_name" || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_check_binding_map_candidate || status=1
+    fi
+    if [[ ! $status ]]; then
+        map_file=$(jq -r '.ownership.map_file' <<<"$frontend_profile")
+        map_sha=$(sha256sum "$frontend_candidate_map" | awk '{print $1}') || status=1
+        next_revision=$(( $(jq -r '.revision' <<<"$frontend_profile") + 1 ))
+        profile_after="$frontend_txn_dir/profile.after"
+        jq -c --argjson revision "$next_revision" --argjson bindings "$frontend_new_bindings" --arg path "$map_file" --arg sha "$map_sha" '
+            .revision=$revision
+            | .bindings=$bindings
+            | .ownership.map_sha256=$sha
+            | .ownership.files |= map(if .path == $path then .sha256=$sha else . end)
+        ' <<<"$frontend_profile" >"$profile_after" || status=1
+        chmod 600 "$profile_after" 2>/dev/null || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_txn_action=bind
+        frontend_txn_files='[]'
+        frontend_txn_paths=()
+        frontend_guard_paths=()
+        frontend_changed_targets=("$map_file")
+        frontend_make_guards "$map_file" || status=1
+        frontend_verify_original_sources || status=1
+    fi
+    if [[ ! $status ]]; then
+        local node_ref
+        for node_ref in "${frontend_candidate_node_refs[@]}"; do
+            frontend_txn_add_change "$is_conf_dir/$node_ref" "$frontend_candidate_nodes/$node_ref" backend_config 644 || { status=1; break; }
+        done
+    fi
+    if [[ ! $status ]]; then
+        for metadata_ref in "${frontend_candidate_meta_refs[@]}"; do
+            frontend_txn_add_change "$(meta_file "$metadata_ref")" "$frontend_candidate_nodes/.quan-meta/$metadata_ref.meta.json" backend_config 600 || { status=1; break; }
+        done
+    fi
+    if [[ ! $status ]]; then
+        frontend_txn_add_change "$is_config_json" "$frontend_candidate_config" backend_config 600 || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_txn_add_change "$map_file" "$frontend_candidate_map" project_file 644 || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_txn_add_change "$is_core_dir/frontend.json" "$profile_after" profile 600 || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_verify_original_sources || status=1
+    fi
+    if [[ ! $status ]]; then
+        frontend_txn_commit || status=1
+    fi
+    if [[ $status ]]; then
+        local original_code=$frontend_error_code original_message=$frontend_error_message
+        frontend_read_phase || :
+        if [[ $frontend_txn_dir && $frontend_phase != recovery_required ]]; then
+            rm -rf -- "${frontend_txn_dir:-}"
+        fi
+        frontend_error_code=$original_code
+        frontend_error_message=$original_message
+    else
+        is_config_name=$frontend_created_node_ref
+        is_config_file=$frontend_created_node_ref
+        printf '节点已加入 443 SNI 前置：%s。\n' "$frontend_created_node_ref"
+    fi
+    frontend_unlock_state
+    return "${status:-0}"
+}
+
 frontend_candidate_check() {
     local candidate=$1 binary prefix output
     binary=$(jq -r '.binary' <<<"$frontend_nginx")
@@ -1832,15 +2609,20 @@ frontend_verify_original_sources() {
 
 frontend_plan_enable() {
     local kind=$1 anchor=$2 anchor_line=$3 final_map=$4 candidate_map=$5 final_stream=$6 candidate_stream=$7 aux_port=$8 map_variable=$9
-    local config_file prefix flat_config candidate_config candidate_block final_block candidate_stream_text final_stream_text final_hash next_revision listen_json expected_entry_file return_required ownership files_json
+    local config_file prefix flat_config candidate_config nginx_anchor_candidate candidate_block final_block candidate_stream_text final_stream_text final_hash next_revision listen_json expected_entry_file return_required ownership files_json
     local -a saved_entry_addresses=()
     config_file=$(jq -r '.config' <<<"$frontend_nginx")
     prefix=$(jq -r '.prefix' <<<"$frontend_nginx")
     flat_config="$frontend_txn_dir/candidate-tree.conf"
     candidate_config="$frontend_txn_dir/candidate.conf"
+    nginx_anchor_candidate="$frontend_txn_dir/nginx-anchor.after"
     candidate_map="$frontend_txn_dir/candidate-reality-map.conf"
     candidate_stream="$frontend_txn_dir/final-stream.conf"
-    printf '# Empty Reality mappings are managed by one-singbox.\n' >"$candidate_map" || return 1
+    if ((${#frontend_migration_refs[@]} == 0)); then
+        printf '# Empty Reality mappings are managed by one-singbox.\n' >"$candidate_map" || return 1
+    else
+        candidate_map=$frontend_candidate_map
+    fi
     frontend_flatten_file "$config_file" "$flat_config" || return 1
     frontend_scan_config_tree "$flat_config" "$prefix" || return 1
 
@@ -1900,13 +2682,17 @@ frontend_plan_enable() {
 
     case $kind in
     new_stream)
-        frontend_write_append "$anchor" "$final_block" "$frontend_txn_dir/config.after" || return 1
+        frontend_write_append "$anchor" "$final_block" "$nginx_anchor_candidate" || return 1
         ;;
     empty_stream | existing_map)
-        frontend_write_insert_before_line "$anchor" "$anchor_line" "$final_block" "$frontend_txn_dir/config.after" || return 1
+        frontend_write_insert_before_line "$anchor" "$anchor_line" "$final_block" "$nginx_anchor_candidate" || return 1
         ;;
     esac
-    printf '# Empty Reality mappings are managed by one-singbox.\n' >"$frontend_txn_dir/map.after" || return 1
+    if ((${#frontend_migration_refs[@]} == 0)); then
+        printf '# Empty Reality mappings are managed by one-singbox.\n' >"$frontend_txn_dir/map.after" || return 1
+    else
+        cp "$frontend_candidate_map" "$frontend_txn_dir/map.after" || return 1
+    fi
     final_hash=$(sha256sum "$frontend_txn_dir/map.after" | awk '{print $1}') || return 1
     local block_hash=$(printf '%s\n' "$final_block" | sha256sum | awk '{print $1}')
     local stream_hash=
@@ -1962,7 +2748,8 @@ frontend_plan_enable() {
         --argjson listen_addresses "$listen_json" \
         --argjson nginx "$final_nginx" \
         --argjson ownership "$ownership" \
-        '{schema_version:1,enabled:true,revision:$revision,engine:"nginx",listen_addresses:$listen_addresses,bindings:[],nginx:$nginx,ownership:$ownership}' >"$frontend_txn_dir/profile.after" || return 1
+        --argjson bindings "${frontend_new_bindings:-[]}" \
+        '{schema_version:1,enabled:true,revision:$revision,engine:"nginx",listen_addresses:$listen_addresses,bindings:$bindings,nginx:$nginx,ownership:$ownership}' >"$frontend_txn_dir/profile.after" || return 1
     chmod 600 "$frontend_txn_dir/profile.after" || return 1
 
     frontend_txn_action=enable
@@ -1972,11 +2759,21 @@ frontend_plan_enable() {
     frontend_changed_targets=("$anchor")
     frontend_make_guards "$anchor" || return 1
     frontend_verify_original_sources || return 1
+    if ((${#frontend_migration_refs[@]} > 0)); then
+        local node_ref metadata_ref
+        for node_ref in "${frontend_candidate_node_refs[@]}"; do
+            frontend_txn_add_change "$is_conf_dir/$node_ref" "$frontend_candidate_nodes/$node_ref" backend_config 644 || return 1
+        done
+        for metadata_ref in "${frontend_candidate_meta_refs[@]}"; do
+            frontend_txn_add_change "$(meta_file "$metadata_ref")" "$frontend_candidate_nodes/.quan-meta/$metadata_ref.meta.json" backend_config 600 || return 1
+        done
+        frontend_txn_add_change "$is_config_json" "$frontend_candidate_config" backend_config 600 || return 1
+    fi
     frontend_txn_add_change "$final_map" "$frontend_txn_dir/map.after" project_file 644 || return 1
     if [[ $kind == new_stream ]]; then
         frontend_txn_add_change "$final_stream" "$candidate_stream" project_file 644 || return 1
     fi
-    frontend_txn_add_change "$anchor" "$frontend_txn_dir/config.after" nginx_config 644 || return 1
+    frontend_txn_add_change "$anchor" "$nginx_anchor_candidate" nginx_config 644 || return 1
     frontend_txn_add_change "$is_core_dir/frontend.json" "$frontend_txn_dir/profile.after" profile 600 || return 1
     frontend_verify_original_sources || return 1
     frontend_txn_commit
@@ -1994,6 +2791,10 @@ frontend_enable_locked() {
     }
     frontend_pending_change || return 1
     if [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null; then
+        (($# == 0)) || {
+            frontend_set_error already_enabled 'The frontend is already enabled; node references are accepted only during first migration.'
+            return 1
+        }
         frontend_refresh_detection || return 1
         printf '443 SNI 前置已启用，revision %s。\n' "$(jq -r '.revision' <<<"$frontend_profile")"
         return 0
@@ -2002,7 +2803,13 @@ frontend_enable_locked() {
         frontend_set_error profile_bindings_present 'A disabled profile still contains bindings; refusing to enable an inconsistent state.'
         return 1
     fi
-    frontend_refresh_detection || return 1
+    frontend_validate_migration_refs "$@" || return 1
+    frontend_refresh_detection || {
+        local detect_status=$?
+        frontend_migration_active=0
+        return "$detect_status"
+    }
+    frontend_migration_active=0
     frontend_original_files=("${frontend_scan_source_files[@]}")
     frontend_original_hashes=("${frontend_scan_source_hashes[@]}")
     local kind=$frontend_entry_type anchor=$frontend_entry_file anchor_line=$frontend_entry_line project_dir final_map final_stream candidate_map candidate_stream aux_port=
@@ -2042,12 +2849,26 @@ frontend_enable_locked() {
         frontend_set_error state_unwritable 'Could not create a private frontend transaction directory.'
         return 1
     }
+    frontend_new_bindings='[]'
+    if ((${#frontend_migration_refs[@]} > 0)); then
+        frontend_prepare_binding_bundle || {
+            status=$?
+            frontend_migration_active=0
+            rm -rf -- "$frontend_txn_dir"
+            return "$status"
+        }
+    fi
     candidate_map="$frontend_txn_dir/candidate-reality-map.conf"
     candidate_stream="$frontend_txn_dir/final-stream.conf"
     frontend_plan_enable "$kind" "$anchor" "$anchor_line" "$final_map" "" "$final_stream" "" "$aux_port" "$frontend_map_variable"
     status=$?
+    frontend_migration_active=0
     if ((status != 0)); then
-        rm -rf -- "$frontend_txn_dir"
+        local original_code=$frontend_error_code original_message=$frontend_error_message
+        frontend_read_phase || :
+        [[ $frontend_phase == recovery_required ]] || rm -rf -- "$frontend_txn_dir"
+        frontend_error_code=$original_code
+        frontend_error_message=$original_message
         return "$status"
     fi
     printf '443 SNI 前置已启用，revision %s。\n' "$(jq -r '.revision' "$is_core_dir/frontend.json")"
@@ -2059,7 +2880,7 @@ frontend_enable() {
         printf '%s\n' "$frontend_error_message" >&2
         return 1
     }
-    frontend_enable_locked
+    frontend_enable_locked "$@"
     status=$?
     frontend_unlock_state
     if ((status != 0)); then
@@ -2256,7 +3077,7 @@ frontend_check() {
         else
             phase=$frontend_phase
             case $phase in
-            prepared | frontend_applied | verified | rolling_back | recovery_required)
+            prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
                 errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("An interrupted frontend transaction is in phase " + $phase + ". Run frontend recover before continuing.")}]')
                 ;;
             esac
@@ -2303,11 +3124,7 @@ frontend_main() {
         return $?
         ;;
     enable)
-        if [[ $# -gt 0 ]]; then
-            printf '暂不支持迁移节点；此操作只会在空绑定模式中启用。\n' >&2
-            return 2
-        fi
-        frontend_enable
+        frontend_enable "$@"
         return $?
         ;;
     disable)
@@ -2327,23 +3144,45 @@ frontend_main() {
         return $?
         ;;
     *)
-        printf '用法: %s frontend [status [--json] | check [--json] | enable | disable | recover]\n' "$is_core_name" >&2
+        printf '用法: %s frontend [status [--json] | check [--json] | enable [node-ref ...] | disable | recover]\n' "$is_core_name" >&2
         return 2
         ;;
     esac
+}
+
+frontend_menu_enable() {
+    local file selected
+    local -a nodes=() refs=()
+    shopt -s nullglob
+    for file in "$is_conf_dir"/*.json; do
+        [[ -f $file && ! -L $file ]] || continue
+        jq -e 'any(.inbounds[]?; .listen_port == 443)' "$file" >/dev/null 2>&1 && nodes+=("${file##*/}")
+    done
+    shopt -u nullglob
+    if ((${#nodes[@]} == 0)); then
+        frontend_main enable
+        return $?
+    fi
+    printf '现有公网 443 节点：%s\n' "${nodes[*]}"
+    read -r -p '输入要纳管的节点文件名（可多选，以空格分隔）: ' -a refs || return 1
+    ((${#refs[@]} > 0)) || {
+        printf '请明确选择要迁移的节点；取消可返回菜单。\n' >&2
+        return 1
+    }
+    frontend_main enable "${refs[@]}"
 }
 
 frontend_menu() {
     local action
     while :; do
         printf '\n443 SNI 前置\n'
-        printf '1) 状态\n2) 检查\n3) 启用空绑定模式\n4) 停用\n5) 恢复未完成事务\n0) 返回\n'
+        printf '1) 状态\n2) 检查\n3) 启用空绑定模式/纳管现有节点\n4) 停用\n5) 恢复未完成事务\n0) 返回\n'
         read -r -p '请选择: ' action || return
         case $action in
         0) return ;;
         1) frontend_main status ;;
         2) frontend_main check ;;
-        3) frontend_main enable ;;
+        3) frontend_menu_enable ;;
         4) frontend_main disable ;;
         5) frontend_main recover ;;
         *) printf '无效选项。\n' ;;
