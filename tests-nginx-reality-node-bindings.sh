@@ -58,6 +58,8 @@ FAKE_SYSTEMCTL
     cat >"$case_dir/bin/ps" <<'FAKE_PS'
 #!/usr/bin/env bash
 case "$*" in
+    '-o ppid= -p 456') printf '123\n' ;;
+    '-o ppid= -p 900'|'-o ppid= -p 901'|'-o ppid= -p 124') printf '1\n' ;;
     '-o args= -p 123') printf 'nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
     '-eo pid=,args=')
         count=0
@@ -423,7 +425,7 @@ duplicate_edit=$(main change "$new_one" sni SECOND.EXAMPLE 2>&1) && {
     echo 'FAIL: changing a bound node to another bound node SNI should be rejected'
     exit 1
 }
-[[ $duplicate_edit == *'already bound'* ]] || {
+[[ $duplicate_edit == *'SNI 已绑定'* ]] || {
     echo "FAIL: duplicate bound SNI error should explain the conflict: $duplicate_edit"
     exit 1
 }
@@ -436,7 +438,7 @@ transport_error=$(main change "$new_one" new VLESS-HTTP2-REALITY 2>&1) && {
     echo 'FAIL: a bound ordinary Reality node must reject transport changes before moving off 443'
     exit 1
 }
-[[ $auto_sni_error == *'不支持自动选择 SNI'* && $transport_error == *'Move the node off public port 443'* && $(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}') == "$unsupported_before" ]] || {
+[[ $auto_sni_error == *'不支持自动选择 SNI'* && $transport_error == *'请先将节点移出公网 443'* && $(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}') == "$unsupported_before" ]] || {
     echo "FAIL: unsupported bound-node edits should fail closed without source changes: auto=$auto_sni_error transport=$transport_error"
     exit 1
 }
@@ -827,15 +829,43 @@ for map_rules in \
     $'~^regex\\.example$ 127.0.0.1:9444;'; do
     map_case=$((map_case + 1))
     printf '%s\n' "$map_rules" >"$CASE_DIR/maps/user.conf"
-    wildcard_error=$(main add reality 443 88888888-0000-4888-8888-888888888888 "safe-$map_case.example" 2>&1) && {
-        echo "FAIL: public add should fail closed for user map rule syntax (case $map_case)"
-        exit 1
-    }
-    [[ $wildcard_error == *"$CASE_DIR/maps/user.conf:"* && $wildcard_error == *'Cannot prove'* ]] || {
-        echo "FAIL: unprovable map overlap should identify its file and line (case $map_case): $wildcard_error"
+    disjoint_output=$(main add reality 443 "88888888-0000-4888-8888-00000000000$map_case" "safe-$map_case.example" 2>&1) || {
+        echo "FAIL: provably disjoint user map rule should allow an SNI (case $map_case): $disjoint_output"
         exit 1
     }
 done
+
+for map_rules in \
+    '*.wild.example 127.0.0.1:9444;' \
+    '.wild.example 127.0.0.1:9444;' \
+    $'~^regex\\.example$ 127.0.0.1:9444;' \
+    $'~*^regex\\.example$ 127.0.0.1:9444;'; do
+    case $map_rules in
+    '*.wild.example'*) matching_sni=sub.wild.example ;;
+    '.wild.example'*) matching_sni=wild.example ;;
+    '~*'*) matching_sni=REGEX.example ;;
+    *) matching_sni=regex.example ;;
+    esac
+    printf '%s\n' "$map_rules" >"$CASE_DIR/maps/user.conf"
+    matching_error=$(main add reality 443 99999999-0000-4999-8999-000000000001 "$matching_sni" 2>&1) && {
+        echo "FAIL: user map rule that matches an SNI should reject it ($map_rules)"
+        exit 1
+    }
+    [[ $matching_error == *"$CASE_DIR/maps/user.conf:1"* ]] || {
+        echo "FAIL: matching map rule should identify its source line: $matching_error"
+        exit 1
+    }
+done
+
+printf '%s\n' $'~^regex[0-9]+\\.example$ 127.0.0.1:9444;' >"$CASE_DIR/maps/user.conf"
+unprovable_error=$(main add reality 443 99999999-0000-4999-8999-000000000002 unprovable.example 2>&1) && {
+    echo 'FAIL: unsupported PCRE syntax must remain fail-closed'
+    exit 1
+}
+[[ $unprovable_error == *"$CASE_DIR/maps/user.conf:1"* && $unprovable_error == *'无法确认该 SNI'* ]] || {
+    echo "FAIL: unprovable PCRE overlap should identify its source line: $unprovable_error"
+    exit 1
+}
 
 # If the applied frontend cannot be reloaded back, recovery must leave the
 # loopback backend candidate in place and must not restart sing-box again.

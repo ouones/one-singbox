@@ -36,17 +36,17 @@ frontend_load_profile() {
     fi
     if [[ -L $profile_file || ! -f $profile_file ]]; then
         frontend_profile_error_code=invalid_profile
-        frontend_profile_error_message='frontend.json must be a regular file, not a symlink.'
+        frontend_profile_error_message=$(frontend_localize_error_message "$frontend_profile_error_code" 'frontend.json 必须是普通文件，不能是符号链接。')
         return 1
     fi
     if ! jq -e . "$profile_file" >/dev/null 2>&1; then
         frontend_profile_error_code=invalid_profile
-        frontend_profile_error_message='frontend.json is not valid JSON.'
+        frontend_profile_error_message=$(frontend_localize_error_message "$frontend_profile_error_code" 'frontend.json 不是有效的 JSON。')
         return 1
     fi
     if [[ $(jq -r '.schema_version // empty' "$profile_file") != 1 ]]; then
         frontend_profile_error_code=unsupported_schema
-        frontend_profile_error_message='frontend.json uses an unsupported schema_version.'
+        frontend_profile_error_message=$(frontend_localize_error_message "$frontend_profile_error_code" 'frontend.json 使用了不受支持的 schema_version。')
         return 1
     fi
     if ! jq -e '
@@ -66,12 +66,12 @@ frontend_load_profile() {
         (.ownership | type == "object")
     ' "$profile_file" >/dev/null 2>&1; then
         frontend_profile_error_code=invalid_profile
-        frontend_profile_error_message='frontend.json does not match schema_version 1.'
+        frontend_profile_error_message=$(frontend_localize_error_message "$frontend_profile_error_code" 'frontend.json 不符合 schema_version 1 的结构。')
         return 1
     fi
     frontend_profile=$(jq -c . "$profile_file") || {
         frontend_profile_error_code=invalid_profile
-        frontend_profile_error_message='frontend.json could not be read.'
+        frontend_profile_error_message=$(frontend_localize_error_message "$frontend_profile_error_code" '无法读取 frontend.json。')
         return 1
     }
     return 0
@@ -87,7 +87,7 @@ frontend_read_phase() {
     fi
     if [[ -L $transaction_file || ! -f $transaction_file ]] || ! jq -e '.phase | type == "string"' "$transaction_file" >/dev/null 2>&1; then
         frontend_phase_error_code=transaction_corrupt
-        frontend_phase_error_message='The saved frontend transaction record is missing or invalid.'
+        frontend_phase_error_message=$(frontend_localize_error_message "$frontend_phase_error_code" '已保存的前置事务记录缺失或无效。')
         frontend_phase=recovery_required
         return 1
     fi
@@ -96,7 +96,7 @@ frontend_read_phase() {
     prepared | backend_applied | frontend_applied | verified | committed | rolling_back | rolled_back | recovery_required) ;;
     *)
         frontend_phase_error_code=transaction_corrupt
-        frontend_phase_error_message="The saved frontend transaction has an unknown phase: $frontend_phase"
+        frontend_phase_error_message=$(frontend_localize_error_message "$frontend_phase_error_code" "已保存的前置事务包含未知阶段：$frontend_phase")
         frontend_phase=recovery_required
         return 1
         ;;
@@ -122,7 +122,7 @@ frontend_status() {
             phase=$frontend_phase
             case $phase in
             prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
-                errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("An interrupted frontend transaction is in phase " + $phase + ". Run frontend recover before changing it.")}]')
+                errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("前置事务未完成，当前阶段：" + $phase + "。继续更改前请先运行 frontend recover。")}]')
                 ;;
             *) errors='[]' ;;
             esac
@@ -138,7 +138,7 @@ frontend_status() {
         errors='[]'
         case $phase in
         prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
-            errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("An interrupted frontend transaction is in phase " + $phase + ". Run frontend recover before changing it.")}]')
+            errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("前置事务未完成，当前阶段：" + $phase + "。继续更改前请先运行 frontend recover。")}]')
             ;;
         esac
     fi
@@ -147,6 +147,14 @@ frontend_status() {
     revision=$(jq -c '.revision' <<<"$frontend_profile")
     nginx=$(jq -c '.nginx' <<<"$frontend_profile")
     bindings=$(jq -c '.bindings' <<<"$frontend_profile")
+    if [[ $enabled == true && $errors == '[]' ]]; then
+        nginx=null
+        if frontend_refresh_detection; then
+            nginx=$frontend_nginx
+        else
+            errors=$(jq -cn --arg code "$frontend_error_code" --arg message "$frontend_error_message" '[{code:$code,message:$message}]')
+        fi
+    fi
     if [[ $json == --json ]]; then
         local ok=true
         [[ $errors == '[]' ]] || ok=false
@@ -155,12 +163,285 @@ frontend_status() {
         printf '443 SNI 前置：%s\nrevision：%s\nbindings：%s\n' \
             "$([[ $enabled == true ]] && printf '已启用' || printf '未启用')" \
             "$revision" "$(jq -r 'length' <<<"$bindings")"
+        [[ $errors == '[]' ]] || jq -r '.[0].message' <<<"$errors" >&2
     fi
+    [[ $errors == '[]' ]]
+}
+
+frontend_localize_path_context() {
+    local message=$1 context
+    case $message in
+    *'refusing to replace '*) context=${message##*refusing to replace } ;;
+    *'refusing to overwrite '*) context=${message##*refusing to overwrite } ;;
+    *'remove it from '*) context=${message##*remove it from } ;;
+    *'restore '*) context=${message##*restore }; context=${context%% from*} ;;
+    *'transaction-created file '*) context=${message##*transaction-created file } ;;
+    'Could not fingerprint '*) context=${message#Could not fingerprint }; context=${context%% during*} ;;
+    'Could not read permissions for '*) context=${message#Could not read permissions for }; context=${context%% during*} ;;
+    'Could not read ownership for '*) context=${message#Could not read ownership for }; context=${context%% during*} ;;
+    *'replace '*) context=${message##*replace } ;;
+    *'remove '*) context=${message##*remove } ;;
+    *' for '*) context=${message##* for } ;;
+    *' at '*) context=${message##* at } ;;
+    *' reaches '*) context=${message##* reaches } ;;
+    *' from '*) context=${message##* from } ;;
+    *' in '*) context=${message##* in } ;;
+    *': '*) context=${message##*: } ;;
+    *'file '*) context=${message#*file }; context=${context%% *} ;;
+    *'directory '*) context=${message#*directory } ;;
+    *) return 1 ;;
+    esac
+    context=${context%%;*}
+    context=${context%% (*}
+    context=${context%.}
+    printf '%s' "$context"
+}
+
+frontend_localize_error_message() {
+    local code=$1 message=$2 context active_addresses
+    case $code in
+    already_enabled) printf '443 SNI 前置已启用；仅首次迁移时可指定节点引用。' ;;
+    auxiliary_port_unavailable) printf '无法为本机拒绝服务分配可用的 TCP 端口。' ;;
+    backend_port_unavailable) printf '无法为 sing-box 后端分配可用的回环端口。' ;;
+    backend_restart_failed) printf '候选 sing-box 服务未能重启并进入运行状态。' ;;
+    binding_drift)
+        if [[ $message == *': '* ]]; then
+            context=${message##*: }
+            printf '已绑定节点 %s 缺失、不安全或与保存的后端配置不一致。' "$context"
+        else
+            printf '已绑定节点缺失、不安全或与保存的后端配置不一致。'
+        fi
+        ;;
+    binding_missing)
+        context=${message##*: }
+        printf '节点 %s 未绑定到已启用的前置。' "$context"
+        ;;
+    bindings_present)
+        context=${message##*: }
+        printf '以下节点仍绑定到前置，无法停用：%s。' "$context"
+        ;;
+    candidate_validation_failed) printf '完整的隔离 Nginx 候选配置未通过当前二进制的检查。' ;;
+    config_drift)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then
+            printf '文件 %s 在检查期间发生变化；为避免覆盖用户修改，已停止操作。' "$context"
+        else
+            printf '文件在检查期间发生变化；为避免覆盖用户修改，已停止操作。'
+        fi
+        ;;
+    duplicate_sni)
+        if [[ $message == *' at '* ]]; then
+            context=${message#* at }
+            printf 'SNI 与用户 Nginx map 规则冲突（%s）。' "$context"
+        elif [[ $message == *'already bound by '* ]]; then
+            context=${message#*already bound by }
+            printf 'SNI 已绑定到其他节点（%s）。' "$context"
+        elif [[ $message == *'already used by another binding: '* ]]; then
+            context=${message#*another binding: }
+            printf 'SNI 已由另一个绑定使用（%s）。' "$context"
+        else
+            printf 'SNI 与现有 Nginx map 规则冲突。'
+        fi
+        ;;
+    file_apply_failed)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then
+            printf '无法安全地应用文件更改：%s。' "$context"
+        else
+            printf '无法安全地应用文件更改。'
+        fi
+        ;;
+    frontend_disabled) printf 'Nginx Reality 前置尚未启用。' ;;
+    inline_443_node) printf '共享 sing-box 配置中包含无法通过节点引用纳管的 443 入站。' ;;
+    invalid_profile) printf '前置配置文件无效或包含不安全的 Nginx 所有权信息。' ;;
+    invalid_sni) printf 'Reality SNI 必须是由有效标签组成的 ASCII 域名。' ;;
+    listen_addresses_invalid) printf '所选监听地址范围无效，或所需地址族不可用。' ;;
+    listen_addresses_required) printf '必须明确选择 IPv4、IPv6 或双栈监听范围。' ;;
+    listen_addresses_unavailable) printf '无法确定可用的全局 IPv4 或 IPv6 地址。' ;;
+    listener_check_unavailable) printf '无法使用 ss 检查当前 TCP 监听端口。' ;;
+    lock_unavailable) printf '缺少 flock，无法协调前置配置更改。' ;;
+    map_variable_unavailable) printf '无法为 Nginx map 选择未使用的变量名。' ;;
+    nginx_build_args_missing) printf 'Nginx 未提供构建参数，无法验证其 prefix 和配置路径。' ;;
+    nginx_candidate_failed) printf '无法安全准备完整的隔离 Nginx 候选配置。' ;;
+    nginx_config_invalid)
+        if [[ $message == *': '* ]]; then
+            context=${message##*: }
+            printf 'Nginx 完整配置的语法检查未通过：%s。' "$context"
+        else
+            printf 'Nginx 完整配置的语法检查未通过。'
+        fi
+        ;;
+    nginx_config_missing)
+        context=${message##*: }
+        printf '当前 Nginx 配置文件不存在、不可读或不是普通文件：%s。' "$context"
+        ;;
+    nginx_config_unreadable) printf '无法读取完整的当前 Nginx 配置。' ;;
+    nginx_config_unsupported)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then
+            printf '当前 Nginx 配置包含无法安全处理的结构（%s）。' "$context"
+        else
+            printf '当前 Nginx 配置包含无法安全处理的结构。'
+        fi
+        ;;
+    nginx_detection_failed) printf '无法记录当前 Nginx 实例的检查结果。' ;;
+    nginx_http_443_conflict)
+        context=${message##* in }
+        printf 'HTTP 配置文件 %s 已监听 TCP 443，不能启用 stream 前置。' "$context"
+        ;;
+    nginx_instance_ambiguous) printf '无法唯一识别当前 Nginx 服务实例。' ;;
+    nginx_instance_drift) printf '当前 Nginx 实例或支持的配置入口与已保存的前置配置不一致。' ;;
+    nginx_listener_address_unknown) printf '无法确定当前 TCP 443 监听器的地址范围。' ;;
+    nginx_listener_check_failed) printf '无法识别当前 Nginx 二进制以检查监听端口归属。' ;;
+    nginx_listener_drift)
+        if [[ $message == 'Saved address range '* ]]; then
+            context=${message#Saved address range }
+            active_addresses=${context#* active listener addresses }
+            context=${context%% does not match*}
+            printf '已保存的监听范围 %s 与当前 Nginx 地址 %s 不一致。' "$context" "$active_addresses"
+        else
+            printf '当前 TCP 443 监听地址与已保存的监听范围不一致。'
+        fi
+        ;;
+    nginx_listener_missing)
+        if [[ $message == *'address '* && $message == *' at TCP 443.' ]]; then
+            context=${message#*address }
+            context=${context% at TCP 443.}
+            printf '选定的 Nginx 服务未在地址 %s 上监听 TCP 443。' "$context"
+        else
+            printf '选定的 Nginx 服务未在配置的 TCP 443 地址上监听。'
+        fi
+        ;;
+    nginx_map_overlap)
+        if [[ $message == *' at '* ]]; then
+            context=${message#* at }
+            printf '无法确认该 SNI 与用户 Nginx map 规则不重叠，已停止操作（%s）。' "$context"
+        else
+            printf '无法确认该 SNI 与用户 Nginx map 规则不重叠，已停止操作。'
+        fi
+        ;;
+    nginx_path_unsupported) printf '包含空白字符的 Nginx 项目路径不受支持。' ;;
+    nginx_reload_failed) printf 'Nginx 服务 reload 命令执行失败。' ;;
+    nginx_reload_unavailable) printf '当前 Nginx 服务没有受支持的 reload 目标。' ;;
+    nginx_service_manager_missing) printf '无法通过 systemd 或 OpenRC 识别 Nginx 服务。' ;;
+    nginx_ssl_preread_missing) printf '当前 Nginx 未提供 stream ssl_preread 支持。' ;;
+    nginx_stream_missing) printf '当前 Nginx 未提供 stream 模块。' ;;
+    nginx_unavailable) printf 'Nginx 服务未运行，或无法读取其活动配置。' ;;
+    nginx_worker_unverified) printf '在等待时间内未能确认 Nginx 已启动新的 worker。' ;;
+    node_candidate_failed)
+        case $message in
+        *'candidate for '*) context=${message##*candidate for } ;;
+        *'migrated node candidate: '*) context=${message##*: } ;;
+        *) context= ;;
+        esac
+        if [[ $context ]]; then printf '无法准备候选节点或共享 sing-box 配置：%s。' "$context"; else printf '无法准备完整的候选节点和共享 sing-box 配置。'; fi
+        ;;
+    node_candidate_invalid) printf '绑定节点编辑需要有效的候选文件，并且必须产生一个入站和有效的监听端口。' ;;
+    node_not_on_public_443) printf '所选节点未配置为监听公网 TCP 443。' ;;
+    node_operation_invalid) printf '不支持此绑定节点操作。' ;;
+    node_ref_conflict)
+        context=${message##*: }
+        printf '目标节点文件或元数据已存在：%s。' "$context"
+        ;;
+    node_ref_duplicate) printf '同一节点引用被重复选择。' ;;
+    node_ref_invalid)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then printf '节点引用无效或无法解析：%s。' "$context"; else printf '节点引用无效或无法解析。'; fi
+        ;;
+    node_ref_missing)
+        context=$(frontend_localize_path_context "$message") || context=
+        printf '节点引用未指向普通节点文件：%s。' "$context"
+        ;;
+    node_unsupported)
+        if [[ $message == 'Move the node off public port 443'* ]]; then
+            printf '请先将节点移出公网 443，再更改协议或传输层；前置仅支持普通 VLESS-REALITY。'
+        elif [[ $message == 'Only a single ordinary VLESS-REALITY inbound without transport can be bound: '* ]]; then
+            context=${message##*: }
+            printf '节点 %s 必须是未启用传输层的普通 VLESS-REALITY 入站。' "$context"
+        else
+            printf '节点必须是未启用传输层的普通 VLESS-REALITY 入站。'
+        fi
+        ;;
+    operation_in_progress) printf '另一个前置操作正在进行。' ;;
+    owned_file_drift)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then printf '受管理的 Reality map 缺失、元数据无效或已被外部修改：%s。' "$context"; else printf '受管理的 Reality map 缺失、元数据无效或已被外部修改。'; fi
+        ;;
+    profile_bindings_present) printf '已停用的配置仍包含节点绑定，拒绝启用不一致的状态。' ;;
+    project_file_conflict) printf '项目自有的 Nginx 文件已存在，但没有对应的已启用配置。' ;;
+    project_path_conflict)
+        context=$(frontend_localize_path_context "$message") || context=
+        printf 'Nginx 项目目录不是安全的普通目录：%s。' "$context"
+        ;;
+    recovery_failed)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then printf '前置事务恢复失败：%s。' "$context"; else printf '前置事务恢复未通过验证。'; fi
+        ;;
+    recovery_required) printf '前置事务尚未完成；请先运行 frontend recover。' ;;
+    shared_entry_changed)
+        context=${message#*file }
+        context=${context%% changed*}
+        printf '项目自有的 Nginx 文件 %s 已在启用后更改；为保留可能存在的用户依赖，不会删除共享入口。' "$context"
+        ;;
+    shared_entry_in_use)
+        context=${message#*file }
+        context=${context%% refers*}
+        printf 'Nginx 文件 %s 仍引用项目创建的 Reality 入口；停用前请检查该依赖。' "$context"
+        ;;
+    singbox_candidate_invalid) printf '完整的候选 sing-box 配置未通过验证。' ;;
+    singbox_config_unreadable)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then printf '无法安全检查 sing-box 配置：%s。' "$context"; else printf '无法安全检查 sing-box 配置。'; fi
+        ;;
+    state_unwritable)
+        if [[ $message == 'Could not '* ]]; then context=$(frontend_localize_path_context "$message") || context=; else context=; fi
+        if [[ $context ]]; then printf '前置状态目录不可安全写入：%s。' "$context"; else printf '前置状态目录不可安全写入。'; fi
+        ;;
+    tcp_443_owner_unknown)
+        context=${message#*socket }
+        context=${context%% is occupied*}
+        printf 'TCP 443 地址 %s 已被占用，但 ss 未报告其所属进程。' "$context"
+        ;;
+    tcp_443_port_conflict)
+        if [[ $message == *': '* ]]; then
+            context=${message##*: }
+            printf 'TCP 443 地址 %s 由所选 Nginx 实例以外的进程占用。' "$context"
+        else
+            printf 'TCP 443 的目标地址范围由所选 Nginx 实例以外的进程占用。'
+        fi
+        ;;
+    transaction_candidate_missing)
+        context=$(frontend_localize_path_context "$message") || context=
+        if [[ $context ]]; then printf '事务候选文件缺失或不安全：%s。' "$context"; else printf '事务候选文件缺失或不安全。'; fi
+        ;;
+    transaction_corrupt)
+        if [[ $message == *'未知阶段：'* ]]; then
+            context=${message##*未知阶段：}
+            printf '前置事务包含未知阶段：%s。' "$context"
+        elif [[ $message == *' for '* ]] && context=$(frontend_localize_path_context "$message"); then
+            printf '前置事务记录包含不安全的文件路径：%s。' "$context"
+        else
+            printf '前置事务记录缺失、损坏或包含不安全的数据。'
+        fi
+        ;;
+    transaction_path_invalid)
+        context=$(frontend_localize_path_context "$message") || context=
+        printf '事务目标路径不安全：%s。' "$context"
+        ;;
+    transaction_state_write_failed) printf '无法安全保存前置事务状态。' ;;
+    unselected_443_nodes)
+        context=${message##*: }
+        printf '启用前置时必须选择所有现有的 443 节点；未选择：%s。' "$context"
+        ;;
+    unsupported_schema) printf '前置配置文件使用了不受支持的 schema_version。' ;;
+    nginx_module_check_failed|nginx_stream_proxy_missing|nginx_stream_return_missing) printf '当前 Nginx 二进制未通过所需模块能力检查。' ;;
+    *) printf '前置操作失败（%s）。' "$code" ;;
+    esac
 }
 
 frontend_set_error() {
     frontend_error_code=$1
-    frontend_error_message=$2
+    frontend_error_message=$(frontend_localize_error_message "$1" "$2")
 }
 
 frontend_detect_nginx_service() {
@@ -385,7 +666,7 @@ frontend_scan_config_file() {
         }
         function output_server(i) {
             if (has_context("stream")) {
-                printf "STREAMSERVER\t%d\t%d\t%d\t%s\t%s\t%s\n", server_has_tcp443[i], server_has_udp443[i], server_preread[i], server_proxy[i], server_ports[i], server_addresses[i]
+                printf "STREAMSERVER\t%d\t%d\t%d\t%s\t%s\t%s\t%d\n", server_has_tcp443[i], server_has_udp443[i], server_preread[i], server_proxy[i], server_ports[i], server_addresses[i], server_ipv6only_off[i]
             } else if (has_context("http")) {
                 printf "HTTPSERVER\t%d\t%s\n", server_has_tcp443[i], server_ports[i]
             }
@@ -404,7 +685,7 @@ frontend_scan_config_file() {
                 target = current_map_target()
                 key = words[1]
                 rule_kind = "exact"
-                if (key == "hostnames") rule_kind = "hostnames"
+                if (key == "hostnames") rule_kind = "directive"
                 else if (key ~ /^~/) rule_kind = "regex"
                 else if (key ~ /\*/ || key ~ /^\./) rule_kind = "wildcard"
                 else if (key == "volatile") rule_kind = "directive"
@@ -424,6 +705,9 @@ frontend_scan_config_file() {
                     address = words[2]
                     extracted_port = address
                     if (address ~ /:[0-9]+$/) sub(/^.*:/, "", extracted_port)
+                    if (port == 443 && !udp && (address ~ /^\[/ || address ~ /::/)) {
+                        for (i = 2; i <= word_count; i++) if (words[i] == "ipv6only=off") server_ipv6only_off[active_server] = 1
+                    }
                     if (extracted_port ~ /^[0-9]+$/ && !udp) {
                         if (server_ports[active_server] != "") server_ports[active_server] = server_ports[active_server] ","
                         server_ports[active_server] = server_ports[active_server] extracted_port
@@ -481,6 +765,7 @@ frontend_scan_config_file() {
                 server_proxy[depth] = ""
                 server_ports[depth] = ""
                 server_addresses[depth] = ""
+                server_ipv6only_off[depth] = 0
             }
             word_count = 0
             delete words
@@ -510,6 +795,7 @@ frontend_scan_config_file() {
             delete server_proxy[depth]
             delete server_ports[depth]
             delete server_addresses[depth]
+            delete server_ipv6only_off[depth]
             delete stack[depth]
             depth--
         }
@@ -527,6 +813,7 @@ frontend_scan_config_file() {
                         server_proxy[depth] = ""
                         server_ports[depth] = ""
                         server_addresses[depth] = ""
+                        server_ipv6only_off[depth] = 0
                     }
                 }
                 if (initial_context == "map") {
@@ -586,7 +873,7 @@ frontend_scan_config_file() {
         return 1
     }
 
-    while IFS=$'\t' read -r kind a b c d e f; do
+    while IFS=$'\t' read -r kind a b c d e f g; do
         case $kind in
         STREAM_START)
             frontend_scan_stream_files+=("$file")
@@ -616,6 +903,7 @@ frontend_scan_config_file() {
             frontend_scan_server_proxy+=("$d")
             frontend_scan_configured_port_lists+=("$e")
             frontend_scan_server_addresses+=("$f")
+            frontend_scan_server_ipv6only_off+=("$g")
             ;;
         HTTPSERVER)
             [[ $a == 1 ]] && frontend_scan_http_443+=("$file")
@@ -872,6 +1160,7 @@ frontend_scan_config_tree() {
     frontend_scan_server_proxy=()
     frontend_scan_configured_port_lists=()
     frontend_scan_server_addresses=()
+    frontend_scan_server_ipv6only_off=()
     frontend_scan_http_443=()
     frontend_scan_include_parent=()
     frontend_scan_include_lines=()
@@ -902,6 +1191,7 @@ frontend_scan_config_tree() {
     frontend_entry_line=
     frontend_entry_map_variable=
     frontend_entry_addresses=
+    frontend_entry_ipv6only_off=0
     local compatible=0 server_count=0 server_is_compatible=0 map_index=0 server_index=0
     for ((map_index = 0; map_index < ${#frontend_scan_map_targets[@]}; map_index++)); do
         [[ ${frontend_scan_map_sources[$map_index]} == '$ssl_preread_server_name' ]] || continue
@@ -916,6 +1206,7 @@ frontend_scan_config_tree() {
         if ((compatible == 1)) && [[ ${frontend_scan_server_preread[$server_index]} == 1 && ${frontend_scan_server_proxy[$server_index]} == "$frontend_entry_map_variable" ]]; then
             ((server_is_compatible += 1))
             frontend_entry_addresses=${frontend_scan_server_addresses[$server_index]}
+            frontend_entry_ipv6only_off=${frontend_scan_server_ipv6only_off[$server_index]:-0}
         else
             frontend_set_error nginx_config_unsupported 'A TCP 443 stream listener is not the supported ssl_preread map-to-proxy structure.'
             return 1
@@ -961,8 +1252,38 @@ frontend_managed_core_pid() {
     return 1
 }
 
+frontend_nginx_pid_is_managed() {
+    local pid=$1 parent depth
+    [[ $frontend_nginx_pid =~ ^[1-9][0-9]*$ && $pid =~ ^[1-9][0-9]*$ ]] || return 1
+    for ((depth = 0; depth < 32; depth++)); do
+        [[ $pid == "$frontend_nginx_pid" ]] && return 0
+        parent=$(ps -o ppid= -p "$pid" 2>/dev/null) || return 1
+        parent=${parent//[[:space:]]/}
+        [[ $parent =~ ^[1-9][0-9]*$ && $parent != "$pid" ]] || return 1
+        pid=$parent
+    done
+    return 1
+}
+
+frontend_listener_addresses_overlap() {
+    local wanted=${1//[\[\]]/} bound=${2//[\[\]]/} ipv6only_off=${3:-0} wanted_family bound_family
+    [[ $wanted == '*' || $bound == '*' ]] && return 0
+    [[ $wanted == *:* ]] && wanted_family=ipv6 || wanted_family=ipv4
+    [[ $bound == *:* ]] && bound_family=ipv6 || bound_family=ipv4
+    if [[ $wanted_family != "$bound_family" ]]; then
+        [[ $ipv6only_off == 1 && ( $wanted == :: || $bound == :: ) ]] && return 0
+        return 1
+    fi
+    if [[ $wanted == 0.0.0.0 || $wanted == :: || $bound == 0.0.0.0 || $bound == :: ]]; then
+        return 0
+    fi
+    [[ $wanted == "$bound" ]]
+}
+
 frontend_read_tcp_listeners() {
-    local output line state recv send local_address peer process port owner_pid owner_exe core_binary_real migration_direct_443=0
+    local output line state recv send local_address socket_address peer process port owner_pid owner_exe core_binary_real migration_direct_443=0
+    local selected_range_known=0 address_match expected_address address_index
+    local -a selected_addresses=() configured_addresses=() running_addresses=()
     frontend_error_code=
     frontend_error_message=
     declare -gA frontend_bound_ports=()
@@ -973,6 +1294,30 @@ frontend_read_tcp_listeners() {
     frontend_nginx_pid=$(jq -r '.pid' <<<"$frontend_nginx")
     frontend_nginx_binary_real=$(readlink -f "$(jq -r '.binary' <<<"$frontend_nginx")" 2>/dev/null) || frontend_nginx_binary_real=
     core_binary_real=$(readlink -f "$is_core_bin" 2>/dev/null) || core_binary_real=
+    if [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null; then
+        mapfile -t selected_addresses < <(jq -r '.listen_addresses[]' <<<"$frontend_profile")
+        IFS=, read -r -a configured_addresses <<<"${frontend_entry_addresses:-}"
+        for address_index in "${!selected_addresses[@]}"; do
+            [[ ${selected_addresses[$address_index]} == '*' ]] && selected_addresses[$address_index]=0.0.0.0
+        done
+        for address_index in "${!configured_addresses[@]}"; do
+            [[ ${configured_addresses[$address_index]} == '*' ]] && configured_addresses[$address_index]=0.0.0.0
+        done
+        if [[ $(printf '%s\n' "${selected_addresses[@]}" | sort) != $(printf '%s\n' "${configured_addresses[@]}" | sort) ]]; then
+            frontend_set_error nginx_listener_drift "Saved address range ${selected_addresses[*]} does not match active listener addresses ${configured_addresses[*]}"
+            return 1
+        fi
+        selected_range_known=1
+    elif [[ ${frontend_listener_range_selected:-0} == 1 ]]; then
+        selected_addresses=("${frontend_listen_addresses[@]}")
+        selected_range_known=1
+    elif [[ ${frontend_entry_addresses:-} ]]; then
+        IFS=, read -r -a selected_addresses <<<"$frontend_entry_addresses"
+        for address_index in "${!selected_addresses[@]}"; do
+            [[ ${selected_addresses[$address_index]} == '*' ]] && selected_addresses[$address_index]=0.0.0.0
+        done
+        selected_range_known=1
+    fi
     [[ $frontend_nginx_binary_real ]] || {
         frontend_set_error nginx_listener_check_failed 'Could not identify the active Nginx binary for listener ownership checks.'
         return 1
@@ -987,8 +1332,26 @@ frontend_read_tcp_listeners() {
         [[ $port =~ ^[0-9]+$ ]] || continue
         frontend_bound_ports[$port]=1
         [[ $port == 443 ]] || continue
+        if [[ ${frontend_allow_unknown_listener_range:-0} == 1 && $selected_range_known == 0 ]]; then
+            continue
+        fi
+        socket_address=${local_address%:*}
+        socket_address=${socket_address#\[}
+        socket_address=${socket_address%\]}
+        address_match=0
+        if [[ $selected_range_known == 0 ]]; then
+            address_match=1
+        else
+            for expected_address in "${selected_addresses[@]}"; do
+                if frontend_listener_addresses_overlap "$expected_address" "$socket_address" "${frontend_entry_ipv6only_off:-0}"; then
+                    address_match=1
+                    break
+                fi
+            done
+        fi
+        [[ $address_match == 1 ]] || continue
         [[ $process ]] || {
-            frontend_set_error tcp_443_owner_unknown 'TCP 443 is occupied, but ss did not report the owning process.'
+            frontend_set_error tcp_443_owner_unknown "TCP 443 socket $socket_address is occupied, but ss did not report the owning process."
             return 1
         }
         local found_owner=0 owner_is_nginx=1 owner_is_core=1 owner_is_managed_core=1
@@ -996,22 +1359,23 @@ frontend_read_tcp_listeners() {
             owner_pid=${BASH_REMATCH[1]}
             found_owner=1
             owner_exe=$(readlink -f "/proc/$owner_pid/exe" 2>/dev/null) || owner_exe=
-            [[ $owner_exe == "$frontend_nginx_binary_real" ]] || owner_is_nginx=0
+            [[ $owner_exe == "$frontend_nginx_binary_real" ]] && frontend_nginx_pid_is_managed "$owner_pid" || owner_is_nginx=0
             [[ $core_binary_real && $owner_exe == "$core_binary_real" ]] || owner_is_core=0
             if [[ $core_binary_real && $owner_exe == "$core_binary_real" ]] && ! frontend_managed_core_pid "$owner_pid"; then
                 owner_is_managed_core=0
             fi
             process=${process#*"pid=$owner_pid"}
         done
-        if [[ $found_owner == 1 && $owner_is_core == 1 && $owner_is_managed_core == 1 && ${frontend_migration_active:-0} == 1 ]]; then
+        if [[ $found_owner == 1 && $owner_is_core == 1 && $owner_is_managed_core == 1 && ( ${frontend_migration_active:-0} == 1 || ${frontend_migration_handoff:-0} == 1 ) ]]; then
             migration_direct_443=1
             continue
         fi
         [[ $found_owner == 1 && $owner_is_nginx == 1 ]] || {
-            frontend_set_error tcp_443_port_conflict 'TCP 443 is owned by a process outside the selected Nginx instance.'
+            frontend_set_error tcp_443_port_conflict "TCP 443 is owned by a process outside the selected Nginx instance: $socket_address:443"
             return 1
         }
         frontend_running_443=1
+        running_addresses+=("$socket_address")
     done <<<"$output"
 
     local configured_443=0 port_list configured_port
@@ -1026,6 +1390,21 @@ frontend_read_tcp_listeners() {
     if [[ $configured_443 == 1 && $frontend_running_443 != 1 && $migration_direct_443 != 1 && ${frontend_migration_handoff:-0} != 1 ]]; then
         frontend_set_error nginx_listener_missing 'Nginx configuration contains a TCP 443 listener, but the selected service does not own a running TCP 443 socket.'
         return 1
+    fi
+    if [[ $configured_443 == 1 && $selected_range_known == 1 && $migration_direct_443 != 1 && ${frontend_migration_handoff:-0} != 1 ]]; then
+        for expected_address in "${selected_addresses[@]}"; do
+            address_match=0
+            for socket_address in "${running_addresses[@]}"; do
+                if frontend_listener_addresses_overlap "$expected_address" "$socket_address" "${frontend_entry_ipv6only_off:-0}"; then
+                    address_match=1
+                    break
+                fi
+            done
+            [[ $address_match == 1 ]] || {
+                frontend_set_error nginx_listener_missing "The selected Nginx service is not listening on configured address $expected_address at TCP 443."
+                return 1
+            }
+        done
     fi
     if [[ $configured_443 == 0 && $frontend_running_443 == 1 ]]; then
         frontend_set_error nginx_listener_drift 'The selected Nginx service owns TCP 443, but its checked configuration has no TCP 443 listener.'
@@ -1136,6 +1515,7 @@ frontend_pending_change() {
 frontend_choose_addresses() {
     local ipv4 ipv6 choice
     local -a options=()
+    frontend_listener_range_selected=0
     command -v ip >/dev/null 2>&1 || {
         frontend_set_error listen_addresses_unavailable 'The ip utility is required to determine available address families.'
         return 1
@@ -1189,6 +1569,7 @@ frontend_choose_addresses() {
         ;;
     esac
     printf '监听范围：%s\n' "$(IFS=,; echo "${frontend_listen_addresses[*]}")"
+    frontend_listener_range_selected=1
     return 0
 }
 
@@ -2067,8 +2448,64 @@ frontend_config_tcp_ports() {
     ' "$1" 2>/dev/null
 }
 
+frontend_nginx_wildcard_matches_sni() {
+    local pattern=${1,,} candidate=${2,,} suffix prefix
+    if [[ $pattern == \*.* && ${pattern#\*.} != *'*'* ]]; then
+        suffix=${pattern#\*.}
+        [[ $candidate == *".$suffix" && $candidate != "$suffix" ]]
+        return
+    fi
+    if [[ $pattern == .* && $pattern != *'*'* ]]; then
+        suffix=${pattern#.}
+        [[ $candidate == "$suffix" || $candidate == *".$suffix" ]]
+        return
+    fi
+    if [[ $pattern == *.* && $pattern == *'*' ]]; then
+        prefix=${pattern%\*}
+        [[ $prefix != *'*'* && $prefix == *\. && $candidate == "$prefix"* && ${candidate#"$prefix"} != '' ]]
+        return
+    fi
+    return 2
+}
+
+frontend_nginx_exact_regex_sni() {
+    local rule=$1 candidate=$2 case_insensitive=0 pattern char next index normalized=
+    if [[ $rule == '~*'* ]]; then
+        case_insensitive=1
+        pattern=${rule#\~\*}
+    elif [[ $rule == '~'* ]]; then
+        pattern=${rule#\~}
+    else
+        return 2
+    fi
+    [[ $pattern == ^*\$ && ${#pattern} -gt 2 ]] || return 2
+    pattern=${pattern:1:${#pattern}-2}
+    for ((index = 0; index < ${#pattern}; index++)); do
+        char=${pattern:index:1}
+        if [[ $char == '\' ]]; then
+            ((index + 1 < ${#pattern})) || return 2
+            next=${pattern:index+1:1}
+            [[ $next == '.' ]] || return 2
+            normalized+=.
+            ((index += 1))
+            continue
+        fi
+        case $char in
+        [A-Za-z0-9-]) normalized+=$char ;;
+        *) return 2 ;;
+        esac
+    done
+    [[ $normalized =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || return 2
+    if ((case_insensitive)); then
+        [[ ${normalized,,} == ${candidate,,} ]]
+    else
+        [[ $normalized == "$candidate" ]]
+    fi
+}
+
 frontend_assert_user_map_sni_free() {
     local candidate=$1 target map_file rule_file rule_line rule_key rule_kind index candidate_lower=${1,,}
+    local overlap_status
     target=$(jq -r '.map_variable // empty' <<<"$frontend_nginx")
     [[ $target ]] || return 0
     map_file=
@@ -2088,7 +2525,29 @@ frontend_assert_user_map_sni_free() {
                 return 1
             }
             ;;
-        hostnames | wildcard | regex | complex)
+        wildcard)
+            frontend_nginx_wildcard_matches_sni "$rule_key" "$candidate_lower"
+            overlap_status=$?
+            if ((overlap_status == 0)); then
+                frontend_set_error duplicate_sni "Reality SNI conflicts with a user Nginx map entry at $rule_file:$rule_line: $candidate"
+                return 1
+            elif ((overlap_status == 2)); then
+                frontend_set_error nginx_map_overlap "Cannot prove that Reality SNI $candidate does not overlap the user Nginx map rule at $rule_file:$rule_line: $rule_key"
+                return 1
+            fi
+            ;;
+        regex)
+            frontend_nginx_exact_regex_sni "$rule_key" "$candidate"
+            overlap_status=$?
+            if ((overlap_status == 0)); then
+                frontend_set_error duplicate_sni "Reality SNI conflicts with a user Nginx map entry at $rule_file:$rule_line: $candidate"
+                return 1
+            elif ((overlap_status == 2)); then
+                frontend_set_error nginx_map_overlap "Cannot prove that Reality SNI $candidate does not overlap the user Nginx map rule at $rule_file:$rule_line: $rule_key"
+                return 1
+            fi
+            ;;
+        complex)
             frontend_set_error nginx_map_overlap "Cannot prove that Reality SNI $candidate does not overlap the user Nginx map rule at $rule_file:$rule_line: $rule_key"
             return 1
             ;;
@@ -3126,11 +3585,15 @@ frontend_enable_locked() {
         return 1
     fi
     frontend_validate_migration_refs "$@" || return 1
+    frontend_listener_range_selected=0
+    frontend_allow_unknown_listener_range=1
     frontend_refresh_detection || {
         local detect_status=$?
+        frontend_allow_unknown_listener_range=0
         frontend_migration_active=0
         return "$detect_status"
     }
+    frontend_allow_unknown_listener_range=0
     frontend_migration_active=0
     frontend_original_files=("${frontend_scan_source_files[@]}")
     frontend_original_hashes=("${frontend_scan_source_hashes[@]}")
@@ -3140,6 +3603,14 @@ frontend_enable_locked() {
     else
         frontend_choose_addresses || return 1
     fi
+    if ((${#frontend_migration_refs[@]} > 0)); then
+        frontend_migration_handoff=1
+    fi
+    frontend_read_tcp_listeners || {
+        frontend_migration_handoff=0
+        return 1
+    }
+    frontend_migration_handoff=0
     if [[ $kind != existing_map ]]; then
         frontend_choose_aux_port || return 1
         aux_port=$frontend_aux_port
@@ -3400,7 +3871,7 @@ frontend_check() {
             phase=$frontend_phase
             case $phase in
             prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
-                errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("An interrupted frontend transaction is in phase " + $phase + ". Run frontend recover before continuing.")}]')
+                errors=$(jq -cn --arg phase "$phase" '[{code:"recovery_required",message:("前置事务未完成，当前阶段：" + $phase + "。继续操作前请先运行 frontend recover。")}]')
                 ;;
             esac
         fi

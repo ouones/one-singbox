@@ -62,6 +62,8 @@ FAKE_SYSTEMCTL
     cat >"$case_dir/bin/ps" <<'FAKE_PS'
 #!/usr/bin/env bash
 case "$*" in
+    '-o ppid= -p 456') printf '123\n' ;;
+    '-o ppid= -p 900'|'-o ppid= -p 901'|'-o ppid= -p 124') printf '1\n' ;;
     '-o args= -p 123') printf 'nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
     '-eo pid=,args=')
         count=0
@@ -189,11 +191,41 @@ jq -e '.ok == false and .enabled == false and .revision == 0 and .phase == "fron
     echo "FAIL: missing-profile status should still expose the pending transaction: $pending_status"
     exit 1
 }
+jq -e '.errors[0].message | contains("前置事务未完成") and contains("frontend recover")' <<<"$pending_status" >/dev/null || {
+    echo "FAIL: pending transaction status should use Chinese guidance: $pending_status"
+    exit 1
+}
+pending_human=$(main frontend status 2>&1) && {
+    echo 'FAIL: human-readable status should fail while a transaction is pending'
+    exit 1
+}
+[[ $pending_human == *'前置事务未完成'* && $pending_human == *'frontend recover'* ]] || {
+    echo "FAIL: human-readable status should explain how to recover: $pending_human"
+    exit 1
+}
+jq -n '{phase:42}' >"$is_core_dir/.frontend-state/transaction.json"
+corrupt_status=$(main frontend status --json 2>&1) && {
+    echo 'FAIL: status must reject a transaction record with an invalid phase type'
+    exit 1
+}
+jq -e '.errors[0].code == "transaction_corrupt" and (.errors[0].message | contains("前置事务记录"))' <<<"$corrupt_status" >/dev/null || {
+    echo "FAIL: corrupt transaction status should use a localized message: $corrupt_status"
+    exit 1
+}
+corrupt_human=$(main frontend status 2>&1) && {
+    echo 'FAIL: human-readable status should reject a corrupt transaction record'
+    exit 1
+}
+[[ $corrupt_human == *'前置事务记录'* ]] || {
+    echo "FAIL: human-readable corrupt transaction status should be localized: $corrupt_human"
+    exit 1
+}
+jq -n '{phase:"frontend_applied"}' >"$is_core_dir/.frontend-state/transaction.json"
 disable_pending=$(main frontend disable 2>&1) && {
     echo "FAIL: disable must not treat a missing profile as idle while a transaction is pending"
     exit 1
 }
-[[ $disable_pending == *"Run frontend recover"* ]] || {
+[[ $disable_pending == *'frontend recover'* && $disable_pending == *'请先运行'* ]] || {
     echo "FAIL: disable should direct the operator to recover the pending transaction: $disable_pending"
     exit 1
 }
@@ -234,6 +266,18 @@ jq -e '.ok == false and .enabled == null and .errors[0].code == "unsupported_sch
     echo "FAIL: unknown profile schema should be reported without treating it as disabled: $invalid_status"
     exit 1
 }
+jq -e '.errors[0].message | contains("不受支持的 schema_version")' <<<"$invalid_status" >/dev/null || {
+    echo "FAIL: invalid profile JSON message should be localized: $invalid_status"
+    exit 1
+}
+invalid_status_human=$(main frontend status 2>&1) && {
+    echo 'FAIL: human-readable status should reject an unsupported profile schema'
+    exit 1
+}
+[[ $invalid_status_human == *'不受支持的 schema_version'* ]] || {
+    echo "FAIL: invalid profile status should be localized: $invalid_status_human"
+    exit 1
+}
 [[ ! -s "$FRONTEND_SERVICE_LOG" ]] || {
     echo "FAIL: status contacted a service manager while reading a profile"
     cat "$FRONTEND_SERVICE_LOG"
@@ -241,14 +285,31 @@ jq -e '.ok == false and .enabled == null and .errors[0].code == "unsupported_sch
 }
 
 jq -n '{schema_version:1,enabled:true,revision:4,engine:"nginx",listen_addresses:["0.0.0.0"],bindings:[],nginx:{config:"/etc/nginx/nginx.conf"},ownership:{}}' >"$is_core_dir/frontend.json"
-valid_status=$(main frontend status --json 2>&1) || {
-    echo "FAIL: status should read a valid profile: $valid_status"
+stopped_status=$(main frontend status --json 2>&1) && {
+    echo 'FAIL: enabled status must report a stopped Nginx service as non-OK'
     exit 1
 }
-jq -e '.ok == true and .enabled == true and .revision == 4 and .nginx.config == "/etc/nginx/nginx.conf"' <<<"$valid_status" >/dev/null || {
-    echo "FAIL: status should report the saved profile: $valid_status"
+jq -e '.ok == false and .enabled == true and .revision == 4 and .errors[0].code == "nginx_unavailable"' <<<"$stopped_status" >/dev/null || {
+    echo "FAIL: enabled status should surface the stopped Nginx service: $stopped_status"
     exit 1
 }
+jq '.enabled = false' "$is_core_dir/frontend.json" >"$is_core_dir/frontend.json.tmp"
+mv "$is_core_dir/frontend.json.tmp" "$is_core_dir/frontend.json"
+: >"$FRONTEND_SERVICE_LOG"
+disabled_status=$(main frontend status --json 2>&1) || {
+    echo "FAIL: disabled status should remain available when Nginx is stopped: $disabled_status"
+    exit 1
+}
+jq -e '.ok == true and .enabled == false' <<<"$disabled_status" >/dev/null || {
+    echo "FAIL: disabled status should report the saved disabled profile: $disabled_status"
+    exit 1
+}
+[[ ! -s "$FRONTEND_SERVICE_LOG" ]] || {
+    echo 'FAIL: disabled status should not contact the Nginx service manager'
+    exit 1
+}
+jq '.enabled = true' "$is_core_dir/frontend.json" >"$is_core_dir/frontend.json.tmp"
+mv "$is_core_dir/frontend.json.tmp" "$is_core_dir/frontend.json"
 
 check_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 check_output=$(main frontend check --json 2>&1) && {
@@ -344,6 +405,67 @@ jq -e '.nginx.entry_type == "existing_map" and .nginx.map_variable == "$backend"
     exit 1
 }
 
+FRONTEND_NGINX_LISTENERS=$'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))\nLISTEN 0 511 [::]:443 [::]:* users:(("nginx",pid=124,fd=7))'
+export FRONTEND_NGINX_LISTENERS
+disjoint_family_check=$(main frontend check --json 2>&1) || {
+    echo "FAIL: an unrelated same-binary listener on a disjoint IPv6 range should not conflict: $disjoint_family_check"
+    exit 1
+}
+
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=124,fd=7))'
+export FRONTEND_NGINX_LISTENERS
+second_instance_check=$(main frontend check --json 2>&1) && {
+    echo 'FAIL: a same-binary second Nginx master must not be treated as the selected service owner'
+    exit 1
+}
+jq -e '.errors[0].code == "tcp_443_port_conflict"' <<<"$second_instance_check" >/dev/null || {
+    echo "FAIL: a same-binary second master should be reported as a TCP 443 conflict: $second_instance_check"
+    exit 1
+}
+
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 [::]:443 [::]:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+wrong_family_check=$(main frontend check --json 2>&1) && {
+    echo 'FAIL: an IPv6 socket must not satisfy a configured IPv4 listener'
+    exit 1
+}
+jq -e '.errors[0].code == "nginx_listener_missing"' <<<"$wrong_family_check" >/dev/null || {
+    echo "FAIL: a listener on the wrong address family should be reported: $wrong_family_check"
+    exit 1
+}
+cat >"$FRONTEND_NGINX_CONF" <<'EOF'
+events {}
+stream {
+    map $ssl_preread_server_name $backend {
+        default 127.0.0.1:9443;
+    }
+    server {
+        listen [::]:443;
+        ssl_preread on;
+        proxy_pass $backend;
+    }
+}
+EOF
+FRONTEND_NGINX_LISTENERS=$'LISTEN 0 511 [::]:443 [::]:* users:(("nginx",pid=123,fd=6))\nLISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("other",pid=900,fd=7))'
+export FRONTEND_NGINX_LISTENERS
+ipv6only_default_check=$(main frontend check --json 2>&1) || {
+    echo "FAIL: default ipv6only=on should keep IPv4 sockets disjoint: $ipv6only_default_check"
+    exit 1
+}
+
+sed -i 's/listen \[::\]:443;/listen [::]:443 ipv6only=off;/' "$FRONTEND_NGINX_CONF"
+ipv6only_off_check=$(main frontend check --json 2>&1) && {
+    echo 'FAIL: ipv6only=off should make the IPv6 listener overlap IPv4 TCP 443'
+    exit 1
+}
+jq -e '.errors[0].code == "tcp_443_port_conflict"' <<<"$ipv6only_off_check" >/dev/null || {
+    echo "FAIL: ipv6only=off overlap should report the IPv4 owner conflict: $ipv6only_off_check"
+    exit 1
+}
+
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+
 cat >"$FRONTEND_NGINX_CONF" <<'EOF'
 events {}
 http { server { listen 443 ssl; } }
@@ -406,6 +528,51 @@ grep -q 'one-singbox-frontend:begin' "$FRONTEND_NGINX_CONF" || {
 }
 FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
 export FRONTEND_NGINX_LISTENERS
+enabled_status=$(main frontend status --json 2>&1) || {
+    echo "FAIL: enabled status should refresh and report a matching active Nginx instance: $enabled_status"
+    exit 1
+}
+jq -e '.ok == true and .enabled == true and .nginx.listener_443 == 1' <<<"$enabled_status" >/dev/null || {
+    echo "FAIL: enabled status should return refreshed listener state: $enabled_status"
+    exit 1
+}
+
+status_config_before=$(sha256sum "$CASE_DIR/one-singbox/stream.conf" | awk '{print $1}')
+sed -i 's/one_singbox_reality_backend/stale_reality_backend/g' "$CASE_DIR/one-singbox/stream.conf"
+drifted_status=$(main frontend status --json 2>&1) && {
+    echo 'FAIL: enabled status must surface an active config that no longer matches the saved profile'
+    exit 1
+}
+jq -e '.ok == false and .errors[0].code == "nginx_instance_drift"' <<<"$drifted_status" >/dev/null || {
+    echo "FAIL: drifted status should identify the stale Nginx profile: $drifted_status"
+    exit 1
+}
+sed -i 's/stale_reality_backend/one_singbox_reality_backend/g' "$CASE_DIR/one-singbox/stream.conf"
+[[ $(sha256sum "$CASE_DIR/one-singbox/stream.conf" | awk '{print $1}') == "$status_config_before" ]] || {
+    echo 'FAIL: restoring the status drift fixture did not restore the Nginx config'
+    exit 1
+}
+
+FRONTEND_NGINX_LISTENERS=$'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))\nLISTEN 0 511 [::]:443 [::]:* users:(("nginx",pid=124,fd=7))'
+export FRONTEND_NGINX_LISTENERS
+enabled_disjoint_status=$(main frontend status --json 2>&1) || {
+    echo "FAIL: enabled IPv4 status should ignore a second same-binary IPv6 listener: $enabled_disjoint_status"
+    exit 1
+}
+
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 [::]:443 [::]:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+enabled_wrong_family_status=$(main frontend status --json 2>&1) && {
+    echo 'FAIL: enabled IPv4 status must reject an IPv6-only live listener'
+    exit 1
+}
+jq -e '.ok == false and .errors[0].code == "nginx_listener_missing"' <<<"$enabled_wrong_family_status" >/dev/null || {
+    echo "FAIL: enabled wrong-family listener should be reported: $enabled_wrong_family_status"
+    exit 1
+}
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+
 config_after_enable=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
 profile_after_enable=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 enable_again=$(main frontend enable 2>&1) || {
