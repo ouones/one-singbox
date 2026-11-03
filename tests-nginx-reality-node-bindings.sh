@@ -665,7 +665,14 @@ udp_tcp_add_output=$(main add reality 443 13131313-1313-4313-8313-131313131313 u
     echo "FAIL: UDP-only 443 must not block a TCP Reality listener when the frontend is disabled: $udp_tcp_add_output"
     exit 1
 }
-udp_tcp_node_file=$(find "$is_conf_dir" -maxdepth 1 -type f -name '*.json' ! -name udp-only.json -print -quit)
+udp_tcp_node_file=
+for candidate in "$is_conf_dir"/*.json; do
+    [[ -f $candidate ]] || continue
+    if jq -e '.inbounds[0].type == "vless" and .inbounds[0].listen_port == 443' "$candidate" >/dev/null 2>&1; then
+        udp_tcp_node_file=$candidate
+        break
+    fi
+done
 [[ $udp_tcp_node_file ]] && jq -e '.inbounds[0].type == "vless" and .inbounds[0].listen_port == 443' "$udp_tcp_node_file" >/dev/null || {
     echo "FAIL: TCP Reality should keep its ordinary direct listener beside UDP-only port 443: $udp_tcp_add_output"
     exit 1
