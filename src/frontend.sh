@@ -19,7 +19,8 @@ frontend_no_profile_status() {
     if [[ $json == --json ]]; then
         frontend_emit_json "$ok" false 0 "$phase" null '[]' "$errors"
     else
-        printf '443 SNI 前置：未启用\nrevision：0\n本机检查：未执行（前置未启用）\n'
+        printf '443 SNI 前置：未启用\n本机检查：未执行。\n'
+        [[ $errors != '[]' ]] || printf '可选择“检查 Nginx 环境”开始检查。\n'
         [[ $errors == '[]' ]] || jq -r '.[0].message' <<<"$errors" >&2
     fi
     [[ $errors == '[]' ]]
@@ -301,10 +302,15 @@ frontend_localize_error_message() {
     nginx_config_unreadable) printf '无法读取完整的当前 Nginx 配置。' ;;
     nginx_config_unsupported)
         context=$(frontend_localize_path_context "$message") || context=
-        if [[ $context ]]; then
-            printf '当前 Nginx 配置包含无法安全处理的结构（%s）。' "$context"
+        if [[ $message == 'Nginx include did not resolve to a file: '* ]]; then
+            printf 'Nginx 的 include 未匹配到文件：%s。该目录可能为空，或路径有误；请检查 Nginx 配置和目录。若空目录符合预期，当前版本仍无法处理此配置，请提供此提示并反馈给项目。检查不会修改配置。' "$context"
         else
-            printf '当前 Nginx 配置包含无法安全处理的结构。'
+            if [[ $context ]]; then
+                printf '无法识别或安全处理 Nginx 配置中的结构（%s）。' "$context"
+            else
+                printf '无法识别或安全处理当前 Nginx 配置中的结构。'
+            fi
+            printf '请检查 Nginx 配置，或将此提示和相关配置（隐藏敏感信息后）反馈给项目；不要盲目删除配置。'
         fi
         ;;
     nginx_detection_failed) printf '无法记录当前 Nginx 实例的检查结果。' ;;
@@ -347,9 +353,9 @@ frontend_localize_error_message() {
     nginx_reload_failed) printf 'Nginx 服务 reload 命令执行失败。' ;;
     nginx_reload_unavailable) printf '当前 Nginx 服务没有受支持的 reload 目标。' ;;
     nginx_service_manager_missing) printf '无法通过 systemd 或 OpenRC 识别 Nginx 服务。' ;;
-    nginx_ssl_preread_missing) printf '当前 Nginx 未提供 stream ssl_preread 支持。' ;;
-    nginx_stream_missing) printf '当前 Nginx 未提供 stream 模块。' ;;
-    nginx_unavailable) printf 'Nginx 服务未运行，或无法读取其活动配置。' ;;
+    nginx_ssl_preread_missing) printf '当前 Nginx 缺少 stream ssl_preread 支持。请安装或启用对应模块，确认 Nginx 配置正常后重新检查。' ;;
+    nginx_stream_missing) printf '当前 Nginx 缺少 stream 模块。请安装或启用该模块，确认 Nginx 配置正常后重新检查。' ;;
+    nginx_unavailable) printf 'Nginx 服务未运行，或无法读取其活动配置。请确认已安装并启动 Nginx 服务，再重新检查。' ;;
     nginx_worker_unverified) printf '在等待时间内未能确认 Nginx 已启动新的 worker。' ;;
     node_candidate_failed)
         case $message in
@@ -1609,7 +1615,7 @@ frontend_choose_addresses() {
         frontend_set_error listen_addresses_unavailable 'No global IPv4 or IPv6 address is configured on this host.'
         return 1
     }
-    printf '\n选择 443 监听范围：\n'
+    printf '\n选择客户端通过哪种 IP 地址连接 443：\n不确定时，请按服务器实际使用的地址类型选择。\n'
     local index=1
     for choice in "${options[@]}"; do
         printf '%s) %s\n' "$index" "$([[ $choice == ipv4 ]] && printf 'IPv4 所有地址' || printf 'IPv6 所有地址')"
@@ -3988,7 +3994,8 @@ frontend_check() {
         frontend_emit_json "$ok" "$enabled" "$revision" "$phase" "$nginx" "$bindings" "$errors"
     else
         if [[ $errors == '[]' ]]; then
-            printf 'Nginx 检查通过。\n'
+            printf 'Nginx 环境检查通过（未验证公网连通性）。\n'
+            [[ $enabled == true ]] || printf '前置尚未启用；如需使用，请返回菜单选择启用。\n'
         else
             jq -r '.[0].message' <<<"$errors" >&2
         fi
@@ -4057,10 +4064,10 @@ frontend_menu_enable() {
         frontend_main enable
         return $?
     fi
-    printf '现有公网 443 节点：%s\n' "${nodes[*]}"
-    read -r -p '输入要纳管的节点文件名（可多选，以空格分隔）: ' -a refs || return 1
+    printf '启用时，以下现有公网 443 节点必须全部加入前置，且都必须是普通 VLESS-REALITY 节点：\n%s\n' "${nodes[*]}"
+    read -r -p '输入上面全部节点文件名，用空格分隔（直接回车取消）: ' -a refs || return 1
     ((${#refs[@]} > 0)) || {
-        printf '请明确选择要迁移的节点；取消可返回菜单。\n' >&2
+        printf '已取消启用，返回菜单。\n' >&2
         return 1
     }
     frontend_main enable "${refs[@]}"
@@ -4070,7 +4077,8 @@ frontend_menu() {
     local action
     while :; do
         printf '\n443 SNI 前置\n'
-        printf '1) 状态\n2) 检查\n3) 启用空绑定模式/纳管现有节点\n4) 停用\n5) 恢复未完成事务\n0) 返回\n'
+        printf '作用：让多个普通 VLESS-REALITY 节点共用服务器的 TCP 443 端口，Nginx 根据连接中的域名将流量转给对应节点。\n什么时候用：需要让多个这类节点共用 443 端口，且服务器已安装并运行 Nginx。\n什么时候不用：没有这个需求时保持关闭即可，现有节点不需要为此修改。\n网站和证书仍需自行管理；此功能不会自动配置网站。\n'
+        printf '1) 查看是否已启用\n2) 检查 Nginx 是否满足要求（不启用）\n3) 启用前置（现有 443 节点会加入；没有节点也可启用）\n4) 停用前置（先删除或移出所有已加入的节点）\n5) 恢复上次中断的操作（仅在收到恢复提示时使用）\n0) 返回\n'
         read -r -p '请选择: ' action || return
         case $action in
         0) return ;;
