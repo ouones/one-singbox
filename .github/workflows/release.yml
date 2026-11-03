@@ -22,6 +22,23 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
+      - name: offline regression and Bash syntax gate
+        run: |
+          set -euo pipefail
+          shell_count=0
+          while IFS= read -r -d '' shell_file; do
+            bash -n "$shell_file"
+            shell_count=$((shell_count + 1))
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
+          if ((shell_count == 0)); then
+            echo "No Bash scripts found for syntax validation." >&2
+            exit 1
+          fi
+          sudo -n bash tests-nginx-reality-frontend.sh
+          sudo -n bash tests-nginx-reality-node-bindings.sh
+          sudo -n bash tests-node-name-label.sh
+          sudo -n bash tests-node-proxy-outbound.sh
+          bash tests-skill-inventory.sh
       - name: bump version
         run: |
           matching_tag=""
@@ -73,7 +90,7 @@ jobs:
       - name: tar
         run: |
           mkdir -p .release-artifacts
-          tar zcvf .release-artifacts/code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md docs/usage.md assets/readme
+          tar zcvf .release-artifacts/code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md docs/usage.md docs/nginx-reality-frontend-support.md assets/readme
       - name: update main version
         run: |
           for attempt in {1..10}; do
