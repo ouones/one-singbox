@@ -4,6 +4,7 @@
 
 - [节点与分享](#节点与分享)
 - [协议与 TLS](#协议与-tls)
+- [443 SNI 前置](#443-sni-前置)
 - [Snell](#snell)
 - [节点出站](#节点出站)
 - [端口中转](#端口中转)
@@ -55,6 +56,41 @@ sb qr 节点名
 | SOCKS | SOCKS 节点配置 |
 
 对需要域名并使用 Caddy 自动配置 TLS 的节点，先将域名解析到服务器，再确保验证和服务使用的端口可达。REALITY、脚本生成的证书和 Caddy 自动 TLS 是不同的配置路径，请按所选协议的提示操作。`sb no-auto-tls` 是关闭自动 TLS 配置的进阶入口，参数见 `sb help`。
+
+## 443 SNI 前置
+
+443 SNI 前置让多个普通 VLESS-REALITY 节点共用公网 TCP 443，并由 Nginx 按用户指定的 Reality SNI 转发到 sing-box 的本机回环后端。该模式默认关闭；它不包含 VLESS-HTTP2-REALITY。
+
+one-singbox 只检测 Nginx 并维护 Reality 映射。你需要自行安装、部署和升级 Nginx，并准备可被服务管理器识别的本机 Nginx 服务及所需 stream / `ssl_preread` 能力。缺少能力或配置结构不兼容时，工具会报告原因，不会安装软件或猜测改写配置。
+
+网站配置仍由你维护。工具不管理网站内容、证书、HTTP server、location、upstream 或 HTTP 反向代理；首次接入时只添加带标记的加载点，并创建或复用适用的 stream 入口。遇到无法可靠识别的配置时会拒绝写入。
+
+### 查看、检查与启用
+
+```bash
+sb frontend status [--json]
+sb frontend check [--json]
+sb frontend enable [node-ref ...]
+```
+
+也可以在首页选择“443 SNI 前置”。`status` 显示模式、绑定、检测到的 Nginx 实例、TCP 443 监听范围和本机检查结果；停用时不检查服务。`check` 检查正在运行的 Nginx 实例、所需能力与配置入口，不启用模式。首次启用必须纳管所有现有公网 TCP 443 节点；在交互菜单中选择全部节点，或在命令行传入所有节点文件名。若没有要纳管的旧节点，可启用空模式。迁移节点及新建 443 节点都必须符合普通 VLESS-REALITY 约束，并提供精确域名 SNI；不支持通配 SNI 或 `sni auto`。同一入口内不能重复使用相同 SNI。
+
+启用模式后，节点 SNI、发布地址、端口或删除等受支持的操作会同步更新 Reality 映射。查看和分享信息继续使用公网地址与 443，不显示内部回环地址或后端端口。
+
+### 停用与恢复
+
+```bash
+sb frontend disable
+sb frontend recover
+```
+
+停用前必须先删除或移出所有受管绑定。停用只清理仍能确认属于 one-singbox 的 Reality 映射和入口；不会停止或卸载 Nginx，也不会删除网站或其他用户分流配置。移除最后一个绑定不会自动停用空模式。
+
+节点与映射变更会检查候选 sing-box 和完整 Nginx 配置，再应用并重载。Nginx reload 作用于整个实例，可能同时使你另外编辑但尚未加载的网站配置生效。变更期间可能短暂断连。失败时工具会尝试恢复受管文件和服务；如果命令提示存在未完成事务，先运行 `sb frontend recover`，并按命令给出的恢复状态处理。
+
+经 Nginx 转发的 sing-box 连接来源是本机回环地址；one-singbox 不透传原客户端 IP。配置检查通过、服务运行或本机回环连接成功，都不代表公网 DNS、防火墙、安全组和外部客户端连通性已经验证。
+
+更多实际验证结果及未验证范围见[443 SNI 前置验证与支持状态](nginx-reality-frontend-support.md)。
 
 新建 REALITY 节点、运行 `sb gen reality` 或主动执行 `sb sni 节点名 auto` 时，脚本会查询 IPPure 并随机选择 SNI。德国、新加坡和香港按国家代码使用各自的固定域名池；美国仅完整匹配 `San Jose` 或 `Los Angeles` 时使用对应域名池，其他美国城市（包括 `Santa Clara`）、缺少城市或只有 California / CA 信息时使用固定后备池，不按邻近城市推断。其他地区或定位失败时也使用后备池。手动提供域名时会保留原值，不查询位置；查看现有节点和修改其他参数也不会自动更改 SNI。自动选择使用有限的 10 秒等待，查询失败不会阻止创建或更改。
 

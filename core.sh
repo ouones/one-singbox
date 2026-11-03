@@ -1,5 +1,8 @@
 #!/bin/bash
 
+is_core_source_dir=${BASH_SOURCE[0]%/*}
+[[ $is_core_source_dir == "${BASH_SOURCE[0]}" ]] && is_core_source_dir=.
+
 author=ouones
 is_script_name=one-singbox
 
@@ -61,6 +64,37 @@ load() {
     . $is_sh_dir/src/$1
 }
 
+shared_config_lock() {
+    local frontend_source=
+    if [[ -f $is_sh_dir/src/frontend.sh ]]; then
+        frontend_source=$is_sh_dir/src/frontend.sh
+    elif [[ -f $is_core_source_dir/src/frontend.sh ]]; then
+        frontend_source=$is_core_source_dir/src/frontend.sh
+    elif [[ -f $is_core_source_dir/frontend.sh ]]; then
+        frontend_source=$is_core_source_dir/frontend.sh
+    else
+        load frontend.sh || return 1
+    fi
+    [[ -n $frontend_source ]] && . "$frontend_source"
+    frontend_lock_state
+}
+
+shared_config_unlock() {
+    frontend_unlock_state
+}
+
+caddy_frontend_port_check() {
+    local https_port=${is_https_port:-443}
+    [[ $https_port == 443 ]] || return 0
+    [[ -e $is_core_dir/frontend.json || -L $is_core_dir/frontend.json ]] || return 0
+    load frontend.sh || return 1
+    frontend_load_profile || return 1
+    if [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null 2>&1; then
+        frontend_error_message='TCP 443 is reserved by the enabled Nginx Reality frontend; choose another Caddy HTTPS port.'
+        return 1
+    fi
+}
+
 qrcode_dependency_source=$is_sh_dir/src/qrcode-deps.sh
 if [[ ! -f $qrcode_dependency_source ]]; then
     qrcode_core_dir=$(dirname -- "$BASH_SOURCE")
@@ -119,6 +153,7 @@ ss_method_list=(
 )
 mainmenu=(
     "节点管理"
+    "443 SNI 前置"
     "TCP/UDP 端口中转"
     "服务控制"
     "更新软件"
@@ -324,7 +359,7 @@ require_snell_support() {
 }
 
 config_port_used() {
-    local wanted=$1 current=${2:-} file nullglob_was_set
+    local wanted=$1 current=${2:-} transport=${3:-both} file nullglob_was_set
     if shopt -q nullglob; then
         nullglob_was_set=1
     else
@@ -333,7 +368,23 @@ config_port_used() {
     shopt -s nullglob
     for file in "$is_conf_dir"/*.json; do
         [[ ${file##*/} == "$current" ]] && continue
-        if jq -e --argjson port "$wanted" 'any(.inbounds[]?.listen_port?; . == $port)' "$file" >/dev/null 2>&1; then
+        if jq -e --argjson port "$wanted" --arg transport "$transport" '
+            def listens_tcp:
+                (.network // "") != "udp" and
+                (.transport.type // "") != "quic" and
+                (.type != "hysteria" and .type != "hysteria2" and .type != "tuic");
+            def listens_udp:
+                if .network == "tcp" then false
+                elif .network == "udp" then true
+                elif (.transport.type // "") == "quic" or .type == "hysteria" or .type == "hysteria2" or .type == "tuic" then true
+                elif .type == "vless" or .type == "vmess" or .type == "trojan" or .type == "anytls" or .type == "socks" or .type == "http" or .type == "mixed" or .type == "shadowtls" then false
+                else true end;
+            any(.inbounds[]?;
+                .listen_port == $port and
+                (if $transport == "tcp" then listens_tcp
+                 elif $transport == "udp" then listens_udp
+                 else true end))
+        ' "$file" >/dev/null 2>&1; then
             if ((nullglob_was_set)); then
                 shopt -s nullglob
             else
@@ -342,6 +393,16 @@ config_port_used() {
             return 0
         fi
     done
+    if [[ $transport != udp && -e $is_core_dir/frontend.json ]]; then
+        if ! jq -e '.schema_version == 1 and (.ownership | type == "object") and (.bindings | type == "array")' "$is_core_dir/frontend.json" >/dev/null 2>&1; then
+            ((nullglob_was_set)) && shopt -s nullglob || shopt -u nullglob
+            return 0
+        fi
+        if jq -e --argjson port "$wanted" '(.ownership.reject_port == $port) or any(.bindings[]?; .backend_port == $port)' "$is_core_dir/frontend.json" >/dev/null 2>&1; then
+            ((nullglob_was_set)) && shopt -s nullglob || shopt -u nullglob
+            return 0
+        fi
+    fi
     if ((nullglob_was_set)); then
         shopt -s nullglob
     else
@@ -391,7 +452,7 @@ get_port() {
             err "已尝试 233 次，仍未找到可用端口。请检查端口占用情况。"
         fi
         tmp_port=$(shuf -i 20000-65535 -n 1)
-        [[ ! $(is_test port_used $tmp_port) && $tmp_port != $port ]] && break
+        [[ ! $(node_port_used "$tmp_port" "$is_new_protocol") && $tmp_port != $port ]] && break
     done
 }
 
@@ -426,7 +487,7 @@ is_test() {
         fi
         ;;
     port_used)
-        [[ $(is_port_used $2) && ! $is_cant_test_port ]] && echo ok
+        [[ $(node_port_used "$2" "$is_new_protocol") && ! $is_cant_test_port ]] && echo ok
         ;;
     domain)
         echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
@@ -455,6 +516,90 @@ is_port_used() {
     is_cant_test_port=1
     msg "$is_warn 无法检测端口是否可用."
     msg "请执行: $(_yellow "${cmd} update -y; ${cmd} install net-tools -y") 来修复此问题."
+}
+
+node_protocol_transport() {
+    case ${1,,} in
+    *hysteria* | tuic | *quic*)
+        printf 'udp\n'
+        ;;
+    vless* | vmess | trojan | anytls | socks | http | mixed | shadowtls)
+        printf 'tcp\n'
+        ;;
+    *)
+        printf 'both\n'
+        ;;
+    esac
+}
+
+is_tcp_port_used() {
+    local wanted=$1 output line state recv send local_address peer process port
+    if [[ $(type -P ss) ]]; then
+        output=$(ss -Hlnpt 2>/dev/null) || {
+            is_cant_test_port=1
+            return 0
+        }
+        while read -r state recv send local_address peer process; do
+            port=${local_address##*:}
+            [[ $port == "$wanted" ]] && return 0
+        done <<<"$output"
+        return 1
+    fi
+    if [[ $(type -P netstat) ]]; then
+        output=$(netstat -tnlp 2>/dev/null) || {
+            is_cant_test_port=1
+            return 0
+        }
+        while read -r line; do
+            [[ $line == tcp* && $line == *LISTEN* ]] || continue
+            local_address=$(awk '{print $4}' <<<"$line")
+            port=${local_address##*:}
+            [[ $port == "$wanted" ]] && return 0
+        done <<<"$output"
+        return 1
+    fi
+    is_cant_test_port=1
+    return 0
+}
+
+is_udp_port_used() {
+    local wanted=$1 output state recv send local_address peer process port line
+    if [[ $(type -P ss) ]]; then
+        output=$(ss -Hlnpu 2>/dev/null) || {
+            is_cant_test_port=1
+            return 0
+        }
+        while read -r state recv send local_address peer process; do
+            port=${local_address##*:}
+            [[ $port == "$wanted" ]] && return 0
+        done <<<"$output"
+        return 1
+    fi
+    if [[ $(type -P netstat) ]]; then
+        output=$(netstat -unlp 2>/dev/null) || {
+            is_cant_test_port=1
+            return 0
+        }
+        while read -r line; do
+            [[ $line == udp* ]] || continue
+            local_address=$(awk '{print $4}' <<<"$line")
+            port=${local_address##*:}
+            [[ $port == "$wanted" ]] && return 0
+        done <<<"$output"
+        return 1
+    fi
+    is_cant_test_port=1
+    return 0
+}
+
+node_port_used() {
+    local port=$1 transport
+    transport=$(node_protocol_transport "${2:-}")
+    case $transport in
+    tcp) is_tcp_port_used "$port" && printf '%s\n' "$port" ;;
+    udp) is_udp_port_used "$port" && printf '%s\n' "$port" ;;
+    *) is_port_used "$port" ;;
+    esac
 }
 
 # ask input a string or pick a option for list.
@@ -547,9 +692,17 @@ ask() {
                     msg "$is_err 请输入正确的端口, 可选(1-65535)"
                     continue
                 }
-                if [[ $(is_test port_used $REPLY) && $is_ask_set != 'door_port' ]]; then
-                    msg "$is_err 无法使用 ($REPLY) 端口."
-                    continue
+                if [[ $(node_port_used "$REPLY" "$is_new_protocol") && $is_ask_set != 'door_port' ]]; then
+                    if [[ $REPLY == 443 && $is_new_protocol == VLESS-REALITY && -e $is_core_dir/frontend.json ]]; then
+                        load frontend.sh
+                        frontend_public_443_ready || {
+                            msg "$is_err ${frontend_error_message:-无法使用 ($REPLY) 端口.}"
+                            continue
+                        }
+                    else
+                        msg "$is_err 无法使用 ($REPLY) 端口."
+                        continue
+                    fi
                 fi
             }
             [[ $(grep path <<<$is_ask_set) && ! $(is_test path "$REPLY") ]] && {
@@ -618,7 +771,7 @@ meta_get() {
     jq -r "$2 // empty" "$f" 2>/dev/null
 }
 
-meta_set() {
+meta_set_unlocked() {
     local cfg=$1
     local key=$2
     local val=$3
@@ -632,7 +785,15 @@ meta_set() {
     fi
 }
 
-meta_move() {
+meta_set() {
+    shared_config_lock || return 1
+    meta_set_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
+meta_move_unlocked() {
     local old=$1
     local new=$2
     local of nf
@@ -641,11 +802,70 @@ meta_move() {
     [[ -f "$of" ]] && mv -f "$of" "$nf"
 }
 
-meta_rm() {
+meta_move() {
+    shared_config_lock || return 1
+    meta_move_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
+meta_rm_unlocked() {
     local cfg=$1
     local f
     f=$(meta_file "$cfg")
     [[ -f "$f" ]] && rm -f "$f"
+}
+
+meta_rm() {
+    shared_config_lock || return 1
+    meta_rm_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
+frontend_node_binding_for_ref() {
+    local node_ref=$1
+    is_frontend_bound_node=
+    is_frontend_bound_backend_port=
+    frontend_node_source_ref=$node_ref
+    frontend_node_source_hash=
+    if [[ -f "$is_conf_dir/$node_ref" && ! -L "$is_conf_dir/$node_ref" ]]; then
+        frontend_node_source_hash=$(sha256sum "$is_conf_dir/$node_ref" | awk '{print $1}') || return 1
+    fi
+    [[ -f $is_core_dir/frontend.json ]] || return 0
+    load frontend.sh
+    frontend_load_profile || {
+        frontend_error_message=$frontend_profile_error_message
+        return 1
+    }
+    [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null || return 0
+    is_frontend_bound_backend_port=$(jq -r --arg ref "$node_ref" '.bindings[] | select(.node_ref == $ref) | .backend_port' <<<"$frontend_profile")
+    if [[ $is_frontend_bound_backend_port ]]; then
+        is_frontend_bound_node=1
+    fi
+    return 0
+}
+
+frontend_update_bound_node_metadata() {
+    local node_ref=$1 key=$2 value=$3 node_file="$is_conf_dir/$1" metadata_file candidate_node candidate_meta
+    metadata_file=$(meta_file "$node_ref")
+    [[ -f $node_file && ! -L $node_file ]] || {
+        frontend_error_message="Bound node file is missing: $node_ref"
+        return 1
+    }
+    if [[ -f $metadata_file ]]; then
+        candidate_meta=$(jq --arg key "$key" --arg value "$value" '.[$key]=$value' "$metadata_file") || {
+            frontend_error_message="Node metadata is invalid: $metadata_file"
+            return 1
+        }
+    else
+        candidate_meta=$(jq -cn --arg key "$key" --arg value "$value" '{($key):$value}') || return 1
+    fi
+    candidate_node=$(jq '.inbounds[0].listen="::" | .inbounds[0].listen_port=443' "$node_file") || return 1
+    load frontend.sh
+    frontend_apply_node_lifecycle replace "$node_ref" "$node_ref" "$candidate_node" "$candidate_meta"
 }
 
 node_name_for_link() {
@@ -913,7 +1133,7 @@ render_runtime_node_outbound_modes() {
     return 0
 }
 
-sync_runtime_node_outbound_modes() {
+sync_runtime_node_outbound_modes_unlocked() {
     local source_config=${1:-$is_config_json} target_config=${2:-$is_config_json} config_dir=${3:-$is_conf_dir} validate=${4:-0} tmp
     runtime_sync_error=
     [[ -f $source_config ]] || return 0
@@ -936,6 +1156,17 @@ sync_runtime_node_outbound_modes() {
         return 1
     fi
     return 0
+}
+
+sync_runtime_node_outbound_modes() {
+    shared_config_lock || {
+        runtime_sync_error=${frontend_error_message:-无法获取公共配置锁}
+        return 1
+    }
+    sync_runtime_node_outbound_modes_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
 }
 
 manage_restart_confirmed() {
@@ -1005,68 +1236,38 @@ restore_node_config_lifecycle() {
     node_lifecycle_restore_errors=${errors[*]}
 }
 
-apply_node_config_lifecycle() {
-    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
-    local old_node="$is_conf_dir/$old_cfg" new_node old_meta new_meta candidate_nodes candidate_config source_config tmp_dir tmp_parent
-    local original_old_node original_old_meta original_config stage old_meta_exists=0 old_config_exists=0 restart_needed=0
+prepare_node_config_lifecycle() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-} tmp_dir=$5
+    local old_node="$is_conf_dir/$old_cfg" old_meta
+    local candidate_nodes candidate_config source_config original_old_node original_old_meta original_config
+
     node_lifecycle_error=
-    node_lifecycle_restore_errors=
-    [[ $operation == delete || $operation == replace ]] || {
-        node_lifecycle_error="不支持的节点操作: $operation"
-        return 1
-    }
-    [[ -f $old_node ]] || {
-        node_lifecycle_error="本机节点配置不存在: $old_node"
-        return 1
-    }
-    if [[ $operation == replace ]]; then
-        new_node="$is_conf_dir/$new_cfg"
-        new_meta=$(meta_file "$new_cfg")
-        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
-            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
-            return 1
-        }
-        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
-            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
-            return 1
-        fi
-    fi
-    tmp_parent=$(dirname "$is_conf_dir")
-    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
-        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
-        return 1
-    }
     candidate_nodes="$tmp_dir/nodes"
     if ! mkdir -p "$candidate_nodes" || ! cp -a "$is_conf_dir/." "$candidate_nodes/"; then
         node_lifecycle_error="无法构造候选节点集合"
-        rm -rf "$tmp_dir"
         return 1
     fi
     old_meta=$(meta_file "$old_cfg")
     if [[ $operation == delete ]]; then
         rm -f "$candidate_nodes/$old_cfg" "$candidate_nodes/.quan-meta/$old_cfg.meta.json" || {
             node_lifecycle_error="无法构造候选删除节点集合"
-            rm -rf "$tmp_dir"
             return 1
         }
     else
         if [[ $old_cfg != "$new_cfg" ]]; then
             if ! mv -f "$candidate_nodes/$old_cfg" "$candidate_nodes/$new_cfg"; then
                 node_lifecycle_error="无法构造候选节点迁移: $old_cfg -> $new_cfg"
-                rm -rf "$tmp_dir"
                 return 1
             fi
             if [[ -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" ]]; then
                 mkdir -p "$candidate_nodes/.quan-meta" && mv -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" "$candidate_nodes/.quan-meta/$new_cfg.meta.json" || {
                     node_lifecycle_error="无法构造候选节点元数据迁移: $old_cfg -> $new_cfg"
-                    rm -rf "$tmp_dir"
                     return 1
                 }
             fi
         fi
         printf '%s\n' "$new_json" >"$candidate_nodes/$new_cfg" || {
             node_lifecycle_error="无法写入候选节点配置: $new_cfg"
-            rm -rf "$tmp_dir"
             return 1
         }
     fi
@@ -1078,18 +1279,15 @@ apply_node_config_lifecycle() {
         source_config="$tmp_dir/default-config.json"
         default_runtime_config >"$source_config" || {
             node_lifecycle_error="无法构造默认公共配置"
-            rm -rf "$tmp_dir"
             return 1
         }
     fi
     if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" '' '' "$candidate_nodes"; then
         node_lifecycle_error="节点关联配置生成失败: ${runtime_sync_error:-未知错误}"
-        rm -rf "$tmp_dir"
         return 1
     fi
     if ! "$is_core_bin" check -c "$candidate_config" -C "$candidate_nodes" &>/dev/null; then
         node_lifecycle_error="完整候选节点配置校验失败，原配置未改变: $old_cfg${new_cfg:+ -> $new_cfg}"
-        rm -rf "$tmp_dir"
         return 1
     fi
 
@@ -1098,25 +1296,31 @@ apply_node_config_lifecycle() {
     original_config="$tmp_dir/original-config"
     cp -p "$old_node" "$original_old_node" || {
         node_lifecycle_error="无法备份节点配置: $old_node"
-        rm -rf "$tmp_dir"
         return 1
     }
     if [[ -f $old_meta ]]; then
         cp -p "$old_meta" "$original_old_meta" || {
             node_lifecycle_error="无法备份节点元数据: $old_meta"
-            rm -rf "$tmp_dir"
             return 1
         }
-        old_meta_exists=1
     fi
     if [[ -f $is_config_json ]]; then
         cp -p "$is_config_json" "$original_config" || {
             node_lifecycle_error="无法备份公共配置: $is_config_json"
-            rm -rf "$tmp_dir"
             return 1
         }
-        old_config_exists=1
     fi
+}
+
+apply_node_config_lifecycle_files() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} tmp_dir=$4
+    local old_node="$is_conf_dir/$old_cfg" new_node="$is_conf_dir/$new_cfg" old_meta new_meta
+    local candidate_nodes="$tmp_dir/nodes" candidate_config="$tmp_dir/config.json" stage old_config_exists=0
+    node_lifecycle_error=
+    node_lifecycle_restart_needed=0
+    old_meta=$(meta_file "$old_cfg")
+    new_meta=$(meta_file "$new_cfg")
+    [[ -f "$tmp_dir/original-config" ]] && old_config_exists=1
 
     if [[ $operation == replace ]]; then
         stage=$(mktemp "$new_node.lifecycle.XXXXXX") || node_lifecycle_error="无法准备节点配置保存: $new_node"
@@ -1143,15 +1347,55 @@ apply_node_config_lifecycle() {
             rm -f "$stage"
             node_lifecycle_error="保存公共配置失败: $is_config_json"
         fi
-        [[ ! $node_lifecycle_error ]] && restart_needed=1
+        [[ ! $node_lifecycle_error ]] && node_lifecycle_restart_needed=1
     fi
-    if [[ $node_lifecycle_error ]]; then
+    [[ ! $node_lifecycle_error ]]
+}
+
+apply_node_config_lifecycle_unlocked() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
+    local old_node="$is_conf_dir/$old_cfg" tmp_dir tmp_parent old_meta_exists=0 old_config_exists=0
+    node_lifecycle_error=
+    node_lifecycle_restore_errors=
+    node_lifecycle_restart_needed=0
+    [[ $operation == delete || $operation == replace ]] || {
+        node_lifecycle_error="不支持的节点操作: $operation"
+        return 1
+    }
+    [[ -f $old_node ]] || {
+        node_lifecycle_error="本机节点配置不存在: $old_node"
+        return 1
+    }
+    if [[ $operation == replace ]]; then
+        local new_node="$is_conf_dir/$new_cfg" new_meta
+        new_meta=$(meta_file "$new_cfg")
+        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
+            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
+            return 1
+        }
+        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
+            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
+            return 1
+        fi
+    fi
+    tmp_parent=$(dirname "$is_conf_dir")
+    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
+        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
+        return 1
+    }
+    if ! prepare_node_config_lifecycle "$operation" "$old_cfg" "$new_cfg" "$new_json" "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    [[ -f "$tmp_dir/original-old-meta" ]] && old_meta_exists=1
+    [[ -f "$tmp_dir/original-config" ]] && old_config_exists=1
+    if ! apply_node_config_lifecycle_files "$operation" "$old_cfg" "$new_cfg" "$tmp_dir"; then
         restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
         [[ $node_lifecycle_restore_errors ]] && node_lifecycle_error+="；恢复文件失败: $node_lifecycle_restore_errors"
         rm -rf "$tmp_dir"
         return 1
     fi
-    if [[ $restart_needed == 1 ]] && ! manage_restart_confirmed; then
+    if [[ $node_lifecycle_restart_needed == 1 ]] && ! manage_restart_confirmed; then
         restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
         if manage_restart_confirmed; then
             if [[ $node_lifecycle_restore_errors ]]; then
@@ -1170,7 +1414,19 @@ apply_node_config_lifecycle() {
     rm -rf "$tmp_dir"
     return 0
 }
-apply_node_outbound_mode() {
+
+apply_node_config_lifecycle() {
+    shared_config_lock || {
+        node_lifecycle_error=${frontend_error_message:-无法获取公共配置锁}
+        return 1
+    }
+    apply_node_config_lifecycle_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
+apply_node_outbound_mode_unlocked() {
     local cfg=$1 mode=$2 proxy_config=${3:-} proxy_name=${4:-}
     local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
     local source_config candidate_meta candidate_config original_meta original_config
@@ -1301,6 +1557,26 @@ apply_node_outbound_mode() {
             return 1
         }
     fi
+    frontend_node_binding_for_ref "$cfg" || {
+        outbound_apply_error=${frontend_error_message:-无法读取 443 前置节点绑定}
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if [[ $is_frontend_bound_node ]]; then
+        candidate_node_json=$(jq '.inbounds[0].listen="::" | .inbounds[0].listen_port=443' "$node_file") || {
+            outbound_apply_error="无法构造 443 前置节点候选配置"
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        load frontend.sh
+        frontend_apply_node_lifecycle replace "$cfg" "$cfg" "$candidate_node_json" "$candidate_meta_json" || {
+            outbound_apply_error=${frontend_error_message:-443 前置节点变更失败}
+            rm -rf "$tmp_dir"
+            return 1
+        }
+        rm -rf "$tmp_dir"
+        return 0
+    fi
     if ! printf '%s\n' "$candidate_meta_json" >"$candidate_meta"; then
         outbound_apply_error="无法写入候选节点元数据"
         rm -rf "$tmp_dir"
@@ -1400,6 +1676,17 @@ apply_node_outbound_mode() {
     fi
     rm -rf "$tmp_dir"
     return 0
+}
+
+apply_node_outbound_mode() {
+    shared_config_lock || {
+        outbound_apply_error=${frontend_error_message:-无法获取公共配置锁}
+        return 1
+    }
+    apply_node_outbound_mode_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
 }
 
 edit_node_outbound_mode() {
@@ -2767,7 +3054,7 @@ resolve_entry_addr_for_listen() {
     echo "$addr"
 }
 
-sync_entry_addr_config() {
+sync_entry_addr_config_unlocked() {
     local cfg=$1
     local entry=$2
     local file="$is_conf_dir/$cfg"
@@ -2778,6 +3065,13 @@ sync_entry_addr_config() {
     normalized_entry=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$entry")
     if [[ ! $normalized_entry ]] || ! is_valid_entry_addr "$normalized_entry"; then
         normalized_entry=$(get_public_entry_addr)
+    fi
+
+    frontend_node_binding_for_ref "$cfg" || err "$frontend_error_message"
+    if [[ $is_frontend_bound_node ]]; then
+        frontend_update_bound_node_metadata "$cfg" entry_addr "$normalized_entry" || err "$frontend_error_message"
+        echo "$normalized_entry"
+        return
     fi
 
     if jq -e '.inbounds[0].transport.headers.host? != null' "$file" >/dev/null 2>&1; then
@@ -2795,11 +3089,20 @@ sync_entry_addr_config() {
     echo "$normalized_entry"
 }
 
+sync_entry_addr_config() {
+    shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+    sync_entry_addr_config_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
 # create file
 create() {
     case $1 in
     server)
-        local previous_config_file is_snell_tmp_file node_migration_applied
+        local previous_config_file is_snell_tmp_file node_migration_applied new_node_lock new_node_transport
+        previous_config_file=$is_config_file
         is_tls=none
         get new
         # listen
@@ -2807,6 +3110,7 @@ create() {
         # file name: protocol + port
         is_config_name=${2}-${port}.json
         [[ ${2,,} == snell ]] && is_config_name=snell-${port}.json
+        [[ $is_change && $is_frontend_bound_node && $port == 443 ]] && is_config_name=$previous_config_file
         [[ $host ]] && is_listen='listen: "127.0.0.1"'
         is_json_file=$is_conf_dir/$is_config_name
         [[ ${2,,} == *reality* && ! $is_servername ]] && is_servername=$(reality_sni_select)
@@ -2852,9 +3156,46 @@ create() {
             msg
             return
         }
-        previous_config_file=$is_config_file
         node_migration_applied=
+        if [[ $is_change && $is_frontend_bound_node ]]; then
+            load frontend.sh
+            frontend_apply_node_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$frontend_error_message"
+            node_migration_applied=1
+            is_frontend_transaction_applied=1
+            is_config_file=$is_config_name
+            msg "\n节点配置已应用: $(_green $is_config_name)\n"
+        elif [[ $is_frontend_public_443_add == 1 && $is_change && $previous_config_file ]]; then
+            load frontend.sh
+            frontend_apply_node_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$frontend_error_message"
+            node_migration_applied=1
+            is_frontend_transaction_applied=1
+            is_config_file=$is_config_name
+            msg "\n节点配置已应用: $(_green $is_config_name)\n"
+        elif [[ $is_frontend_public_443_add == 1 ]]; then
+            [[ ${2,,} == vless-reality && ! $is_change ]] || err 'Only new ordinary VLESS-REALITY nodes can be added through the public 443 frontend.'
+            load frontend.sh
+            frontend_add_public_reality_node "$is_new_json" "$is_custom_node_name" || err "$frontend_error_message"
+            is_frontend_transaction_applied=1
+            return 0
+        fi
+        if [[ ! $is_change || ! $previous_config_file ]]; then
+            shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+            new_node_lock=1
+            if [[ ${2,,} != snell ]]; then
+                is_used_port=
+                if [[ $(node_port_used "$port" "$is_new_protocol") ]]; then
+                    shared_config_unlock
+                    err "无法使用 ($port) 端口"
+                fi
+            fi
+            new_node_transport=$(node_protocol_transport "$is_new_protocol")
+            if config_port_used "$port" "$previous_config_file" "$new_node_transport"; then
+                shared_config_unlock
+                err "节点监听端口 ($port) 已被现有配置占用"
+            fi
+        fi
         if [[ $is_change && $previous_config_file ]]; then
+            [[ $node_migration_applied ]] && return 0
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
             apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$node_lifecycle_error"
             node_migration_applied=1
@@ -2882,6 +3223,7 @@ create() {
                 create config.json
             fi
         fi
+        [[ $new_node_lock ]] && shared_config_unlock
         # caddy auto tls
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
             create caddy $net
@@ -2900,17 +3242,36 @@ create() {
         msg
         ;;
     caddy)
+        local caddy_error_message
+        shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+        if ! caddy_frontend_port_check; then
+            caddy_error_message=${frontend_error_message:-无法确认 Caddy HTTPS 端口是否与前置冲突}
+            shared_config_unlock
+            err "$caddy_error_message"
+        fi
         load caddy.sh
-        [[ $is_install_caddy ]] && caddy_config new
-        [[ ! $(grep "$is_caddy_conf" $is_caddyfile) ]] && {
-            msg "import $is_caddy_conf/*.conf" >>$is_caddyfile
-        }
-        [[ ! -d $is_caddy_conf ]] && mkdir -p $is_caddy_conf
+        if [[ $is_install_caddy ]]; then
+            caddy_config new
+            [[ -f $is_caddyfile ]] || { shared_config_unlock; err "无法创建 Caddy 主配置文件."; }
+        fi
+        if [[ ! $(grep "$is_caddy_conf" "$is_caddyfile" 2>/dev/null) ]]; then
+            msg "import $is_caddy_conf/*.conf" >>"$is_caddyfile" || {
+                shared_config_unlock
+                err "无法更新 Caddy 主配置文件."
+            }
+        fi
+        if [[ ! -d $is_caddy_conf ]] && ! mkdir -p "$is_caddy_conf"; then
+            shared_config_unlock
+            err "无法创建 Caddy 配置目录."
+        fi
         caddy_config $2
+        [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; }
+        shared_config_unlock
         manage restart caddy &
         ;;
     config.json)
         local candidate_config
+        shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
         is_log='log:{output:"/var/log/'$is_core'/access.log",level:"info","timestamp":true}'
         is_dns='dns:{}'
         is_ntp='ntp:{"enabled":true,"server":"time.apple.com"},'
@@ -2921,14 +3282,16 @@ create() {
         fi
         is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
-        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || err "无法创建候选公共配置"
-        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法写入候选公共配置"; }
+        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || { shared_config_unlock; err "无法创建候选公共配置"; }
+        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; shared_config_unlock; err "无法写入候选公共配置"; }
         if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
             rm -f "$candidate_config"
+            shared_config_unlock
             err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
         fi
         rm -f "$candidate_config"
         manage restart &
+        shared_config_unlock
         ;;
     esac
 }
@@ -2938,6 +3301,12 @@ change() {
     is_change=1
     is_dont_show_info=1
     is_auto=
+    is_frontend_bound_node=
+    is_frontend_bound_backend_port=
+    frontend_error_message=
+    is_new_servername=
+    frontend_node_source_ref=
+    frontend_node_source_hash=
     if [[ $2 ]]; then
         case ${2,,} in
         full)
@@ -3023,6 +3392,10 @@ change() {
         info $1
         [[ $is_auto_get_config ]] && msg "\n自动选择: $is_config_file"
     }
+    [[ $is_config_file ]] && frontend_node_binding_for_ref "$is_config_file" || {
+        [[ $frontend_error_message ]] && err "$frontend_error_message"
+    }
+    [[ $is_frontend_bound_node ]] && port=443
     is_old_net=$net
     [[ $is_tcp_http ]] && net=http
     [[ $host ]] && net=$is_protocol-$net-tls
@@ -3048,10 +3421,14 @@ change() {
     1)
         # new port
         is_new_port=$3
+        if [[ $4 ]]; then
+            is_new_servername=$4
+            is_servername=$4
+        fi
         [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
         if [[ $is_new_port && ! $is_auto ]]; then
             [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
-            [[ $is_new_port != 443 && $(is_test port_used $is_new_port) && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
+            [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
         [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
@@ -3184,6 +3561,7 @@ change() {
         # new serverName
         is_new_servername=$3
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改 serverName."
+        [[ $is_frontend_bound_node && $is_new_servername == auto ]] && err "443 前置节点不支持自动选择 SNI，请显式指定 SNI 域名."
         [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
         [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
         is_servername=$is_new_servername
@@ -3217,7 +3595,11 @@ change() {
         [[ ! $is_new_name ]] && err "节点名称不能为空."
         is_old_name=$(node_name_for_link "$is_config_file")
         [[ "$is_old_name" == "$is_new_name" ]] && err "新节点名称与当前名称一致."
-        meta_set "$is_config_file" node_name "$is_new_name"
+        if [[ $is_frontend_bound_node ]]; then
+            frontend_update_bound_node_metadata "$is_config_file" node_name "$is_new_name" || err "$frontend_error_message"
+        else
+            meta_set "$is_config_file" node_name "$is_new_name"
+        fi
         msg "\n已更新节点名称为: $(_green $is_new_name)\n"
         info
         ;;
@@ -3362,7 +3744,13 @@ del() {
             fi
         fi
         deleted_config_file=$is_config_file
-        apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
+        frontend_node_binding_for_ref "$deleted_config_file" || err "$frontend_error_message"
+        if [[ $is_frontend_bound_node ]]; then
+            load frontend.sh
+            frontend_apply_node_lifecycle delete "$deleted_config_file" || err "$frontend_error_message"
+        else
+            apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
+        fi
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {
@@ -3465,7 +3853,13 @@ manage() {
 
 # add a config
 add() {
-    [[ ! $is_change ]] && is_servername=
+    local caddy_shared_lock= caddy_error_message
+    is_frontend_public_443_add=
+    if [[ ! $is_change ]]; then
+        is_servername=
+        is_use_servername=
+        json_str=
+    fi
     is_lower=${1,,}
     if [[ $is_lower ]]; then
         case $is_lower in
@@ -3584,6 +3978,12 @@ add() {
         ;;
     esac
 
+    if [[ $is_change && $is_new_servername ]]; then
+        is_use_servername=$is_new_servername
+    elif [[ $is_change && $is_frontend_bound_node ]]; then
+        is_use_servername=$is_servername
+    fi
+
     [[ $1 && ! $is_change ]] && {
         msg "\n使用协议: $is_new_protocol"
         # err msg tips
@@ -3624,9 +4024,14 @@ add() {
             [[ ! $(is_test port ${is_use_port}) ]] && {
                 err "($is_use_port) 不是一个有效的端口. $is_err_tips"
             }
-            [[ $(is_test port_used $is_use_port) && ! $is_gen && ${is_new_protocol,,} != snell ]] && {
-                err "无法使用 ($is_use_port) 端口. $is_err_tips"
-            }
+            if [[ $(node_port_used "$is_use_port" "$is_new_protocol") && ! $is_gen && ${is_new_protocol,,} != snell ]]; then
+                if [[ $is_use_port == 443 && $is_new_protocol == VLESS-REALITY ]]; then
+                    load frontend.sh
+                    frontend_public_443_ready || err "$frontend_error_message"
+                else
+                    err "无法使用 ($is_use_port) 端口. $is_err_tips"
+                fi
+            fi
             port=$is_use_port
         fi
         if [[ $is_use_door_port ]]; then
@@ -3749,6 +4154,25 @@ add() {
         fi
     fi
 
+    if [[ $port == 443 && $is_new_protocol == VLESS-REALITY && ! $is_gen && ( -e $is_core_dir/frontend.json || -L $is_core_dir/frontend.json ) ]]; then
+        load frontend.sh
+        frontend_load_profile || err "$frontend_profile_error_message"
+        if [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null; then
+            frontend_public_443_ready || err "$frontend_error_message"
+            is_frontend_public_443_add=1
+            if [[ ! $is_use_servername ]]; then
+                if [[ -t 0 ]]; then
+                    ask string is_servername "请输入用于 443 前置的 SNI 域名:"
+                    is_use_servername=$is_servername
+                else
+                    err "443 前置节点必须显式指定 SNI 域名: $is_core add reality 443 [uuid] [sni]"
+                fi
+            fi
+            is_servername=$is_use_servername
+            frontend_validate_sni "$is_servername" || err "$frontend_error_message"
+        fi
+    fi
+
     if [[ ${is_new_protocol,,} == snell ]]; then
         [[ ! $port ]] && get_port && port=$tmp_port
         [[ ! $snell_psk ]] && snell_psk=$(get_snell_psk)
@@ -3798,6 +4222,17 @@ add() {
         get install-caddy
     fi
 
+    if [[ $is_caddy && $host && ! $is_no_auto_tls && ! $is_gen ]]; then
+        shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+        caddy_shared_lock=1
+        if ! caddy_frontend_port_check; then
+            caddy_error_message=${frontend_error_message:-无法确认 Caddy HTTPS 端口是否与前置冲突}
+            shared_config_unlock
+            caddy_shared_lock=
+            err "$caddy_error_message"
+        fi
+    fi
+
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
         echo -ne "请输入节点名称 (留空自动生成 8 位名称):"
         read is_custom_node_name
@@ -3808,10 +4243,13 @@ add() {
 
     # create json
     create server $is_new_protocol
-    [[ $is_custom_node_name && $is_config_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
+    [[ $is_custom_node_name && $is_config_name && ! $is_frontend_transaction_applied ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
 
     # show config info.
     info
+    [[ $caddy_shared_lock ]] && shared_config_unlock
+    is_frontend_public_443_add=
+    is_frontend_transaction_applied=
 }
 
 # get config info
@@ -3819,14 +4257,32 @@ add() {
 get() {
     case $1 in
     addr)
+        is_public_port=$port
         is_addr=$host
-        [[ ! $is_addr && $is_config_file ]] && is_addr=$(meta_get "$is_config_file" '.entry_addr')
-        [[ ! $is_addr && $is_listen_addr && $is_listen_addr != "::" && $is_listen_addr != "0.0.0.0" ]] && is_addr=$is_listen_addr
-        [[ ! $is_addr ]] && {
+        is_frontend_bound_node=
+        if [[ $is_config_file && -e $is_core_dir/frontend.json ]]; then
+            load frontend.sh
+            frontend_load_profile || err "$frontend_profile_error_message"
+            if [[ $frontend_profile ]] && jq -e --arg node_ref "$is_config_file" '.enabled == true and any(.bindings[]?; .node_ref == $node_ref)' <<<"$frontend_profile" >/dev/null; then
+                is_frontend_bound_node=1
+                is_public_port=443
+                [[ $is_addr ]] || is_addr=$(meta_get "$is_config_file" '.entry_addr')
+            fi
+        fi
+        if [[ $is_frontend_bound_node ]]; then
+            [[ $is_addr ]] || {
+                get_ip
+                is_addr=$ip
+            }
+        else
+            [[ ! $is_addr && $is_config_file ]] && is_addr=$(meta_get "$is_config_file" '.entry_addr')
+            [[ ! $is_addr && $is_listen_addr && $is_listen_addr != "::" && $is_listen_addr != "0.0.0.0" ]] && is_addr=$is_listen_addr
+            [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
             [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
-        }
+            }
+        fi
         # IPv6 地址加方括号 (URL 格式要求)
         [[ $is_addr == *:* && $is_addr != \[*\] ]] && is_addr="[$is_addr]"
         ;;
@@ -4174,8 +4630,8 @@ info() {
             is_net_type=h2
             is_info_show=(${is_info_show[@]/15/})
         }
-        is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
-        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
+        is_info_str=($is_protocol $is_addr "${is_public_port:-$port}" $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
+        is_url="$is_protocol://$uuid@$is_addr:${is_public_port:-$port}?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
         ;;
     anytls)
         is_can_change=(0 1 4 12 13 14 15)
@@ -4495,13 +4951,14 @@ is_main_menu() {
     ask mainmenu
     case $REPLY in
     1) node_menu ;;
-    2) relay_menu ;;
-    3) service_menu ;;
-    4) update_menu ;;
-    5) system_tools_menu ;;
-    6) msg; load help.sh; show_help ;;
-    7) load help.sh; about ;;
-    8) uninstall ;;
+    2) load frontend.sh; frontend_menu ;;
+    3) relay_menu ;;
+    4) service_menu ;;
+    5) update_menu ;;
+    6) system_tools_menu ;;
+    7) msg; load help.sh; show_help ;;
+    8) load help.sh; about ;;
+    9) uninstall ;;
     esac
 }
 
@@ -4550,6 +5007,9 @@ relay_add() {
 
     local relay_file="$is_conf_dir/relay-${local_port}.json"
     local tmp_file
+    shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
+    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
     tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建中转临时配置文件."
 
     jq -n \
@@ -4579,6 +5039,7 @@ relay_add() {
         fi
     fi
 
+    shared_config_unlock
     manage restart &
     msg "\n$(_green '中转配置添加成功!')"
     msg "------------------------------------------------"
@@ -4643,6 +5104,7 @@ relay_delete() {
     if [[ $is_main_start ]]; then
         confirm_action "将删除监听端口 $local_port 的中转配置。确认删除" || { msg "已取消删除中转。"; return; }
     fi
+    shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
     mv -f "$relay_file" "$backup_file" || err "备份中转配置失败，未执行删除."
     if [[ -f $is_config_json ]]; then
@@ -4655,6 +5117,7 @@ relay_delete() {
     [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
         [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
     }
+    shared_config_unlock
     manage restart &
     _green "\n已删除中转配置: relay-${local_port}.json\n"
 }
@@ -4706,6 +5169,7 @@ relay_main() {
 
 # check prefer args, if not exist prefer args and show main menu
 main() {
+    local fix_all_locked=
     [[ ! $1 ]] && {
         is_main_menu
         return
@@ -4749,6 +5213,8 @@ main() {
             return
             ;;
         fix-all)
+            shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+            fix_all_locked=1
             is_dont_auto_exit=1
             msg
             shopt -s nullglob
@@ -4774,12 +5240,22 @@ main() {
             ;;
         esac
         is_dont_auto_exit=
-        manage restart &
-        [[ $is_del_host ]] && manage restart caddy &
+        if [[ $fix_all_locked ]]; then
+            manage restart
+            [[ $is_del_host ]] && manage restart caddy
+            shared_config_unlock
+        else
+            manage restart &
+            [[ $is_del_host ]] && manage restart caddy &
+        fi
         ;;
     dns)
         load dns.sh
         dns_set ${@:2}
+        ;;
+    frontend)
+        load frontend.sh
+        frontend_main "${@:2}"
         ;;
     debug)
         is_debug=1

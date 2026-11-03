@@ -85,7 +85,7 @@ run_case() {
   local core_file=$1 scenario=$2 response=$3 expected=$4 choice=${5:-first}
   CORE_FILE="$core_file" TEST_SCENARIO="$scenario" TEST_RESPONSE="$response" \
     TEST_EXPECTED="$expected" SHUF_CHOICE="$choice" FAKE_WGET="$fake_bin/wget" \
-    FAKE_CORE="$fake_bin/sing-box" TEST_BIN="$fake_bin" TEST_NOSHUFBIN="$no_shuf_bin" \
+    FAKE_CORE="$fake_bin/sing-box" TEST_BIN="$fake_bin" TEST_NOSHUFBIN="$no_shuf_bin" TEST_SH_DIR="$repo_root" \
     PATH="$fake_bin:$PATH" bash <<'CASE'
 set -o pipefail
 
@@ -126,6 +126,8 @@ no-shuf)
   ;;
 esac
 
+is_sh_dir=$TEST_SH_DIR
+is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
 is_core_bin="$FAKE_CORE"
@@ -134,7 +136,7 @@ is_dont_show_info=1
 is_no_manage_msg=1
 is_dont_get_ip=1
 export ip=203.0.113.10
-mkdir -p "$is_conf_dir/.quan-meta"
+mkdir -p "$is_core_dir" "$is_conf_dir/.quan-meta"
 cat >"$is_config_json" <<'EOF'
 {"dns":{},"route":{"default_domain_resolver":"local"},"outbounds":[{"tag":"direct","type":"direct"}]}
 EOF
