@@ -411,8 +411,15 @@ include $CASE_DIR/empty-modules/*.conf;
 events {}
 http {}
 EOF
-empty_include_output=$(main frontend check --json 2>&1) && fail "empty wildcard include must be reported"
-jq -e --arg pattern "$CASE_DIR/empty-modules/*.conf" '.errors[0].code == "nginx_config_unsupported" and (.errors[0].message | contains($pattern) and contains("未匹配到文件") and contains("目录为空可能是正常情况") and contains("参阅教程"))' <<<"$empty_include_output" >/dev/null || fail "empty include should explain the cause and next steps: $empty_include_output"
+empty_include_output=$(main frontend check --json 2>&1) || { echo "FAIL: empty wildcard include should be accepted: $empty_include_output"; exit 1; }
+jq -e '.ok == true' <<<"$empty_include_output" >/dev/null || { echo "FAIL: empty wildcard check should pass: $empty_include_output"; exit 1; }
+cat >"$FRONTEND_NGINX_CONF" <<EOF
+include $CASE_DIR/empty-modules/missing.conf;
+events {}
+http {}
+EOF
+missing_include_output=$(main frontend check --json 2>&1) && { echo "FAIL: missing literal include must still be rejected"; exit 1; }
+jq -e '.ok == false and .errors[0].code == "nginx_config_unsupported"' <<<"$missing_include_output" >/dev/null || { echo "FAIL: missing literal include should fail: $missing_include_output"; exit 1; }
 
 cat >"$FRONTEND_NGINX_CONF" <<'EOF'
 events {}
@@ -559,6 +566,7 @@ jq -e '.errors[0].code == "nginx_http_443_conflict"' <<<"$conflict_output" >/dev
 }
 
 cat >"$FRONTEND_NGINX_CONF" <<EOF
+include $CASE_DIR/empty-modules/*.conf;
 events {}
 http { include $CASE_DIR/http.d/site.conf; }
 EOF
@@ -587,6 +595,7 @@ enable_output=$(printf '1\n' | main frontend enable 2>&1) || {
     echo "FAIL: empty-mode enable on a config without stream should succeed: $enable_output"
     exit 1
 }
+grep -Fq "include $CASE_DIR/empty-modules/*.conf;" "$FRONTEND_NGINX_CONF" || { echo "FAIL: enable must preserve the empty wildcard include"; exit 1; }
 jq -e '.enabled == true and .revision == 5 and .bindings == [] and .listen_addresses == ["0.0.0.0"] and .nginx.return_required == true' "$is_core_dir/frontend.json" >/dev/null || {
     echo "FAIL: enable should commit an empty IPv4 profile: $enable_output profile=$(cat "$is_core_dir/frontend.json")"
     exit 1
