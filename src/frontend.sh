@@ -19,7 +19,7 @@ frontend_no_profile_status() {
     if [[ $json == --json ]]; then
         frontend_emit_json "$ok" false 0 "$phase" null '[]' "$errors"
     else
-        printf '443 SNI 前置：未启用\nrevision：0\n'
+        printf '443 SNI 前置：未启用\nrevision：0\n本机检查：未执行（前置未启用）\n'
         [[ $errors == '[]' ]] || jq -r '.[0].message' <<<"$errors" >&2
     fi
     [[ $errors == '[]' ]]
@@ -105,7 +105,7 @@ frontend_read_phase() {
 }
 
 frontend_status() {
-    local json=${1:-} enabled revision nginx bindings errors phase=idle
+    local json=${1:-} enabled revision nginx bindings errors phase=idle detection_attempted=0
     if ! frontend_load_profile; then
         errors=$(jq -cn --arg code "$frontend_profile_error_code" --arg message "$frontend_profile_error_message" '[{code:$code,message:$message}]')
         if [[ $json == --json ]]; then
@@ -149,6 +149,7 @@ frontend_status() {
     bindings=$(jq -c '.bindings' <<<"$frontend_profile")
     if [[ $enabled == true && $errors == '[]' ]]; then
         nginx=null
+        detection_attempted=1
         if frontend_refresh_detection; then
             nginx=$frontend_nginx
         else
@@ -163,6 +164,28 @@ frontend_status() {
         printf '443 SNI 前置：%s\nrevision：%s\nbindings：%s\n' \
             "$([[ $enabled == true ]] && printf '已启用' || printf '未启用')" \
             "$revision" "$(jq -r 'length' <<<"$bindings")"
+        if [[ $enabled == true ]]; then
+            local status_nginx=$nginx service binary listener_range check_result
+            [[ $status_nginx != null ]] || status_nginx=$(jq -c '.nginx' <<<"$frontend_profile")
+            service=$(jq -r '.service // empty' <<<"$status_nginx")
+            binary=$(jq -r '.binary // empty' <<<"$status_nginx")
+            listener_range=$(jq -r '.listen_addresses | join(", ")' <<<"$frontend_profile")
+            [[ $service ]] || service=未检测到
+            [[ $binary ]] || binary=未检测到
+            if [[ $detection_attempted == 1 ]]; then
+                if [[ $errors == '[]' ]]; then
+                    check_result=通过
+                else
+                    check_result=未通过
+                fi
+            else
+                check_result='未执行（待恢复事务）'
+            fi
+            printf 'Nginx 服务：%s\nNginx 二进制：%s\nTCP 443 监听范围：%s\n本机检查：%s\n' \
+                "$service" "$binary" "$listener_range" "$check_result"
+        else
+            printf '本机检查：未执行（前置未启用）\n'
+        fi
         [[ $errors == '[]' ]] || jq -r '.[0].message' <<<"$errors" >&2
     fi
     [[ $errors == '[]' ]]
@@ -685,7 +708,10 @@ frontend_scan_config_file() {
                 target = current_map_target()
                 key = words[1]
                 rule_kind = "exact"
-                if (key == "hostnames") rule_kind = "directive"
+                if (key == "hostnames") {
+                    rule_kind = "directive"
+                    if (target != "") printf "MAP_HOSTNAMES\t%s\n", target
+                }
                 else if (key ~ /^~/) rule_kind = "regex"
                 else if (key ~ /\*/ || key ~ /^\./) rule_kind = "wildcard"
                 else if (key == "volatile") rule_kind = "directive"
@@ -895,6 +921,9 @@ frontend_scan_config_file() {
             frontend_scan_map_rule_targets+=("$b")
             frontend_scan_map_rule_keys+=("$c")
             frontend_scan_map_rule_kinds+=("$d")
+            ;;
+        MAP_HOSTNAMES)
+            frontend_scan_map_hostnames_targets+=("$a")
             ;;
         STREAMSERVER)
             frontend_scan_server_443+=("$a")
@@ -1154,6 +1183,7 @@ frontend_scan_config_tree() {
     frontend_scan_map_rule_targets=()
     frontend_scan_map_rule_keys=()
     frontend_scan_map_rule_kinds=()
+    frontend_scan_map_hostnames_targets=()
     frontend_scan_server_443=()
     frontend_scan_server_udp443=()
     frontend_scan_server_preread=()
@@ -1820,12 +1850,15 @@ frontend_txn_apply_record() {
 }
 
 frontend_worker_pids() {
-    local expected_binary=$1 expected_real pid args process_real
+    local nginx=$1 expected_binary expected_real pid args process_real
+    expected_binary=$(jq -r '.binary' <<<"$nginx") || return 1
+    frontend_nginx_pid=$(jq -r '.pid' <<<"$nginx")
+    [[ $frontend_nginx_pid =~ ^[1-9][0-9]*$ ]] || return 1
     expected_real=$(readlink -f "$expected_binary" 2>/dev/null) || return 1
     while read -r pid args; do
         [[ $pid =~ ^[0-9]+$ && $args == *'nginx: worker process'* ]] || continue
         process_real=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || continue
-        [[ $process_real == "$expected_real" ]] && printf '%s\n' "$pid"
+        [[ $process_real == "$expected_real" ]] && frontend_nginx_pid_is_managed "$pid" && printf '%s\n' "$pid"
     done < <(ps -eo pid=,args= 2>/dev/null)
 }
 
@@ -1840,7 +1873,7 @@ frontend_reload_and_confirm() {
         frontend_set_error nginx_config_invalid 'The applied Nginx configuration failed its full syntax check.'
         return 1
     }
-    before=$(frontend_worker_pids "$binary")
+    before=$(frontend_worker_pids "$nginx")
     [[ $before ]] || {
         frontend_set_error nginx_worker_unverified 'Could not identify an existing Nginx worker before reload.'
         return 1
@@ -1864,7 +1897,7 @@ frontend_reload_and_confirm() {
         ;;
     esac
     for ((attempt = 0; attempt < 20; attempt++)); do
-        after=$(frontend_worker_pids "$binary")
+        after=$(frontend_worker_pids "$nginx")
         while IFS= read -r pid; do
             [[ $pid ]] || continue
             if ! grep -qxF "$pid" <<<"$before"; then
@@ -2505,7 +2538,7 @@ frontend_nginx_exact_regex_sni() {
 
 frontend_assert_user_map_sni_free() {
     local candidate=$1 target map_file rule_file rule_line rule_key rule_kind index candidate_lower=${1,,}
-    local overlap_status
+    local overlap_status active_hostnames hostname_target
     target=$(jq -r '.map_variable // empty' <<<"$frontend_nginx")
     [[ $target ]] || return 0
     map_file=
@@ -2526,6 +2559,11 @@ frontend_assert_user_map_sni_free() {
             }
             ;;
         wildcard)
+            active_hostnames=0
+            for hostname_target in "${frontend_scan_map_hostnames_targets[@]}"; do
+                [[ $hostname_target == "$target" ]] && active_hostnames=1
+            done
+            [[ $active_hostnames == 1 ]] || continue
             frontend_nginx_wildcard_matches_sni "$rule_key" "$candidate_lower"
             overlap_status=$?
             if ((overlap_status == 0)); then

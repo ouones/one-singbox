@@ -58,13 +58,21 @@ FAKE_SYSTEMCTL
     cat >"$case_dir/bin/ps" <<'FAKE_PS'
 #!/usr/bin/env bash
 case "$*" in
-    '-o ppid= -p 456') printf '123\n' ;;
-    '-o ppid= -p 900'|'-o ppid= -p 901'|'-o ppid= -p 124') printf '1\n' ;;
+    '-o ppid= -p '*)
+        pid=${*: -1}
+        case $pid in
+            900|901) printf '124\n' ;;
+            124) printf '1\n' ;;
+            4[0-9][0-9]) printf '123\n' ;;
+            *) exit 1 ;;
+        esac
+        ;;
     '-o args= -p 123') printf 'nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
     '-eo pid=,args=')
         count=0
         [[ -f $FRONTEND_RELOAD_COUNT_FILE ]] && read -r count <"$FRONTEND_RELOAD_COUNT_FILE"
         printf '123 nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX"
+        printf '124 nginx: master process %s -c /other/nginx.conf -p /other\n' "$FRONTEND_NGINX_BIN"
         printf '900 nginx: worker process\n'
         printf '%s nginx: worker process\n' "$((456 + count))"
         ;;
@@ -836,25 +844,47 @@ for map_rules in \
 done
 
 for map_rules in \
-    '*.wild.example 127.0.0.1:9444;' \
-    '.wild.example 127.0.0.1:9444;' \
+    $'hostnames;\n*.wild.example 127.0.0.1:9444;' \
+    $'hostnames;\n.wild.example 127.0.0.1:9444;' \
     $'~^regex\\.example$ 127.0.0.1:9444;' \
     $'~*^regex\\.example$ 127.0.0.1:9444;'; do
-    case $map_rules in
-    '*.wild.example'*) matching_sni=sub.wild.example ;;
-    '.wild.example'*) matching_sni=wild.example ;;
-    '~*'*) matching_sni=REGEX.example ;;
-    *) matching_sni=regex.example ;;
-    esac
+    expected_map_line=1
+    if [[ $map_rules == $'hostnames;\n*.wild.example '* ]]; then
+        matching_sni=sub.wild.example
+        expected_map_line=2
+    elif [[ $map_rules == $'hostnames;\n.wild.example '* ]]; then
+        matching_sni=wild.example
+        expected_map_line=2
+    elif [[ $map_rules == '~*'* ]]; then
+        matching_sni=REGEX.example
+    elif [[ $map_rules == $'~^regex\\.example$ '* ]]; then
+        matching_sni=regex.example
+    fi
     printf '%s\n' "$map_rules" >"$CASE_DIR/maps/user.conf"
     matching_error=$(main add reality 443 99999999-0000-4999-8999-000000000001 "$matching_sni" 2>&1) && {
         echo "FAIL: user map rule that matches an SNI should reject it ($map_rules)"
         exit 1
     }
-    [[ $matching_error == *"$CASE_DIR/maps/user.conf:1"* ]] || {
+    [[ $matching_error == *"$CASE_DIR/maps/user.conf:$expected_map_line"* ]] || {
         echo "FAIL: matching map rule should identify its source line: $matching_error"
         exit 1
     }
+done
+
+map_case=10
+for map_rules in \
+    '*.wild.example 127.0.0.1:9444;' \
+    '.wild.example 127.0.0.1:9444;'; do
+    case $map_rules in
+    '*.wild.example'*) matching_sni=sub.wild.example ;;
+    *) matching_sni=wild.example ;;
+    esac
+    printf '%s\n' "$map_rules" >"$CASE_DIR/maps/user.conf"
+    literal_wildcard_output=$(main add reality 443 "88888888-0000-4888-8888-0000000000$map_case" "$matching_sni" 2>&1) || {
+        echo "FAIL: wildcard-looking map key without hostnames; should be a literal and allow $matching_sni: $literal_wildcard_output"
+        exit 1
+    }
+    map_case=$((map_case + 1))
 done
 
 printf '%s\n' $'~^regex[0-9]+\\.example$ 127.0.0.1:9444;' >"$CASE_DIR/maps/user.conf"

@@ -62,8 +62,15 @@ FAKE_SYSTEMCTL
     cat >"$case_dir/bin/ps" <<'FAKE_PS'
 #!/usr/bin/env bash
 case "$*" in
-    '-o ppid= -p 456') printf '123\n' ;;
-    '-o ppid= -p 900'|'-o ppid= -p 901'|'-o ppid= -p 124') printf '1\n' ;;
+    '-o ppid= -p '*)
+        pid=${*: -1}
+        case $pid in
+            900|901) printf '124\n' ;;
+            124) printf '1\n' ;;
+            4[0-9][0-9]) printf '123\n' ;;
+            *) exit 1 ;;
+        esac
+        ;;
     '-o args= -p 123') printf 'nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
     '-eo pid=,args=')
         count=0
@@ -86,7 +93,6 @@ FAKE_PS
 case ${*: -1} in
     /proc/123/exe) printf '%s\n' "$FRONTEND_NGINX_BIN" ;;
     /proc/777/exe) printf '%s\n' "$CASE_DIR/bin/sing-box" ;;
-    /proc/900/exe|/proc/901/exe) printf '%s\n' /usr/sbin/other-nginx ;;
     /proc/[0-9]*/exe) printf '%s\n' "$FRONTEND_NGINX_BIN" ;;
     "$FRONTEND_NGINX_BIN") printf '%s\n' "$FRONTEND_NGINX_BIN" ;;
     *) exec /usr/bin/readlink "$@" ;;
@@ -293,6 +299,25 @@ jq -e '.ok == false and .enabled == true and .revision == 4 and .errors[0].code 
     echo "FAIL: enabled status should surface the stopped Nginx service: $stopped_status"
     exit 1
 }
+stopped_human_status=$(main frontend status 2>&1) && {
+    echo 'FAIL: enabled text status should fail when Nginx is stopped'
+    exit 1
+}
+[[ $stopped_human_status == *'本机检查：未通过'* ]] || {
+    echo "FAIL: stopped enabled status should report the local check failure: $stopped_human_status"
+    exit 1
+}
+mkdir -p "$is_core_dir/.frontend-state"
+jq -n '{phase:"frontend_applied"}' >"$is_core_dir/.frontend-state/transaction.json"
+pending_enabled_human_status=$(main frontend status 2>&1) && {
+    echo 'FAIL: enabled text status should fail while a transaction is pending'
+    exit 1
+}
+[[ $pending_enabled_human_status == *'本机检查：未执行（待恢复事务）'* ]] || {
+    echo "FAIL: pending enabled status should say the local check was not run: $pending_enabled_human_status"
+    exit 1
+}
+rm -rf "$is_core_dir/.frontend-state"
 jq '.enabled = false' "$is_core_dir/frontend.json" >"$is_core_dir/frontend.json.tmp"
 mv "$is_core_dir/frontend.json.tmp" "$is_core_dir/frontend.json"
 : >"$FRONTEND_SERVICE_LOG"
@@ -302,6 +327,14 @@ disabled_status=$(main frontend status --json 2>&1) || {
 }
 jq -e '.ok == true and .enabled == false' <<<"$disabled_status" >/dev/null || {
     echo "FAIL: disabled status should report the saved disabled profile: $disabled_status"
+    exit 1
+}
+disabled_human_status=$(main frontend status 2>&1) || {
+    echo "FAIL: disabled text status should remain available when Nginx is stopped: $disabled_human_status"
+    exit 1
+}
+[[ $disabled_human_status == *'本机检查：未执行（前置未启用）'* ]] || {
+    echo "FAIL: disabled text status should say the local check was not run: $disabled_human_status"
     exit 1
 }
 [[ ! -s "$FRONTEND_SERVICE_LOG" ]] || {
@@ -536,6 +569,17 @@ jq -e '.ok == true and .enabled == true and .nginx.listener_443 == 1' <<<"$enabl
     echo "FAIL: enabled status should return refreshed listener state: $enabled_status"
     exit 1
 }
+enabled_human_status=$(main frontend status 2>&1) || {
+    echo "FAIL: enabled text status should refresh and report the local Nginx check: $enabled_human_status"
+    exit 1
+}
+[[ $enabled_human_status == *"Nginx 服务：nginx.service"* &&
+   $enabled_human_status == *"Nginx 二进制：$FRONTEND_NGINX_BIN"* &&
+   $enabled_human_status == *'TCP 443 监听范围：0.0.0.0'* &&
+   $enabled_human_status == *'本机检查：通过'* ]] || {
+    echo "FAIL: enabled text status should show the detected instance, selected listener range, and local check result: $enabled_human_status"
+    exit 1
+}
 
 status_config_before=$(sha256sum "$CASE_DIR/one-singbox/stream.conf" | awk '{print $1}')
 sed -i 's/one_singbox_reality_backend/stale_reality_backend/g' "$CASE_DIR/one-singbox/stream.conf"
@@ -674,12 +718,13 @@ export FRONTEND_FAIL_RELOAD_AT
 
 config_before_worker_failure=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
 profile_before_worker_failure=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+# Only the second same-binary master starts a new worker; selected master 123 does not.
 FRONTEND_NO_NEW_WORKER_AT=6
 FRONTEND_CHANGE_OTHER_WORKER_AT=6
 export FRONTEND_NO_NEW_WORKER_AT
 export FRONTEND_CHANGE_OTHER_WORKER_AT
 worker_failure=$(main frontend disable 2>&1) && {
-    echo "FAIL: a reload without a new worker should fail disable and trigger rollback"
+    echo "FAIL: a second-master worker should not confirm selected-master reload and disable should roll back"
     exit 1
 }
 FRONTEND_NO_NEW_WORKER_AT=0
