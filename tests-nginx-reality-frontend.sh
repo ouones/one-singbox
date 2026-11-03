@@ -41,6 +41,7 @@ case "$*" in
     'show -p ExecStart --value nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] && printf '{ path=%s ; argv[]=%s -c %s -p %s ; ignore_errors=no }\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
     'show -p ExecReload --value nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] && printf '{ path=/bin/kill ; argv[]=/bin/kill -s HUP $MAINPID ; ignore_errors=no }\n' ;;
     'reload nginx.service')
+        printf '%s\n' nginx-reload >>"$FRONTEND_EVENT_LOG"
         count=0
         [[ -f $FRONTEND_RELOAD_COUNT_FILE ]] && read -r count <"$FRONTEND_RELOAD_COUNT_FILE"
         count=$((count + 1))
@@ -82,6 +83,7 @@ FAKE_PS
 #!/usr/bin/env bash
 case ${*: -1} in
     /proc/123/exe) printf '%s\n' "$FRONTEND_NGINX_BIN" ;;
+    /proc/777/exe) printf '%s\n' "$CASE_DIR/bin/sing-box" ;;
     /proc/900/exe|/proc/901/exe) printf '%s\n' /usr/sbin/other-nginx ;;
     /proc/[0-9]*/exe) printf '%s\n' "$FRONTEND_NGINX_BIN" ;;
     "$FRONTEND_NGINX_BIN") printf '%s\n' "$FRONTEND_NGINX_BIN" ;;
@@ -443,12 +445,12 @@ jq -e '.enabled == false and .revision == 6 and .bindings == [] and .ownership =
 
 profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 service_log_before=$(sha256sum "$FRONTEND_SERVICE_LOG" | awk '{print $1}')
-enable_output=$(main frontend enable existing-node.json 2>&1) && {
-    echo "FAIL: enabling with a node reference must be rejected until node lifecycle support lands"
+enable_output=$(main frontend enable missing-node.json 2>&1) && {
+    echo "FAIL: enabling a nonexistent node reference must be rejected"
     exit 1
 }
-[[ $enable_output == *"暂不支持迁移节点"* ]] || {
-    echo "FAIL: node-reference rejection should explain the current boundary: $enable_output"
+[[ $enable_output == *"missing-node.json"* ]] || {
+    echo "FAIL: missing node references should be identified: $enable_output"
     exit 1
 }
 [[ $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before" && $(sha256sum "$FRONTEND_SERVICE_LOG" | awk '{print $1}') == "$service_log_before" ]] || {
