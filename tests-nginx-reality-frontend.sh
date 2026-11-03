@@ -18,6 +18,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     export FRONTEND_NGINX_BIN="$case_dir/bin/nginx"
     export FRONTEND_NGINX_CONF="$case_dir/nginx.conf"
     export FRONTEND_NGINX_PREFIX="$case_dir/prefix"
+    export FRONTEND_NGINX_MASTER_PID=123
     export FRONTEND_NGINX_READY=0
     export FRONTEND_NGINX_LISTENERS=
     export FRONTEND_RELOAD_COUNT_FILE="$case_dir/reload-count"
@@ -37,7 +38,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
 printf '%s\n' "$*" >>"$FRONTEND_SERVICE_LOG"
 case "$*" in
     'is-active --quiet nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] ;;
-    'show -p MainPID --value nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] && printf '123\n' ;;
+    'show -p MainPID --value nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] && printf '%s\n' "$FRONTEND_NGINX_MASTER_PID" ;;
     'show -p ExecStart --value nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] && printf '{ path=%s ; argv[]=%s -c %s -p %s ; ignore_errors=no }\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
     'show -p ExecReload --value nginx.service') [[ $FRONTEND_NGINX_READY == 1 ]] && printf '{ path=/bin/kill ; argv[]=/bin/kill -s HUP $MAINPID ; ignore_errors=no }\n' ;;
     'reload nginx.service')
@@ -67,15 +68,19 @@ case "$*" in
         case $pid in
             900|901) printf '124\n' ;;
             124) printf '1\n' ;;
-            4[0-9][0-9]) printf '123\n' ;;
+            "$FRONTEND_NGINX_MASTER_PID") printf '1\n' ;;
+            4[0-9][0-9]) printf '%s\n' "$FRONTEND_NGINX_MASTER_PID" ;;
             *) exit 1 ;;
         esac
         ;;
-    '-o args= -p 123') printf 'nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX" ;;
+    '-o args= -p '* )
+        [[ ${*: -1} == "$FRONTEND_NGINX_MASTER_PID" ]] || exit 1
+        printf 'nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX"
+        ;;
     '-eo pid=,args=')
         count=0
         [[ -f $FRONTEND_RELOAD_COUNT_FILE ]] && read -r count <"$FRONTEND_RELOAD_COUNT_FILE"
-        printf '123 nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX"
+        printf '%s nginx: master process %s -c %s -p %s\n' "$FRONTEND_NGINX_MASTER_PID" "$FRONTEND_NGINX_BIN" "$FRONTEND_NGINX_CONF" "$FRONTEND_NGINX_PREFIX"
         other_worker=900
         [[ $FRONTEND_CHANGE_OTHER_WORKER_AT != "$count" ]] || other_worker=901
         printf '%s nginx: worker process\n' "$other_worker"
@@ -473,6 +478,27 @@ stream {
         default 127.0.0.1:9443;
     }
     server {
+        listen [2001:0db8:0000:0000:0000:0000:0000:0001]:443;
+        ssl_preread on;
+        proxy_pass $backend;
+    }
+}
+EOF
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 [2001:db8::1]:443 [::]:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+expanded_ipv6_check=$(main frontend check --json 2>&1) || {
+    echo "FAIL: equivalent expanded and compressed IPv6 listener addresses should match: $expanded_ipv6_check"
+    exit 1
+}
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+cat >"$FRONTEND_NGINX_CONF" <<'EOF'
+events {}
+stream {
+    map $ssl_preread_server_name $backend {
+        default 127.0.0.1:9443;
+    }
+    server {
         listen [::]:443;
         ssl_preread on;
         proxy_pass $backend;
@@ -773,8 +799,32 @@ flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
 }
 FRONTEND_PAUSE_RELOAD_AT=0
 export FRONTEND_PAUSE_RELOAD_AT
+FRONTEND_NGINX_MASTER_PID=321
+FRONTEND_NGINX_LISTENERS=${FRONTEND_NGINX_LISTENERS//pid=123/pid=321}
+export FRONTEND_NGINX_MASTER_PID FRONTEND_NGINX_LISTENERS
+saved_nginx_config=$FRONTEND_NGINX_CONF
+drifted_nginx_config="$CASE_DIR/drifted-nginx.conf"
+cp "$saved_nginx_config" "$drifted_nginx_config"
+interrupted_profile_hash=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+FRONTEND_NGINX_CONF=$drifted_nginx_config
+export FRONTEND_NGINX_CONF
+drifted_recovery=$(main frontend recover 2>&1) && {
+    echo 'FAIL: recovery must reject an active Nginx config path that differs from the transaction target'
+    exit 1
+}
+[[ $(sha256sum "$saved_nginx_config" | awk '{print $1}') == "$config_before_interruption" &&
+   $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$interrupted_profile_hash" &&
+   -f "$CASE_DIR/one-singbox/reality-map.conf" &&
+   $(sha256sum "$CASE_DIR/one-singbox/reality-map.conf" | awk '{print $1}') == "$map_before_interruption" &&
+   $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 8 &&
+   $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == recovery_required ]] || {
+    echo "FAIL: identity drift should retain recovery_required after restoring files without reloading: $drifted_recovery"
+    exit 1
+}
+FRONTEND_NGINX_CONF=$saved_nginx_config
+export FRONTEND_NGINX_CONF
 recover_output=$(main frontend recover 2>&1) || {
-    echo "FAIL: recover should roll back an interrupted disable transaction: $recover_output"
+    echo "FAIL: recover should roll back an interrupted disable transaction after the selected service restarts: $recover_output"
     exit 1
 }
 [[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before_interruption" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before_interruption" && $(sha256sum "$CASE_DIR/one-singbox/reality-map.conf" | awk '{print $1}') == "$map_before_interruption" ]] || {
