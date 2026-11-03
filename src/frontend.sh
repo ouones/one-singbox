@@ -302,16 +302,12 @@ frontend_localize_error_message() {
     nginx_config_unreadable) printf '无法读取完整的当前 Nginx 配置。' ;;
     nginx_config_unsupported)
         context=$(frontend_localize_path_context "$message") || context=
-        if [[ $message == 'Nginx include did not resolve to a file: '* ]]; then
-            printf 'Nginx 的 include 未匹配到文件：%s。目录为空可能是正常情况；当前版本无法继续检查，请参阅教程中的 modules-enabled 排查说明。' "$context"
+        if [[ $context ]]; then
+            printf '无法识别或安全处理 Nginx 配置中的结构（%s）。' "$context"
         else
-            if [[ $context ]]; then
-                printf '无法识别或安全处理 Nginx 配置中的结构（%s）。' "$context"
-            else
-                printf '无法识别或安全处理当前 Nginx 配置中的结构。'
-            fi
-            printf '请检查 Nginx 配置，或将此提示和相关配置（隐藏敏感信息后）反馈给项目；不要盲目删除配置。'
+            printf '无法识别或安全处理当前 Nginx 配置中的结构。'
         fi
+        printf '请检查 Nginx 配置，或将此提示和相关配置（隐藏敏感信息后）反馈给项目；不要盲目删除配置。'
         ;;
     nginx_detection_failed) printf '无法记录当前 Nginx 实例的检查结果。' ;;
     nginx_http_443_conflict)
@@ -963,11 +959,6 @@ frontend_scan_config_file() {
             shopt -s nullglob
             includes=( $include_pattern )
             shopt -u nullglob
-            ((${#includes[@]} > 0)) || {
-                frontend_set_error nginx_config_unsupported "Nginx include did not resolve to a file: $include_pattern"
-                unset 'frontend_scan_active[$file]'
-                return 1
-            }
             local include_file canonical_file
             frontend_scan_include_parent+=("$file")
             frontend_scan_include_lines+=("$include_line")
@@ -1027,10 +1018,7 @@ frontend_flatten_file() {
             for edge_index in "${frontend_scan_include_edges[@]}"; do
                 [[ ${edge_index%%:*} == "$include_index" ]] && line_children+=("${edge_index#*:}")
             done
-            ((${#line_children[@]} > 0)) || {
-                frontend_set_error nginx_config_unsupported "Could not resolve the static include in $file:$line_number"
-                return 1
-            }
+            # An unmatched wildcard include expands to no directives in Nginx.
             for child in "${line_children[@]}"; do
                 printf '\n' >>"$output"
                 if [[ $child == "${frontend_flatten_override_file:-}" && $frontend_flatten_override_content ]]; then

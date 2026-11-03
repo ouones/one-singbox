@@ -60,14 +60,9 @@ Nginx 的 `stream` 和 `ssl_preread` 是分流所需能力，可能内置，也�
 
 ## 遇到问题怎么办
 
-### 提示 `modules-enabled/*.conf` 未匹配到文件
+### `modules-enabled` 目录为空
 
-这个目录保存动态模块的加载配置；目录为空可能是正常情况，**不代表 Nginx 没有安装**。当前面板可能因为空通配目录停止检查，这是面板的兼容性限制。不要为绕过提示删除配置或随意创建文件。请把提示和下面命令的输出提交到[项目问题反馈](https://github.com/ouones/one-singbox/issues)：
-
-```bash
-ls -la /etc/nginx/modules-enabled/
-nginx -t
-```
+这个目录保存动态模块的加载配置，目录为空可能是正常情况，不代表 Nginx 没有安装。面板会继续检查所需的 stream 和 ssl_preread 能力，无需为了让目录非空而创建文件或删除配置。
 
 ### 提示缺少 stream 或 ssl_preread
 
