@@ -10,6 +10,7 @@ cleanup() {
 trap cleanup EXIT
 
 source "$repo_root/core.sh"
+is_core_dir="$workdir/core"
 manage() { :; }
 mkdir -p "$workdir/bin"
 cat >"$workdir/bin/sing-box" <<'FAKE_CORE'

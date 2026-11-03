@@ -13,10 +13,12 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     export CASE_DIR="$case_dir" FRONTEND_EVENT_LOG="$case_dir/events"
     export FRONTEND_NGINX_BIN="$case_dir/bin/nginx" FRONTEND_NGINX_CONF="$case_dir/nginx.conf"
     export FRONTEND_NGINX_PREFIX="$case_dir/prefix" FRONTEND_NGINX_READY=1 FRONTEND_NGINX_LISTENERS=
+    export FRONTEND_UDP_LISTENERS= FRONTEND_LISTENER_SOURCE_DIR=
     export FRONTEND_LISTENER_FILE="$case_dir/listeners"
     export FRONTEND_RELOAD_COUNT_FILE="$case_dir/reload-count"
     export FRONTEND_SINGBOX_RESTART_COUNT_FILE="$case_dir/singbox-restart-count"
-    export FRONTEND_FAIL_RELOAD_AT=0 FRONTEND_FAIL_SINGBOX_CHECK=0 FRONTEND_FAIL_SINGBOX_RESTART=0 FRONTEND_FAIL_SINGBOX_RESTART_AT=0
+    export FRONTEND_FAIL_RELOAD_AT=0 FRONTEND_FAIL_NGINX_CHECK=0 FRONTEND_FAIL_SINGBOX_CHECK=0 FRONTEND_FAIL_SINGBOX_RESTART=0 FRONTEND_FAIL_SINGBOX_RESTART_AT=0
+    export FRONTEND_PAUSE_RELOAD_AT=0 FRONTEND_PAUSE_FILE="$case_dir/reload-paused" FRONTEND_RELEASE_FILE="$case_dir/release-reload" FRONTEND_PAUSE_PID_FILE="$case_dir/reload-pid"
     : >"$FRONTEND_EVENT_LOG"
     : >"$FRONTEND_RELOAD_COUNT_FILE"
     : >"$FRONTEND_LISTENER_FILE"
@@ -36,8 +38,15 @@ case "$*" in
         count=$((count + 1))
         printf '%s\n' "$count" >"$FRONTEND_RELOAD_COUNT_FILE"
         printf '%s\n' nginx-reload >>"$FRONTEND_EVENT_LOG"
+        if [[ $FRONTEND_PAUSE_RELOAD_AT == "$count" ]]; then
+            printf '%s\n' "$BASHPID" >"$FRONTEND_PAUSE_PID_FILE"
+            : >"$FRONTEND_PAUSE_FILE"
+            while [[ ! -e $FRONTEND_RELEASE_FILE ]]; do /bin/sleep 0.02; done
+        fi
         [[ ,$FRONTEND_FAIL_RELOAD_AT, != *,$count,* ]] || exit 1
-        if grep -Eq 'listen[[:space:]].*([^0-9]|^)443([[:space:]]|;)' "$FRONTEND_NGINX_CONF" "$CASE_DIR/one-singbox/stream.conf" 2>/dev/null; then
+        project_stream_file="$CASE_DIR/one-singbox/stream.conf"
+        [[ $FRONTEND_LISTENER_SOURCE_DIR ]] && project_stream_file="$FRONTEND_LISTENER_SOURCE_DIR/one-singbox/stream.conf"
+        if grep -Eq 'listen[[:space:]].*([^0-9]|^)443([[:space:]]|;)' "$FRONTEND_NGINX_CONF" "$project_stream_file" 2>/dev/null; then
             printf '%s\n' 'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))' >"$FRONTEND_LISTENER_FILE"
         else
             : >"$FRONTEND_LISTENER_FILE"
@@ -73,12 +82,21 @@ esac
 FAKE_READLINK
     cat >"$case_dir/bin/ss" <<'FAKE_SS'
 #!/usr/bin/env bash
-[[ $* == '-Hlnpt' ]] || exit 2
-if [[ $FRONTEND_NGINX_LISTENERS ]]; then
-    printf '%s\n' "$FRONTEND_NGINX_LISTENERS"
-elif [[ -f $FRONTEND_LISTENER_FILE ]]; then
-    cat "$FRONTEND_LISTENER_FILE"
-fi
+case $* in
+'-Hlnpu')
+    [[ $FRONTEND_UDP_LISTENERS ]] && printf '%s\n' "$FRONTEND_UDP_LISTENERS"
+    ;;
+'-Hlnpt')
+    if [[ ${FRONTEND_UDP_LISTENERS_ONLY:-0} == 1 ]]; then
+        [[ -f $FRONTEND_LISTENER_FILE ]] && cat "$FRONTEND_LISTENER_FILE"
+    elif [[ $FRONTEND_NGINX_LISTENERS ]]; then
+        printf '%s\n' "$FRONTEND_NGINX_LISTENERS"
+    elif [[ -f $FRONTEND_LISTENER_FILE ]]; then
+        cat "$FRONTEND_LISTENER_FILE"
+    fi
+    ;;
+*) exit 2 ;;
+esac
 exit 0
 FAKE_SS
     cat >"$case_dir/bin/ip" <<'FAKE_IP'
@@ -128,7 +146,7 @@ ip=203.0.113.10
 mkdir -p "$is_conf_dir/.quan-meta"
 
 is_port_used() {
-    if [[ $1 == 443 && $FRONTEND_NGINX_LISTENERS ]]; then
+    if [[ $1 == 443 && ( $FRONTEND_NGINX_LISTENERS || $FRONTEND_UDP_LISTENERS ) ]]; then
         printf '443\n'
         return 0
     fi
@@ -311,6 +329,235 @@ for output_kind in info url qr; do
     }
 done
 
+bound_backend=$(jq -r --arg ref "$new_one" '.bindings[] | select(.node_ref == $ref) | .backend_port' "$is_core_dir/frontend.json")
+bound_revision=$(jq -r '.revision' "$is_core_dir/frontend.json")
+bound_reloads=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+sni_edit=$(main change "$new_one" sni changed.example 2>&1) || {
+    echo "FAIL: changing a bound node SNI should use the frontend coordinator: $sni_edit"
+    exit 1
+}
+jq -e --arg sni changed.example --argjson backend "$bound_backend" '.inbounds[0].listen == "127.0.0.1" and .inbounds[0].listen_port == $backend and .inbounds[0].tls.server_name == $sni and .inbounds[0].tls.reality.handshake.server == $sni' "$is_conf_dir/$new_one" >/dev/null || {
+    echo "FAIL: bound SNI edit changed the node outside its saved loopback binding: $(cat "$is_conf_dir/$new_one") output=$sni_edit"
+    exit 1
+}
+[[ $(jq -r '.revision' "$is_core_dir/frontend.json") == $((bound_revision + 1)) && $(jq -r --arg ref "$new_one" '.bindings[] | select(.node_ref == $ref) | .backend_port' "$is_core_dir/frontend.json") == "$bound_backend" ]] || {
+    echo 'FAIL: bound SNI edit should preserve its backend and commit the next profile revision'
+    exit 1
+}
+map_file=$(jq -r '.ownership.map_file' "$is_core_dir/frontend.json")
+grep -Fq "changed.example 127.0.0.1:$bound_backend;" "$map_file" && ! grep -Fq 'first.example ' "$map_file" || {
+    echo "FAIL: bound SNI edit did not update the managed map: $(cat "$map_file")"
+    exit 1
+}
+sni_share=$(is_dont_auto_exit= main info "$new_one" 2>&1)
+[[ $sni_share == *':443'* && $sni_share == *'sni=changed.example'* && $sni_share != *":$bound_backend"* ]] || {
+    echo "FAIL: bound SNI edit did not update its public share output: $sni_share"
+    exit 1
+}
+[[ $(cat "$FRONTEND_RELOAD_COUNT_FILE") == $((bound_reloads + 1)) ]] || {
+    echo 'FAIL: a changed SNI map should reload Nginx exactly once'
+    exit 1
+}
+
+bound_revision=$(jq -r '.revision' "$is_core_dir/frontend.json")
+bound_reloads=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+entry_node_before=$(sha256sum "$is_conf_dir/$new_one" | awk '{print $1}')
+entry_edit=$(main change "$new_one" entry edge.example 2>&1) || {
+    echo "FAIL: changing a bound node entry address should use the frontend coordinator: $entry_edit"
+    exit 1
+}
+jq -e --argjson backend "$bound_backend" '.inbounds[0].listen == "127.0.0.1" and .inbounds[0].listen_port == $backend' "$is_conf_dir/$new_one" >/dev/null || {
+    echo 'FAIL: bound entry-address change must preserve the loopback listen'
+    exit 1
+}
+entry_share=$(is_dont_auto_exit= main info "$new_one" 2>&1)
+[[ $entry_share == *'edge.example:443'* && $entry_share == *'sni=changed.example'* && $(sha256sum "$is_conf_dir/$new_one" | awk '{print $1}') == "$entry_node_before" && $(jq -r '.revision' "$is_core_dir/frontend.json") == "$bound_revision" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == "$bound_reloads" ]] || {
+    echo "FAIL: entry-address edit should update only published share data: $entry_share"
+    exit 1
+}
+
+name_edit=$(main change "$new_one" name EditedBoundNode 2>&1) || {
+    echo "FAIL: renaming a bound node should use the frontend coordinator: $name_edit"
+    exit 1
+}
+name_share=$(is_dont_auto_exit= main url "$new_one" 2>&1)
+[[ $(meta_get "$new_one" '.node_name') == EditedBoundNode && $name_share == *'#EditedBoundNode'* ]] || {
+    echo "FAIL: bound node name should update its metadata and generated share: $name_share"
+    exit 1
+}
+
+new_uuid=99999999-1111-4111-8111-111111111111
+uuid_edit=$(main change "$new_one" uuid "$new_uuid" 2>&1) || {
+    echo "FAIL: rebuilding a bound node UUID should use the frontend coordinator: $uuid_edit"
+    exit 1
+}
+jq -e --arg uuid "$new_uuid" --argjson backend "$bound_backend" '.inbounds[0].listen == "127.0.0.1" and .inbounds[0].listen_port == $backend and .inbounds[0].users[0].uuid == $uuid' "$is_conf_dir/$new_one" >/dev/null || {
+    echo "FAIL: bound node UUID rebuild lost its loopback binding: $(cat "$is_conf_dir/$new_one")"
+    exit 1
+}
+
+outbound_edit=$(printf '1\n' | main change "$new_one" outbound 2>&1) || {
+    echo "FAIL: editing a bound node outbound mode should use the frontend coordinator: $outbound_edit"
+    exit 1
+}
+jq -e '.outbound_mode == "V6优先"' "$(meta_file "$new_one")" >/dev/null && jq -e --arg tag "$new_one" 'any(.route.rules[]?; any(.inbound[]?; . == $tag) and .outbound == "direct_v6_pref")' "$is_config_json" >/dev/null || {
+    echo "FAIL: bound outbound edit did not update the metadata and derived shared route: $(cat "$(meta_file "$new_one")")"
+    exit 1
+}
+[[ $(jq -r '.revision' "$is_core_dir/frontend.json") == "$bound_revision" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == "$bound_reloads" ]] || {
+    echo 'FAIL: bound name, UUID, and outbound edits changed the SNI profile or reloaded Nginx'
+    exit 1
+}
+
+same_sni_revision=$(jq -r '.revision' "$is_core_dir/frontend.json")
+same_sni_reloads=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+same_sni=$(main change "$new_one" sni changed.example 2>&1) || {
+    echo "FAIL: bound SNI self-check rejected the node's current SNI: $same_sni"
+    exit 1
+}
+[[ $(jq -r '.revision' "$is_core_dir/frontend.json") == "$same_sni_revision" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == "$same_sni_reloads" ]] || {
+    echo 'FAIL: repeating the current SNI should not change the profile or reload Nginx'
+    exit 1
+}
+duplicate_edit=$(main change "$new_one" sni SECOND.EXAMPLE 2>&1) && {
+    echo 'FAIL: changing a bound node to another bound node SNI should be rejected'
+    exit 1
+}
+[[ $duplicate_edit == *'already bound'* ]] || {
+    echo "FAIL: duplicate bound SNI error should explain the conflict: $duplicate_edit"
+    exit 1
+}
+unsupported_before=$(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}')
+auto_sni_error=$(main change "$new_one" sni auto 2>&1) && {
+    echo 'FAIL: bound nodes must reject automatic SNI selection'
+    exit 1
+}
+transport_error=$(main change "$new_one" new VLESS-HTTP2-REALITY 2>&1) && {
+    echo 'FAIL: a bound ordinary Reality node must reject transport changes before moving off 443'
+    exit 1
+}
+[[ $auto_sni_error == *'不支持自动选择 SNI'* && $transport_error == *'Move the node off public port 443'* && $(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}') == "$unsupported_before" ]] || {
+    echo "FAIL: unsupported bound-node edits should fail closed without source changes: auto=$auto_sni_error transport=$transport_error"
+    exit 1
+}
+
+map_file=$(jq -r '.ownership.map_file' "$is_core_dir/frontend.json")
+candidate_before=$(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}')
+candidate_reloads=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+FRONTEND_FAIL_NGINX_CHECK=1
+export FRONTEND_FAIL_NGINX_CHECK
+candidate_rejected=$(main change "$new_one" sni candidate-fail.example 2>&1) && {
+    echo 'FAIL: Nginx candidate failure should reject a bound-node SNI edit'
+    exit 1
+}
+FRONTEND_FAIL_NGINX_CHECK=0
+export FRONTEND_FAIL_NGINX_CHECK
+[[ $(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}') == "$candidate_before" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == "$candidate_reloads" ]] || {
+    echo "FAIL: rejected candidate changed source files or reloaded Nginx: $candidate_rejected"
+    exit 1
+}
+
+reload_before=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+FRONTEND_FAIL_RELOAD_AT=$((reload_before + 1))
+export FRONTEND_FAIL_RELOAD_AT
+reload_rejected=$(main change "$new_one" sni reload-fail.example 2>&1) && {
+    echo 'FAIL: a failed Nginx reload should roll back a bound-node SNI edit'
+    exit 1
+}
+FRONTEND_FAIL_RELOAD_AT=0
+export FRONTEND_FAIL_RELOAD_AT
+[[ $(cat "$FRONTEND_RELOAD_COUNT_FILE") == $((reload_before + 2)) && $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == rolled_back && $(jq -r '.inbounds[0].tls.server_name' "$is_conf_dir/$new_one") == changed.example && $(grep -Fxc "changed.example 127.0.0.1:$bound_backend;" "$map_file") == 1 ]] || {
+    echo "FAIL: reload failure did not restore the pre-edit node and map: $reload_rejected"
+    exit 1
+}
+
+node_before_interrupt=$(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}')
+reload_before_interrupt=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+rm -f "$FRONTEND_RELEASE_FILE" "$FRONTEND_PAUSE_FILE" "$FRONTEND_PAUSE_PID_FILE"
+FRONTEND_PAUSE_RELOAD_AT=$((reload_before_interrupt + 1))
+export FRONTEND_PAUSE_RELOAD_AT
+main change "$new_one" sni interrupted.example >"$CASE_DIR/interrupted-node-edit.log" 2>&1 &
+edit_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+    [[ -e $FRONTEND_PAUSE_FILE ]] && break
+    /bin/sleep 0.02
+done
+[[ -e $FRONTEND_PAUSE_FILE && -s $FRONTEND_PAUSE_PID_FILE ]] || {
+    echo 'FAIL: bound-node edit did not reach its persisted transaction reload seam'
+    kill "$edit_pid" 2>/dev/null || :
+    exit 1
+}
+reload_pid=$(cat "$FRONTEND_PAUSE_PID_FILE")
+kill -KILL "$edit_pid" "$reload_pid" 2>/dev/null || :
+wait "$edit_pid" 2>/dev/null || :
+: >"$FRONTEND_RELEASE_FILE"
+FRONTEND_PAUSE_RELOAD_AT=0
+export FRONTEND_PAUSE_RELOAD_AT
+for ((attempt = 0; attempt < 100; attempt++)); do
+    flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null && break
+    /bin/sleep 0.02
+done
+flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
+    echo 'FAIL: interrupted bound-node edit did not release its transaction lock'
+    exit 1
+}
+node_recovery=$(main frontend recover 2>&1) || {
+    echo "FAIL: recover should roll back an interrupted bound-node edit: $node_recovery"
+    exit 1
+}
+[[ $(sha256sum "$is_conf_dir/$new_one" "$is_config_json" "$map_file" "$is_core_dir/frontend.json" | sha256sum | awk '{print $1}') == "$node_before_interrupt" && $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == rolled_back && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == $((reload_before_interrupt + 2)) ]] || {
+    echo "FAIL: recovery did not restore the interrupted bound-node edit: $node_recovery"
+    exit 1
+}
+
+off_port=8449
+port_out=$(main change "$new_one" port "$off_port" 2>&1) || {
+    echo "FAIL: moving a bound node off 443 should use the frontend coordinator: $port_out"
+    exit 1
+}
+off_ref=VLESS-REALITY-$off_port.json
+[[ -f $is_conf_dir/$off_ref && ! -e $is_conf_dir/$new_one ]] || {
+    echo "FAIL: moving off 443 should rename the node to its ordinary port reference: $off_ref"
+    exit 1
+}
+jq -e --argjson port "$off_port" '.inbounds[0].listen == "::" and .inbounds[0].listen_port == $port' "$is_conf_dir/$off_ref" >/dev/null || {
+    echo "FAIL: moving off 443 should restore the requested ordinary listen: $(cat "$is_conf_dir/$off_ref")"
+    exit 1
+}
+! jq -e --arg ref "$new_one" 'any(.bindings[]; .node_ref == $ref)' "$is_core_dir/frontend.json" >/dev/null || {
+    echo 'FAIL: moving off 443 should remove the managed binding'
+    exit 1
+}
+! grep -Fq 'changed.example ' "$map_file" || {
+    echo 'FAIL: moving off 443 should remove the node SNI from the managed map'
+    exit 1
+}
+off_share=$(is_dont_auto_exit= main info "$off_ref" 2>&1)
+[[ $off_share == *"edge.example:$off_port"* && $off_share != *'127.0.0.1'* ]] || {
+    echo "FAIL: moving off 443 should restore the public ordinary share: $off_share"
+    exit 1
+}
+
+reenter_out=$(main change "$off_ref" port 443 reenter.example 2>&1) || {
+    echo "FAIL: explicitly naming an SNI should allow moving an ordinary node onto the frontend: $reenter_out"
+    exit 1
+}
+reenter_ref=$(jq -r '.bindings[-1].node_ref' "$is_core_dir/frontend.json")
+reenter_backend=$(jq -r --arg ref "$reenter_ref" '.bindings[] | select(.node_ref == $ref) | .backend_port' "$is_core_dir/frontend.json")
+[[ $reenter_backend && -f $is_conf_dir/$reenter_ref && ! -e $is_conf_dir/$off_ref ]] || {
+    echo 'FAIL: moving onto 443 should convert the node to a managed reference and backend'
+    exit 1
+}
+jq -e --argjson backend "$reenter_backend" '.inbounds[0].listen == "127.0.0.1" and .inbounds[0].listen_port == $backend and .inbounds[0].tls.server_name == "reenter.example"' "$is_conf_dir/$reenter_ref" >/dev/null || {
+    echo "FAIL: moving onto 443 should bind the candidate to a loopback backend: $(cat "$is_conf_dir/$reenter_ref")"
+    exit 1
+}
+reenter_share=$(is_dont_auto_exit= main info "$reenter_ref" 2>&1)
+[[ $reenter_share == *'edge.example:443'* && $reenter_share == *'sni=reenter.example'* ]] || {
+    echo "FAIL: moving onto 443 should preserve the public entry address and share: $reenter_share"
+    exit 1
+}
+
 profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 map_before=$(sha256sum "$map_file" | awk '{print $1}')
 config_before=$(sha256sum "$FRONTEND_NGINX_CONF" "$is_config_json" | sha256sum | awk '{print $1}')
@@ -345,6 +592,117 @@ gen_output=$(main gen reality 443 88888888-8888-4888-8888-888888888888 generated
     echo 'FAIL: gen changed frontend profile, map, or reload count'
     exit 1
 }
+
+mapfile -t remaining_bound_refs < <(jq -r '.bindings[].node_ref' "$is_core_dir/frontend.json")
+((${#remaining_bound_refs[@]} > 0)) || {
+    echo 'FAIL: lifecycle scenario should still have managed nodes before deletion coverage'
+    exit 1
+}
+for node_ref in "${remaining_bound_refs[@]}"; do
+    is_config_file=
+    delete_output=$(main del "$node_ref" 2>&1) || {
+        echo "FAIL: deleting a bound node should use the frontend coordinator: $delete_output"
+        exit 1
+    }
+    [[ ! -e "$is_conf_dir/$node_ref" && ! -e "$(meta_file "$node_ref")" ]] || {
+        echo "FAIL: bound node deletion left its file or metadata: $node_ref"
+        exit 1
+    }
+    ! jq -e --arg ref "$node_ref" 'any(.bindings[]; .node_ref == $ref)' "$is_core_dir/frontend.json" >/dev/null || {
+        echo "FAIL: bound node deletion left a profile reference: $node_ref"
+        exit 1
+    }
+done
+jq -e '.enabled == true and .bindings == []' "$is_core_dir/frontend.json" >/dev/null && [[ -f $map_file && ! -s $map_file ]] || {
+    echo 'FAIL: deleting the last bound node should leave an enabled empty frontend and empty managed map'
+    exit 1
+}
+jq -e 'all(.route.rules[]?; .outbound != "direct_v6_pref")' "$is_config_json" >/dev/null || {
+    echo 'FAIL: deleting bound nodes should remove their derived outbound associations'
+    exit 1
+}
+
+# A UDP-only 443 service must not count as a TCP frontend listener or prevent
+# an empty-mode enable and a subsequent public TCP Reality node.
+is_core_dir="$CASE_DIR/udp-sing-box"
+is_conf_dir="$is_core_dir/conf"
+is_config_json="$is_core_dir/config.json"
+rm -rf "$CASE_DIR/one-singbox"
+mkdir -p "$is_conf_dir/.quan-meta"
+jq -n '{log:{level:"info"},dns:{},outbounds:[{tag:"direct",type:"direct"}]}' >"$is_config_json"
+cat >"$is_conf_dir/udp-only.json" <<'NODE'
+{"inbounds":[{"type":"direct","tag":"udp-only","listen":"::","listen_port":443,"network":"udp","override_address":"127.0.0.1","override_port":53}]}
+NODE
+cat >"$is_conf_dir/hysteria2-udp.json" <<'NODE'
+{"inbounds":[{"type":"hysteria2","tag":"hysteria2-udp","listen":"::","listen_port":443}]}
+NODE
+udp_node_before=$(sha256sum "$is_conf_dir/udp-only.json" "$is_conf_dir/hysteria2-udp.json" | sha256sum | awk '{print $1}')
+cat >"$FRONTEND_NGINX_CONF" <<'EOF'
+events {}
+http {}
+EOF
+FRONTEND_NGINX_LISTENERS=
+FRONTEND_UDP_LISTENERS='UNCONN 0 0 0.0.0.0:443 0.0.0.0:* users:(("sing-box",pid=777,fd=7))'
+FRONTEND_UDP_LISTENERS_ONLY=1
+export FRONTEND_NGINX_LISTENERS FRONTEND_UDP_LISTENERS FRONTEND_UDP_LISTENERS_ONLY
+: >"$FRONTEND_EVENT_LOG"
+: >"$FRONTEND_LISTENER_FILE"
+[[ $(ss -Hlnpu) == *':443'* && -z $(ss -Hlnpt) ]] || {
+    echo 'FAIL: UDP fixture must expose only UDP 443 to protocol-specific socket queries'
+    exit 1
+}
+udp_tcp_add_output=$(main add reality 443 13131313-1313-4313-8313-131313131313 udp-direct.example 2>&1) || {
+    echo "FAIL: UDP-only 443 must not block a TCP Reality listener when the frontend is disabled: $udp_tcp_add_output"
+    exit 1
+}
+udp_tcp_node_file=$(find "$is_conf_dir" -maxdepth 1 -type f -name '*.json' ! -name udp-only.json -print -quit)
+[[ $udp_tcp_node_file ]] && jq -e '.inbounds[0].type == "vless" and .inbounds[0].listen_port == 443' "$udp_tcp_node_file" >/dev/null || {
+    echo "FAIL: TCP Reality should keep its ordinary direct listener beside UDP-only port 443: $udp_tcp_add_output"
+    exit 1
+}
+main del "${udp_tcp_node_file##*/}" >/dev/null 2>&1 || {
+    echo 'FAIL: temporary direct Reality fixture could not be removed'
+    exit 1
+}
+FRONTEND_UDP_LISTENERS_ONLY=0
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:8443 0.0.0.0:* users:(("other-service",pid=321,fd=8))'
+export FRONTEND_UDP_LISTENERS_ONLY FRONTEND_NGINX_LISTENERS
+tcp_conflict_output=$(main add reality 8443 14141414-1414-4414-8414-141414141414 tcp-conflict.example 2>&1) && {
+    echo 'FAIL: an unrelated TCP listener must still block a direct TCP Reality node'
+    exit 1
+}
+[[ $tcp_conflict_output == *'无法使用 (8443) 端口'* ]] || {
+    echo "FAIL: TCP listener conflict should be reported: $tcp_conflict_output"
+    exit 1
+}
+FRONTEND_NGINX_LISTENERS=
+FRONTEND_UDP_LISTENERS_ONLY=1
+FRONTEND_LISTENER_SOURCE_DIR=$CASE_DIR
+export FRONTEND_UDP_LISTENERS_ONLY FRONTEND_NGINX_LISTENERS FRONTEND_LISTENER_SOURCE_DIR
+udp_enable_output=$(printf '1\n' | main frontend enable 2>&1) || {
+    echo "FAIL: UDP-only port 443 must not block an empty TCP frontend: $udp_enable_output"
+    exit 1
+}
+jq -e '.enabled == true and .bindings == []' "$is_core_dir/frontend.json" >/dev/null || {
+    echo 'FAIL: UDP-only port 443 should not be treated as a Reality migration candidate'
+    exit 1
+}
+udp_add_output=$(main add reality 443 12121212-1212-4212-8212-121212121212 udp-safe.example 2>&1) || {
+    echo "FAIL: UDP-only 443 must not block a TCP Reality frontend node: $udp_add_output"
+    exit 1
+}
+[[ $(sha256sum "$is_conf_dir/udp-only.json" "$is_conf_dir/hysteria2-udp.json" | sha256sum | awk '{print $1}') == "$udp_node_before" ]] || {
+    echo 'FAIL: enabling the TCP frontend changed a UDP-only node'
+    exit 1
+}
+[[ $(jq -r '.bindings | length' "$is_core_dir/frontend.json") == 1 ]] || {
+    echo 'FAIL: TCP Reality add should create one binding alongside the UDP-only service'
+    exit 1
+}
+FRONTEND_UDP_LISTENERS_ONLY=0
+FRONTEND_UDP_LISTENERS=
+FRONTEND_LISTENER_SOURCE_DIR=
+export FRONTEND_UDP_LISTENERS_ONLY FRONTEND_UDP_LISTENERS FRONTEND_LISTENER_SOURCE_DIR
 
 # Exercise a reused user map through the public add command. The map rules live
 # in a static include so scanner provenance must survive the include boundary.
@@ -406,13 +764,60 @@ export FRONTEND_NGINX_LISTENERS
 exact_path="$CASE_DIR/maps/user.conf:1"
 map_reloads_before=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
 exact_error=$(main add reality 443 99999999-9999-4999-8999-999999999999 TAKEN.EXAMPLE 2>&1) && {
-    echo 'FAIL: public add should reject an SNI already present in the reused user map'
+    echo "FAIL: public add should reject an SNI already present in the reused user map: $exact_error"
     exit 1
 }
 [[ $exact_error == *"$exact_path"* && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == "$map_reloads_before" ]] || {
     echo "FAIL: exact map conflict should include its file and line without reloading Nginx: $exact_error"
     exit 1
 }
+
+# Legacy Caddy TLS creation must not take the TCP 443 reservation while the
+# Nginx frontend is enabled, and both rejected and successful Caddy paths
+# must release the shared lock.
+is_caddy=1
+is_caddy_dir="$CASE_DIR/caddy"
+is_caddyfile="$is_caddy_dir/Caddyfile"
+is_caddy_conf="$is_caddy_dir/conf.d"
+mkdir -p "$is_caddy_dir"
+is_https_port=443
+is_no_auto_tls=
+is_dont_test_host=1
+is_install_caddy=
+caddy_node_files_before=$(find "$is_conf_dir" -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort)
+caddy_add_error=$(main add wss reserved.example 66666666-6666-4666-8666-666666666666 /ws 2>&1) && {
+    echo 'FAIL: Caddy-backed node add must reject the Nginx-reserved TCP 443 before writing a node'
+    exit 1
+}
+[[ $caddy_add_error == *'TCP 443 is reserved by the enabled Nginx Reality frontend'* && $(find "$is_conf_dir" -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort) == "$caddy_node_files_before" ]] || {
+    echo "FAIL: reserved Caddy add must fail before changing node files: $caddy_add_error"
+    exit 1
+}
+caddy_create_error=$(create caddy ws 2>&1) && {
+    echo 'FAIL: direct Caddy creation must reject the Nginx-reserved TCP 443'
+    exit 1
+}
+[[ $caddy_create_error == *'TCP 443 is reserved by the enabled Nginx Reality frontend'* ]] || {
+    echo "FAIL: direct Caddy creation should explain the reserved port: $caddy_create_error"
+    exit 1
+}
+flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
+    echo 'FAIL: rejected Caddy paths did not release the shared frontend lock'
+    exit 1
+}
+host=custom-caddy.example
+is_https_port=8443
+custom_caddy_output=$(manage() { :; }; create caddy ws 2>&1) || {
+    echo "FAIL: Caddy creation on a non-reserved HTTPS port should succeed: $custom_caddy_output"
+    exit 1
+}
+[[ -f $is_caddy_conf/custom-caddy.example.conf ]] && grep -Fq 'custom-caddy.example:8443' "$is_caddy_conf/custom-caddy.example.conf" && flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
+    echo 'FAIL: successful Caddy creation should write its site and release the shared frontend lock'
+    exit 1
+}
+is_https_port=
+is_caddy=
+is_dont_test_host=
 
 map_case=0
 for map_rules in \
@@ -528,6 +933,27 @@ backend_recovery_output=$(main frontend recover 2>&1) || {
 }
 jq -e '.phase == "rolled_back" and .backend_rollback_pending == false and .nginx_rollback_pending == false' "$is_core_dir/.frontend-state/transaction.json" >/dev/null || {
     echo 'FAIL: successful backend recovery should clear both pending markers'
+    exit 1
+}
+
+# fix-all must hold one shared lock around its complete rebuild loop, while
+# nested lifecycle calls remain reentrant, then release it after restart.
+fix_all_change_calls=0
+printf '{"inbounds":[]}\n' >"$is_conf_dir/fix-all-guard.json"
+change() {
+    [[ ${frontend_lock_depth:-0} == 1 ]] || {
+        echo 'FAIL: fix-all did not hold exactly one outer shared lock across change'
+        return 1
+    }
+    fix_all_change_calls=$((fix_all_change_calls + 1))
+}
+manage() { [[ $1 == restart && ! $2 ]]; }
+main fix-all >/dev/null 2>&1 || {
+    echo 'FAIL: fix-all should complete under its shared lock'
+    exit 1
+}
+[[ $fix_all_change_calls -gt 0 && ${frontend_lock_depth:-0} == 0 ]] && flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
+    echo 'FAIL: fix-all should process nodes and release its shared lock after restart'
     exit 1
 }
 echo 'PASS: explicit migration, public 443 Reality add, user-map conflicts, sharing, and joint rollback'

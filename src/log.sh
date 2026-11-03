@@ -188,6 +188,11 @@ log_set() {
         [[ ! $is_log_level_use ]] && {
             err "无法识别 log 参数: $@ \n请使用 $is_core log [${is_log_level_list[@]}] 进行相关设定.\n备注: del 参数仅临时删除 log 文件; none 参数将不会生成 log 文件."
         }
+        local config_lock=
+        if [[ $is_log_level_use != del ]]; then
+            shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+            config_lock=1
+        fi
         case $is_log_level_use in
         del)
             rm -rf $is_log_dir/*.log $is_log_dir/*.log.1
@@ -201,6 +206,8 @@ log_set() {
             cat <<<$(jq '.log={output:"/var/log/'$is_core'/access.log",level:"'$is_log_level_use'","timestamp":true}' $is_config_json) >$is_config_json
             ;;
         esac
+
+        [[ $config_lock ]] && shared_config_unlock
 
         manage restart &
         [[ $1 != 'del' ]] && msg "\n已更新 Log 设定为: $(_green $is_log_level_use)\n"
