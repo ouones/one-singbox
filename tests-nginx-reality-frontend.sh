@@ -312,6 +312,10 @@ stopped_human_status=$(main frontend status 2>&1) && {
     echo "FAIL: stopped enabled status should report the local check failure: $stopped_human_status"
     exit 1
 }
+[[ $stopped_human_status == *'配置修订号：4'* && $stopped_human_status == *'绑定节点数：0'* ]] || {
+    echo "FAIL: human-readable status should localize the revision and binding count labels without changing their values: $stopped_human_status"
+    exit 1
+}
 mkdir -p "$is_core_dir/.frontend-state"
 jq -n '{phase:"frontend_applied"}' >"$is_core_dir/.frontend-state/transaction.json"
 pending_enabled_human_status=$(main frontend status 2>&1) && {
