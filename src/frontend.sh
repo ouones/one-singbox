@@ -1295,8 +1295,53 @@ frontend_nginx_pid_is_managed() {
     return 1
 }
 
+frontend_normalize_ipv6_address() {
+    local address=$1 scope= ipv4_tail high low segment zeros normalized_address
+    local -a octets=() left_segments=() right_segments=() segments=() normalized_segments=()
+    if [[ $address == *%* ]]; then
+        scope=${address#*%}
+        address=${address%%%*}
+        [[ $scope && $scope != *%* ]] || return 1
+    fi
+    if [[ $address == *.* ]]; then
+        ipv4_tail=${address##*:}
+        [[ $ipv4_tail == *.* ]] || return 1
+        IFS=. read -r -a octets <<<"$ipv4_tail"
+        ((${#octets[@]} == 4)) || return 1
+        for segment in "${octets[@]}"; do
+            [[ $segment =~ ^[0-9]{1,3}$ ]] && ((10#$segment <= 255)) || return 1
+        done
+        printf -v high '%x' "$((10#${octets[0]} * 256 + 10#${octets[1]}))"
+        printf -v low '%x' "$((10#${octets[2]} * 256 + 10#${octets[3]}))"
+        address=${address%:*}:$high:$low
+    fi
+    [[ $address == *:* ]] || return 1
+    if [[ $address == *::* ]]; then
+        local left=${address%%::*} right=${address#*::}
+        [[ $right != *::* ]] || return 1
+        [[ ! $left ]] || IFS=: read -r -a left_segments <<<"$left"
+        [[ ! $right ]] || IFS=: read -r -a right_segments <<<"$right"
+        ((${#left_segments[@]} + ${#right_segments[@]} < 8)) || return 1
+        segments=("${left_segments[@]}")
+        zeros=$((8 - ${#left_segments[@]} - ${#right_segments[@]}))
+        for ((segment = 0; segment < zeros; segment++)); do segments+=(0); done
+        segments+=("${right_segments[@]}")
+    else
+        IFS=: read -r -a segments <<<"$address"
+        ((${#segments[@]} == 8)) || return 1
+    fi
+    for segment in "${segments[@]}"; do
+        [[ $segment =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
+        printf -v segment '%x' "$((16#$segment))"
+        normalized_segments+=("$segment")
+    done
+    local IFS=:
+    normalized_address=${normalized_segments[*]}
+    printf '%s%s\n' "$normalized_address" "${scope:+%$scope}"
+}
+
 frontend_listener_addresses_overlap() {
-    local wanted=${1//[\[\]]/} bound=${2//[\[\]]/} ipv6only_off=${3:-0} wanted_family bound_family
+    local wanted=${1//[\[\]]/} bound=${2//[\[\]]/} ipv6only_off=${3:-0} wanted_family bound_family normalized_wanted normalized_bound
     [[ $wanted == '*' || $bound == '*' ]] && return 0
     [[ $wanted == *:* ]] && wanted_family=ipv6 || wanted_family=ipv4
     [[ $bound == *:* ]] && bound_family=ipv6 || bound_family=ipv4
@@ -1306,6 +1351,12 @@ frontend_listener_addresses_overlap() {
     fi
     if [[ $wanted == 0.0.0.0 || $wanted == :: || $bound == 0.0.0.0 || $bound == :: ]]; then
         return 0
+    fi
+    if [[ $wanted_family == ipv6 ]]; then
+        normalized_wanted=$(frontend_normalize_ipv6_address "$wanted") || return 0
+        normalized_bound=$(frontend_normalize_ipv6_address "$bound") || return 0
+        [[ $normalized_wanted == "$normalized_bound" ]]
+        return $?
     fi
     [[ $wanted == "$bound" ]]
 }
@@ -2124,7 +2175,7 @@ frontend_txn_restore_record_before() {
 }
 
 frontend_txn_rollback() {
-    local transaction_file="$is_core_dir/.frontend-state/transaction.json" record path role before_exists before_sha before_mode before_owner after_exists after_sha after_mode after_owner current_sha current_mode current_owner current_exists applied_nginx=false applied_backend=false nginx_rollback_pending backend_rollback_pending nginx_config nginx_prefix index
+    local transaction_file="$is_core_dir/.frontend-state/transaction.json" record path role before_exists before_sha before_mode before_owner after_exists after_sha after_mode after_owner current_sha current_mode current_owner current_exists applied_nginx=false applied_backend=false nginx_rollback_pending backend_rollback_pending nginx_config nginx_prefix index transaction_nginx saved_identity active_identity
     local -a file_records=()
     [[ -f $transaction_file && ! -L $transaction_file ]] || {
         frontend_set_error transaction_corrupt 'The frontend transaction record is unavailable for recovery.'
@@ -2132,6 +2183,7 @@ frontend_txn_rollback() {
     }
     frontend_txn_validate_manifest || return 1
     frontend_nginx=$(jq -c '.nginx' "$transaction_file") || return 1
+    transaction_nginx=$frontend_nginx
     nginx_rollback_pending=$(jq -r '.nginx_rollback_pending // false' "$transaction_file") || return 1
     backend_rollback_pending=$(jq -r '.backend_rollback_pending // false' "$transaction_file") || return 1
     frontend_txn_validate_guards || {
@@ -2215,6 +2267,17 @@ frontend_txn_rollback() {
         done
     done
     if [[ $applied_nginx == true ]]; then
+        frontend_detect_nginx_service || {
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        }
+        saved_identity=$(jq -c '{service,service_kind,binary,config,prefix,reload_target}' <<<"$transaction_nginx") || return 1
+        active_identity=$(jq -c '{service,service_kind,binary,config,prefix,reload_target}' <<<"$frontend_nginx") || return 1
+        if [[ $active_identity != "$saved_identity" ]]; then
+            frontend_set_error nginx_instance_drift 'The active Nginx service no longer matches the transaction target; refusing rollback.'
+            frontend_txn_set_phase recovery_required || :
+            return 1
+        fi
         frontend_reload_and_confirm "$frontend_nginx" || {
             frontend_set_error recovery_failed "Nginx recovery could not be verified; sing-box files were left untouched: $frontend_error_message"
             frontend_txn_set_phase recovery_required || :
