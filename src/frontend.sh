@@ -161,7 +161,7 @@ frontend_status() {
         [[ $errors == '[]' ]] || ok=false
         frontend_emit_json "$ok" "$enabled" "$revision" "$phase" "$nginx" "$bindings" "$errors"
     else
-        printf '443 SNI 前置：%s\nrevision：%s\nbindings：%s\n' \
+        printf '443 SNI 前置：%s\n配置修订号：%s\n绑定节点数：%s\n' \
             "$([[ $enabled == true ]] && printf '已启用' || printf '未启用')" \
             "$revision" "$(jq -r 'length' <<<"$bindings")"
         if [[ $enabled == true ]]; then
