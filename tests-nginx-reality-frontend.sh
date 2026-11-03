@@ -183,10 +183,13 @@ jq -e '.ok == true and .enabled == false and .revision == 0 and .phase == "idle"
 }
 load frontend.sh
 frontend_menu_output=$(printf '0\n' | frontend_menu 2>&1)
-[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用前置"* && $frontend_menu_output == *"5) 恢复上次中断的操作"* && $frontend_menu_output == *"不启用"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* ]] || {
+[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用 Nginx SNI 分流"* && $frontend_menu_output == *"5) 恢复中断的操作"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* ]] || {
     echo "FAIL: the frontend submenu should expose enable and recovery actions: $frontend_menu_output"
     exit 1
 }
+menu_check_output=$(printf '2\n\n0\n' | (frontend_main() { printf '模拟检查结果\n'; return 1; }; frontend_menu) 2>&1)
+[[ $menu_check_output == *'---------- 检查 Nginx ----------'*'模拟检查结果'*'按回车返回操作菜单...'*'---------- 操作菜单 ----------'* ]] || fail "check result should be separated and remain visible until returning: $menu_check_output"
+[[ $(printf '%s\n' "$menu_check_output" | grep -c '什么时候用') == 1 ]] || fail "frontend introduction should not repeat after each action"
 [[ ! -s "$FRONTEND_SERVICE_LOG" ]] || {
     echo "FAIL: frontend status contacted a service manager"
     cat "$FRONTEND_SERVICE_LOG"
@@ -362,6 +365,8 @@ jq -e '.ok == false and .errors[0].code == "nginx_unavailable"' <<<"$check_outpu
     echo "FAIL: check should explain unavailable Nginx: $check_output"
     exit 1
 }
+check_human=$(main frontend check 2>&1) && fail "human check should fail when Nginx is unavailable"
+[[ $check_human == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || fail "human check failure should link to the Nginx guide"
 [[ $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$check_before" ]] || {
     echo "FAIL: frontend check modified the saved profile"
     exit 1
@@ -407,7 +412,7 @@ events {}
 http {}
 EOF
 empty_include_output=$(main frontend check --json 2>&1) && fail "empty wildcard include must be reported"
-jq -e --arg pattern "$CASE_DIR/empty-modules/*.conf" '.errors[0].code == "nginx_config_unsupported" and (.errors[0].message | contains($pattern) and contains("未匹配到文件") and contains("检查 Nginx 配置和目录") and contains("不会修改配置"))' <<<"$empty_include_output" >/dev/null || fail "empty include should explain the cause and next steps: $empty_include_output"
+jq -e --arg pattern "$CASE_DIR/empty-modules/*.conf" '.errors[0].code == "nginx_config_unsupported" and (.errors[0].message | contains($pattern) and contains("未匹配到文件") and contains("目录为空可能是正常情况") and contains("参阅教程"))' <<<"$empty_include_output" >/dev/null || fail "empty include should explain the cause and next steps: $empty_include_output"
 
 cat >"$FRONTEND_NGINX_CONF" <<'EOF'
 events {}

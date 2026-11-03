@@ -303,7 +303,7 @@ frontend_localize_error_message() {
     nginx_config_unsupported)
         context=$(frontend_localize_path_context "$message") || context=
         if [[ $message == 'Nginx include did not resolve to a file: '* ]]; then
-            printf 'Nginx 的 include 未匹配到文件：%s。该目录可能为空，或路径有误；请检查 Nginx 配置和目录。若空目录符合预期，当前版本仍无法处理此配置，请提供此提示并反馈给项目。检查不会修改配置。' "$context"
+            printf 'Nginx 的 include 未匹配到文件：%s。目录为空可能是正常情况；当前版本无法继续检查，请参阅教程中的 modules-enabled 排查说明。' "$context"
         else
             if [[ $context ]]; then
                 printf '无法识别或安全处理 Nginx 配置中的结构（%s）。' "$context"
@@ -3920,7 +3920,7 @@ frontend_disable() {
 frontend_recover_locked() {
     local transaction_file="$is_core_dir/.frontend-state/transaction.json" phase status
     if [[ ! -e $transaction_file && ! -L $transaction_file ]]; then
-        printf '没有待恢复的前置事务。\n'
+        printf '没有需要恢复的操作。\n'
         return 0
     fi
     frontend_read_phase || {
@@ -3930,14 +3930,14 @@ frontend_recover_locked() {
     phase=$frontend_phase
     case $phase in
     committed | rolled_back)
-        printf '没有待恢复的前置事务（%s）。\n' "$phase"
+        printf '没有需要恢复的操作（%s）。\n' "$phase"
         return 0
         ;;
     esac
     frontend_txn_rollback
     status=$?
     if ((status == 0)); then
-        printf '前置事务已恢复。\n'
+        printf '中断的操作已恢复。\n'
     fi
     return "$status"
 }
@@ -3945,7 +3945,7 @@ frontend_recover_locked() {
 frontend_recover() {
     local status transaction_file="$is_core_dir/.frontend-state/transaction.json"
     if [[ ! -e $transaction_file && ! -L $transaction_file ]]; then
-        printf '没有待恢复的前置事务。\n'
+        printf '没有需要恢复的操作。\n'
         return 0
     fi
     frontend_lock_state || {
@@ -3998,6 +3998,7 @@ frontend_check() {
             [[ $enabled == true ]] || printf '前置尚未启用；如需使用，请返回菜单选择启用。\n'
         else
             jq -r '.[0].message' <<<"$errors" >&2
+            printf 'Nginx 准备与排查教程：https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md\n' >&2
         fi
     fi
     [[ $errors == '[]' ]]
@@ -4074,20 +4075,37 @@ frontend_menu_enable() {
 }
 
 frontend_menu() {
-    local action
+    local action title
+    printf '\n========== 443 SNI 前置 ==========\n'
+    printf '作用：让多个普通 VLESS-REALITY 节点共用服务器的 TCP 443 端口，Nginx 根据连接中的域名将流量转给对应节点。\n什么时候用：需要让多个这类节点共用 443 端口，且服务器已安装并运行 Nginx。\n什么时候不用：没有这个需求时保持关闭即可，现有节点不需要为此修改。\n网站和证书仍需自行管理；此功能不会自动配置网站。\n'
     while :; do
-        printf '\n443 SNI 前置\n'
-        printf '作用：让多个普通 VLESS-REALITY 节点共用服务器的 TCP 443 端口，Nginx 根据连接中的域名将流量转给对应节点。\n什么时候用：需要让多个这类节点共用 443 端口，且服务器已安装并运行 Nginx。\n什么时候不用：没有这个需求时保持关闭即可，现有节点不需要为此修改。\n网站和证书仍需自行管理；此功能不会自动配置网站。\n'
-        printf '1) 查看是否已启用\n2) 检查 Nginx 是否满足要求（不启用）\n3) 启用前置（现有 443 节点会加入；没有节点也可启用）\n4) 停用前置（先删除或移出所有已加入的节点）\n5) 恢复上次中断的操作（仅在收到恢复提示时使用）\n0) 返回\n'
+        printf '\n---------- 操作菜单 ----------\n'
+        printf '1) 查看状态\n2) 检查 Nginx 环境\n3) 启用 Nginx SNI 分流\n4) 停用 Nginx SNI 分流\n5) 恢复中断的操作\n0) 返回\n'
         read -r -p '请选择: ' action || return
         case $action in
         0) return ;;
+        1) title='查看状态' ;;
+        2) title='检查 Nginx' ;;
+        3) title='启用 Nginx SNI 分流' ;;
+        4) title='停用 Nginx SNI 分流' ;;
+        5) title='恢复操作' ;;
+        *) printf '\n无效选项，请重新选择。\n'; continue ;;
+        esac
+        printf '\n---------- %s ----------\n' "$title"
+        case $action in
         1) frontend_main status ;;
         2) frontend_main check ;;
         3) frontend_menu_enable ;;
-        4) frontend_main disable ;;
-        5) frontend_main recover ;;
-        *) printf '无效选项。\n' ;;
+        4)
+            printf '停用前需先删除或移出所有已加入的节点。\n'
+            frontend_main disable
+            ;;
+        5)
+            printf '仅在提示需要恢复时使用此操作。\n'
+            frontend_main recover
+            ;;
         esac
+        printf '\n------------------------------\n按回车返回操作菜单...'
+        read -r || return
     done
 }
