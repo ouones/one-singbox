@@ -974,68 +974,38 @@ restore_node_config_lifecycle() {
     node_lifecycle_restore_errors=${errors[*]}
 }
 
-apply_node_config_lifecycle() {
-    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
-    local old_node="$is_conf_dir/$old_cfg" new_node old_meta new_meta candidate_nodes candidate_config source_config tmp_dir tmp_parent
-    local original_old_node original_old_meta original_config stage old_meta_exists=0 old_config_exists=0 restart_needed=0
+prepare_node_config_lifecycle() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-} tmp_dir=$5
+    local old_node="$is_conf_dir/$old_cfg" old_meta
+    local candidate_nodes candidate_config source_config original_old_node original_old_meta original_config
+
     node_lifecycle_error=
-    node_lifecycle_restore_errors=
-    [[ $operation == delete || $operation == replace ]] || {
-        node_lifecycle_error="不支持的节点操作: $operation"
-        return 1
-    }
-    [[ -f $old_node ]] || {
-        node_lifecycle_error="本机节点配置不存在: $old_node"
-        return 1
-    }
-    if [[ $operation == replace ]]; then
-        new_node="$is_conf_dir/$new_cfg"
-        new_meta=$(meta_file "$new_cfg")
-        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
-            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
-            return 1
-        }
-        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
-            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
-            return 1
-        fi
-    fi
-    tmp_parent=$(dirname "$is_conf_dir")
-    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
-        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
-        return 1
-    }
     candidate_nodes="$tmp_dir/nodes"
     if ! mkdir -p "$candidate_nodes" || ! cp -a "$is_conf_dir/." "$candidate_nodes/"; then
         node_lifecycle_error="无法构造候选节点集合"
-        rm -rf "$tmp_dir"
         return 1
     fi
     old_meta=$(meta_file "$old_cfg")
     if [[ $operation == delete ]]; then
         rm -f "$candidate_nodes/$old_cfg" "$candidate_nodes/.quan-meta/$old_cfg.meta.json" || {
             node_lifecycle_error="无法构造候选删除节点集合"
-            rm -rf "$tmp_dir"
             return 1
         }
     else
         if [[ $old_cfg != "$new_cfg" ]]; then
             if ! mv -f "$candidate_nodes/$old_cfg" "$candidate_nodes/$new_cfg"; then
                 node_lifecycle_error="无法构造候选节点迁移: $old_cfg -> $new_cfg"
-                rm -rf "$tmp_dir"
                 return 1
             fi
             if [[ -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" ]]; then
                 mkdir -p "$candidate_nodes/.quan-meta" && mv -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" "$candidate_nodes/.quan-meta/$new_cfg.meta.json" || {
                     node_lifecycle_error="无法构造候选节点元数据迁移: $old_cfg -> $new_cfg"
-                    rm -rf "$tmp_dir"
                     return 1
                 }
             fi
         fi
         printf '%s\n' "$new_json" >"$candidate_nodes/$new_cfg" || {
             node_lifecycle_error="无法写入候选节点配置: $new_cfg"
-            rm -rf "$tmp_dir"
             return 1
         }
     fi
@@ -1047,18 +1017,15 @@ apply_node_config_lifecycle() {
         source_config="$tmp_dir/default-config.json"
         default_runtime_config >"$source_config" || {
             node_lifecycle_error="无法构造默认公共配置"
-            rm -rf "$tmp_dir"
             return 1
         }
     fi
     if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" '' '' "$candidate_nodes"; then
         node_lifecycle_error="节点关联配置生成失败: ${runtime_sync_error:-未知错误}"
-        rm -rf "$tmp_dir"
         return 1
     fi
     if ! "$is_core_bin" check -c "$candidate_config" -C "$candidate_nodes" &>/dev/null; then
         node_lifecycle_error="完整候选节点配置校验失败，原配置未改变: $old_cfg${new_cfg:+ -> $new_cfg}"
-        rm -rf "$tmp_dir"
         return 1
     fi
 
@@ -1067,25 +1034,31 @@ apply_node_config_lifecycle() {
     original_config="$tmp_dir/original-config"
     cp -p "$old_node" "$original_old_node" || {
         node_lifecycle_error="无法备份节点配置: $old_node"
-        rm -rf "$tmp_dir"
         return 1
     }
     if [[ -f $old_meta ]]; then
         cp -p "$old_meta" "$original_old_meta" || {
             node_lifecycle_error="无法备份节点元数据: $old_meta"
-            rm -rf "$tmp_dir"
             return 1
         }
-        old_meta_exists=1
     fi
     if [[ -f $is_config_json ]]; then
         cp -p "$is_config_json" "$original_config" || {
             node_lifecycle_error="无法备份公共配置: $is_config_json"
-            rm -rf "$tmp_dir"
             return 1
         }
-        old_config_exists=1
     fi
+}
+
+apply_node_config_lifecycle_files() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} tmp_dir=$4
+    local old_node="$is_conf_dir/$old_cfg" new_node="$is_conf_dir/$new_cfg" old_meta new_meta
+    local candidate_nodes="$tmp_dir/nodes" candidate_config="$tmp_dir/config.json" stage old_config_exists=0
+    node_lifecycle_error=
+    node_lifecycle_restart_needed=0
+    old_meta=$(meta_file "$old_cfg")
+    new_meta=$(meta_file "$new_cfg")
+    [[ -f "$tmp_dir/original-config" ]] && old_config_exists=1
 
     if [[ $operation == replace ]]; then
         stage=$(mktemp "$new_node.lifecycle.XXXXXX") || node_lifecycle_error="无法准备节点配置保存: $new_node"
@@ -1112,15 +1085,55 @@ apply_node_config_lifecycle() {
             rm -f "$stage"
             node_lifecycle_error="保存公共配置失败: $is_config_json"
         fi
-        [[ ! $node_lifecycle_error ]] && restart_needed=1
+        [[ ! $node_lifecycle_error ]] && node_lifecycle_restart_needed=1
     fi
-    if [[ $node_lifecycle_error ]]; then
+    [[ ! $node_lifecycle_error ]]
+}
+
+apply_node_config_lifecycle() {
+    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
+    local old_node="$is_conf_dir/$old_cfg" tmp_dir tmp_parent old_meta_exists=0 old_config_exists=0
+    node_lifecycle_error=
+    node_lifecycle_restore_errors=
+    node_lifecycle_restart_needed=0
+    [[ $operation == delete || $operation == replace ]] || {
+        node_lifecycle_error="不支持的节点操作: $operation"
+        return 1
+    }
+    [[ -f $old_node ]] || {
+        node_lifecycle_error="本机节点配置不存在: $old_node"
+        return 1
+    }
+    if [[ $operation == replace ]]; then
+        local new_node="$is_conf_dir/$new_cfg" new_meta
+        new_meta=$(meta_file "$new_cfg")
+        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
+            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
+            return 1
+        }
+        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
+            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
+            return 1
+        fi
+    fi
+    tmp_parent=$(dirname "$is_conf_dir")
+    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
+        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
+        return 1
+    }
+    if ! prepare_node_config_lifecycle "$operation" "$old_cfg" "$new_cfg" "$new_json" "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    [[ -f "$tmp_dir/original-old-meta" ]] && old_meta_exists=1
+    [[ -f "$tmp_dir/original-config" ]] && old_config_exists=1
+    if ! apply_node_config_lifecycle_files "$operation" "$old_cfg" "$new_cfg" "$tmp_dir"; then
         restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
         [[ $node_lifecycle_restore_errors ]] && node_lifecycle_error+="；恢复文件失败: $node_lifecycle_restore_errors"
         rm -rf "$tmp_dir"
         return 1
     fi
-    if [[ $restart_needed == 1 ]] && ! manage_restart_confirmed; then
+    if [[ $node_lifecycle_restart_needed == 1 ]] && ! manage_restart_confirmed; then
         restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
         if manage_restart_confirmed; then
             if [[ $node_lifecycle_restore_errors ]]; then
@@ -1139,6 +1152,7 @@ apply_node_config_lifecycle() {
     rm -rf "$tmp_dir"
     return 0
 }
+
 apply_node_outbound_mode() {
     local cfg=$1 mode=$2 proxy_config=${3:-} proxy_name=${4:-}
     local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
