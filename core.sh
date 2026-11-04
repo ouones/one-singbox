@@ -622,6 +622,7 @@ ask() {
                 [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list=(${is_tmp_list[@]} $v)
             done
         }
+        is_tmp_list+=("返回节点管理")
         is_opt_msg="\n请选择协议:\n"
         is_ask_set=is_new_protocol
         ;;
@@ -681,7 +682,7 @@ ask() {
         else
             read -r REPLY
         fi
-        [[ ! $REPLY && $is_emtpy_exit ]] && exit
+        [[ ! $REPLY && $is_emtpy_exit && $is_ask_set == is_main_pick ]] && exit
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
         [[ "$REPLY" == "${is_str}2${is_get}3${is_opt}3" && $is_ask_set == 'is_main_pick' ]] && {
             msg "\n${is_get}2${is_str}3${is_msg}3b${is_tmp}o${is_opt}y\n" && exit
@@ -3909,6 +3910,7 @@ service_action_result() {
 add() {
     local caddy_shared_lock= caddy_error_message
     is_frontend_public_443_add=
+    [[ ! $1 && ! $is_change ]] && unset is_new_protocol
     if [[ ! $is_change ]]; then
         is_servername=
         is_use_servername=
@@ -3965,6 +3967,11 @@ add() {
 
     # no prefer protocol
     [[ ! $is_new_protocol ]] && ask set_protocol
+    if [[ $is_new_protocol == "返回节点管理" ]]; then
+        unset is_new_protocol
+        msg "\n已取消添加节点，返回节点管理菜单。\n"
+        return
+    fi
 
     if [[ ${is_new_protocol,,} == 'anytls' ]]; then
         is_core_major=$(echo "$is_core_ver" | cut -d. -f1)
@@ -4913,104 +4920,183 @@ update() {
 }
 
 # Interactive menus are grouped by the task users want to complete.
+menu_pause() {
+    printf '\n按回车返回菜单。\n'
+    read -r
+}
+
+node_menu_has_nodes() {
+    local file
+    shopt -s nullglob
+    for file in "$is_conf_dir"/*.json; do
+        [[ ${file##*/} == relay-* || ${file##*/} =~ dynamic-port-.*-link ]] && continue
+        shopt -u nullglob
+        return 0
+    done
+    shopt -u nullglob
+    return 1
+}
+
+node_menu_empty_state() {
+    node_menu_has_nodes && return 1
+    msg "\n尚未添加任何节点。可以先选择“添加节点”。\n"
+    menu_pause
+    return 0
+}
+
 node_menu() {
-    is_tmp_list=("添加节点" "修改节点" "查看节点信息" "删除节点" "返回首页")
-    ask list is_node_action null "\n请选择节点操作:\n"
-    case $REPLY in
-    1) add ;;
-    2) change ;;
-    3) info ;;
-    4) del ;;
-    5) is_main_menu ;;
-    esac
+    while :; do
+        is_tmp_list=("添加节点" "修改节点" "查看节点信息" "删除节点" "返回首页")
+        ask list is_node_action null "\n请选择节点操作:\n"
+        case $REPLY in
+        1)
+            add
+            menu_pause
+            ;;
+        2)
+            node_menu_empty_state && continue
+            change
+            menu_pause
+            ;;
+        3)
+            node_menu_empty_state && continue
+            info
+            menu_pause
+            ;;
+        4)
+            node_menu_empty_state && continue
+            del
+            menu_pause
+            ;;
+        5) return ;;
+        esac
+    done
 }
 
 service_menu() {
-    is_tmp_list=("查看服务状态" "启动服务" "停止服务" "重启服务" "查看日志" "返回首页")
-    ask list is_service_action null "\n请选择服务操作:\n"
-    case $REPLY in
-    1)
-        core_status_read
-        msg "\nsing-box 内核：$is_core_status (版本 $is_core_ver)"
-        [[ $is_caddy ]] && msg "Caddy：$is_caddy_status (版本 $is_caddy_ver)"
-        ;;
-    2)
-        service_action_result start
-        ;;
-    3)
-        service_action_result stop
-        ;;
-    4)
-        service_action_result restart
-        ;;
-    5)
-        load log.sh
-        log_set
-        ;;
-    6) is_main_menu ;;
-    esac
+    local menu_status=0 action_status
+    while :; do
+        is_tmp_list=("查看服务状态" "启动服务" "停止服务" "重启服务" "查看日志" "返回首页")
+        ask list is_service_action null "\n请选择服务操作:\n"
+        case $REPLY in
+        1)
+            core_status_read
+            msg "\nsing-box 内核：$is_core_status (版本 $is_core_ver)"
+            [[ $is_caddy ]] && msg "Caddy：$is_caddy_status (版本 $is_caddy_ver)"
+            menu_pause
+            ;;
+        2)
+            service_action_result start
+            action_status=$?
+            menu_status=$action_status
+            menu_pause
+            ;;
+        3)
+            service_action_result stop
+            action_status=$?
+            menu_status=$action_status
+            menu_pause
+            ;;
+        4)
+            service_action_result restart
+            action_status=$?
+            menu_status=$action_status
+            menu_pause
+            ;;
+        5)
+            load log.sh
+            log_set
+            menu_pause
+            ;;
+        6) return "$menu_status" ;;
+        esac
+    done
 }
 
 update_menu() {
-    is_tmp_list=("更新 sing-box 内核" "更新 one-singbox 脚本")
-    [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
-    is_tmp_list+=("返回首页")
-    ask list is_do_update null "\n请选择要更新的软件:\n"
-    case $REPLY in
-    1 | 2) update "$REPLY" ;;
-    3)
-        if [[ $is_caddy ]]; then
-            update caddy
-        else
-            is_main_menu
-        fi
-        ;;
-    4) is_main_menu ;;
-    esac
+    while :; do
+        is_tmp_list=("更新 sing-box 内核" "更新 one-singbox 脚本")
+        [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
+        is_tmp_list+=("返回首页")
+        ask list is_do_update null "\n请选择要更新的软件:\n"
+        case $REPLY in
+        1 | 2)
+            update "$REPLY"
+            menu_pause
+            ;;
+        3)
+            if [[ $is_caddy ]]; then
+                update caddy
+                menu_pause
+            else
+                return
+            fi
+            ;;
+        4) return ;;
+        esac
+    done
 }
 
 system_tools_menu() {
-    is_tmp_list=("启用 BBR" "设置 DNS" "设置日志占用上限" "重装 one-singbox 脚本" "返回首页")
-    ask list is_system_tool null "\n请选择系统工具:\n"
-    case $REPLY in
-    1) load bbr.sh; _try_enable_bbr ;;
-    2) load dns.sh; dns_set ;;
-    3) log_limit_set ;;
-    4) get reinstall ;;
-    5) is_main_menu ;;
-    esac
+    while :; do
+        is_tmp_list=("启用 BBR" "设置 DNS" "设置日志占用上限" "重装 one-singbox 脚本" "返回首页")
+        ask list is_system_tool null "\n请选择系统工具:\n"
+        case $REPLY in
+        1)
+            load bbr.sh
+            _try_enable_bbr
+            menu_pause
+            ;;
+        2)
+            load dns.sh
+            dns_set
+            menu_pause
+            ;;
+        3)
+            log_limit_set
+            menu_pause
+            ;;
+        4)
+            get reinstall
+            menu_pause
+            ;;
+        5) return ;;
+        esac
+    done
 }
 
 # Main menu; leave input empty to exit.
 is_main_menu() {
-    if ! qrcode_dependency_checked; then
-        qrcode_dependency_install || :
-    fi
-    core_status_read
-    load log.sh
     local is_log_usage_limit is_log_usage_bytes
-    is_log_usage_limit=$(log_limit_read)
-    msg "\n------------- $is_script_name script $is_sh_ver by $author -------------"
-    msg "sing-box 内核：$is_core_ver ($is_core_status)"
-    if is_log_usage_bytes=$(log_usage_read); then
-        msg "日志占用：$(awk -v bytes="$is_log_usage_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }') MB / 上限 $is_log_usage_limit MB"
-    else
-        msg "日志占用：暂不可用 / 上限 $is_log_usage_limit MB"
-    fi
-    msg "问题反馈：$(msg_ul https://github.com/ouones/one-singbox/issues)"
-    is_main_start=1
-    ask mainmenu
-    case $REPLY in
-    1) node_menu ;;
-    2) load frontend.sh; frontend_menu ;;
-    3) relay_menu ;;
-    4) service_menu ;;
-    5) update_menu ;;
-    6) system_tools_menu ;;
-    7) msg; load help.sh; show_help ;;
-    8) load help.sh; about ;;
-    9) uninstall ;;
-    esac
+    while :; do
+        if ! qrcode_dependency_checked; then
+            qrcode_dependency_install || :
+        fi
+        core_status_read
+        load log.sh
+        is_log_usage_limit=$(log_limit_read)
+        msg "\n------------- $is_script_name script $is_sh_ver by $author -------------"
+        msg "sing-box 内核：$is_core_ver ($is_core_status)"
+        if is_log_usage_bytes=$(log_usage_read); then
+            msg "日志占用：$(awk -v bytes="$is_log_usage_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }') MB / 上限 $is_log_usage_limit MB"
+        else
+            msg "日志占用：暂不可用 / 上限 $is_log_usage_limit MB"
+        fi
+        msg "问题反馈：$(msg_ul https://github.com/ouones/one-singbox/issues)"
+        is_main_start=1
+        ask mainmenu
+        case $REPLY in
+        1) node_menu ;;
+        2) load frontend.sh; frontend_menu ;;
+        3) relay_menu ;;
+        4) service_menu ;;
+        5) update_menu ;;
+        6) system_tools_menu ;;
+        7) msg; load help.sh; show_help ;;
+        8) load help.sh; about ;;
+        9) uninstall ;;
+        esac
+    done
 }
 
 relay_warn_security() {
@@ -5173,26 +5259,47 @@ relay_delete() {
     _green "\n已删除中转配置: relay-${local_port}.json\n"
 }
 
+relay_menu_has_entries() {
+    local files
+    shopt -s nullglob
+    files=("$is_conf_dir"/relay-*.json)
+    shopt -u nullglob
+    ((${#files[@]} > 0))
+}
+
+relay_menu_empty_state() {
+    relay_menu_has_entries && return 1
+    relay_list
+    menu_pause
+    return 0
+}
+
 relay_menu() {
-    is_tmp_list=("添加端口中转" "查看中转列表" "查看中转详情" "删除端口中转" "返回首页")
-    ask list is_relay_action null "\n请选择端口中转操作:\n"
-    case $REPLY in
-    1)
-        relay_add
-        ;;
-    2)
-        relay_list
-        ;;
-    3)
-        relay_info
-        ;;
-    4)
-        relay_delete
-        ;;
-    5)
-        is_main_menu
-        ;;
-    esac
+    while :; do
+        is_tmp_list=("添加端口中转" "查看中转列表" "查看中转详情" "删除端口中转" "返回首页")
+        ask list is_relay_action null "\n请选择端口中转操作:\n"
+        case $REPLY in
+        1)
+            relay_add
+            menu_pause
+            ;;
+        2)
+            relay_list
+            menu_pause
+            ;;
+        3)
+            relay_menu_empty_state && continue
+            relay_info
+            menu_pause
+            ;;
+        4)
+            relay_menu_empty_state && continue
+            relay_delete
+            menu_pause
+            ;;
+        5) return ;;
+        esac
+    done
 }
 
 relay_main() {
