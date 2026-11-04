@@ -470,6 +470,54 @@ frontend_set_error() {
     frontend_error_message=$(frontend_localize_error_message "$1" "$2")
 }
 
+frontend_error_next_step() {
+    case $1 in
+    candidate_validation_failed|nginx_config_invalid|nginx_config_unsupported|nginx_candidate_failed)
+        printf '用服务实际使用的配置运行 nginx -t -c <活动配置路径>，修复报告项后再运行 sb frontend check。'
+        ;;
+    duplicate_sni|nginx_map_overlap)
+        printf '为每个节点选择唯一的精确 SNI，并检查用户维护的 Nginx map 规则；修正后再运行 sb frontend check。'
+        ;;
+    inline_443_node|node_not_on_public_443|node_unsupported|invalid_sni|unselected_443_nodes)
+        printf '按上面的节点原因修正公网 443 入站；前置仅支持无 transport 的普通 VLESS-REALITY，再重新检查。'
+        ;;
+    nginx_unavailable|nginx_service_manager_missing|nginx_instance_ambiguous|nginx_reload_unavailable)
+        printf '检查 Nginx 是否已安装并运行（systemctl status nginx.service 或 rc-service nginx status），修复后再运行 sb frontend check。'
+        ;;
+    listen_addresses_unavailable|listen_addresses_invalid|listen_addresses_required)
+        printf '确认服务器地址配置（ip -o -4 addr show scope global 和 ip -o -6 addr show scope global），再按实际连接类型选择 IPv4、IPv6 或双栈并重新检查。'
+        ;;
+    tcp_443_*|nginx_listener_*)
+        printf '检查 TCP 443 的活动监听地址和所属进程，处理已确认的冲突后再运行 sb frontend check。'
+        ;;
+    recovery_required|transaction_corrupt|transaction_path_invalid|transaction_candidate_missing)
+        printf '先运行 sb frontend recover 并确认恢复结果，再运行 sb frontend check。'
+        ;;
+    singbox_candidate_invalid|node_candidate_failed|backend_port_unavailable)
+        printf '检查共享 sing-box 配置和候选节点的错误，修复后重新尝试；不要覆盖或删除未确认归属的文件。'
+        ;;
+    project_file_conflict|project_path_conflict|owned_file_drift|shared_entry_changed|shared_entry_in_use)
+        printf '检查报出的 Nginx 项目文件及其引用；保留用户配置，确认归属后修复，再运行 sb frontend check。'
+        ;;
+    operation_in_progress|lock_unavailable|state_unwritable)
+        printf '等待其他前置操作结束并确认状态目录可用，再运行 sb frontend check。'
+        ;;
+    *)
+        printf '根据上面的原因修复 Nginx 或节点配置，再运行 sb frontend check；遇到无法判断的配置时先不要删除它。'
+        ;;
+    esac
+}
+
+frontend_print_error_guidance() {
+    local code=$1 message=$2
+    if [[ $code == listen_addresses_cancelled ]]; then
+        printf '%s\n' "$message" >&2
+        return 0
+    fi
+    printf '错误：%s\n建议：%s\n教程入口：https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md\n' \
+        "$message" "$(frontend_error_next_step "$code")" >&2
+}
+
 frontend_detect_nginx_service() {
     local service_pid service_exec service_reload process_line process_args process_binary process_real exec_real
     local build_output build_args token runtime_config runtime_prefix service_kind service_name
@@ -3799,14 +3847,14 @@ frontend_enable_locked() {
 frontend_enable() {
     local status
     frontend_lock_state || {
-        printf '%s\n' "$frontend_error_message" >&2
+        frontend_print_error_guidance "$frontend_error_code" "$frontend_error_message"
         return 1
     }
     frontend_enable_locked "$@"
     status=$?
     frontend_unlock_state
     if ((status != 0)); then
-        printf '%s\n' "$frontend_error_message" >&2
+        frontend_print_error_guidance "$frontend_error_code" "$frontend_error_message"
         return "$status"
     fi
     return 0
@@ -4019,8 +4067,7 @@ frontend_check() {
             printf 'Nginx 环境检查通过（未验证公网连通性）。\n'
             [[ $enabled == true ]] || printf '前置尚未启用；如需使用，请返回菜单选择启用。\n'
         else
-            jq -r '.[0].message' <<<"$errors" >&2
-            printf 'Nginx 准备与排查教程：https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md\n' >&2
+            frontend_print_error_guidance "$(jq -r '.[0].code' <<<"$errors")" "$(jq -r '.[0].message' <<<"$errors")"
         fi
     fi
     [[ $errors == '[]' ]]
@@ -4074,27 +4121,167 @@ frontend_main() {
     esac
 }
 
-frontend_menu_enable() {
-    local frontend_menu_address_choice=1
-    local file selected
-    local -a nodes=() refs=()
-    shopt -s nullglob
-    for file in "$is_conf_dir"/*.json; do
-        [[ -f $file && ! -L $file ]] || continue
-        frontend_config_has_tcp_port "$file" 443 && nodes+=("${file##*/}")
-    done
-    shopt -u nullglob
-    if ((${#nodes[@]} == 0)); then
-        frontend_main enable
-        return $?
+frontend_menu_print_enable_candidates() {
+    local node_ref node_name sni failed=0 first_code= first_message=
+    if (($# == 0)); then
+        printf '现有公网 TCP 443 候选节点：无（本次不会迁移旧节点）。\n'
+        return 0
     fi
-    printf '启用时，以下现有公网 443 节点必须全部加入前置，且都必须是普通 VLESS-REALITY 节点：\n%s\n' "${nodes[*]}"
-    read -r -p '输入上面全部节点文件名，用空格分隔（直接回车取消）: ' -a refs || return 1
-    ((${#refs[@]} > 0)) || {
-        printf '已取消启用，返回菜单。\n' >&2
+    printf '现有公网 TCP 443 候选节点及格式兼容性：\n'
+    for node_ref in "$@"; do
+        node_name=$(node_name_for_link "$node_ref")
+        if frontend_validate_reality_node "$is_conf_dir/$node_ref" 443; then
+            sni=$(jq -r '.inbounds[0].tls.server_name' "$is_conf_dir/$node_ref") || return 1
+            printf '  - %s（%s）：可纳管，普通 VLESS-REALITY，无 transport，SNI %s。\n' "$node_name" "$node_ref" "$sni"
+        else
+            printf '  - %s（%s）：阻断，%s\n' "$node_name" "$node_ref" "$frontend_error_message"
+            if ((failed == 0)); then
+                first_code=$frontend_error_code
+                first_message=$frontend_error_message
+            fi
+            failed=1
+        fi
+    done
+    if ((failed)); then
+        frontend_error_code=$first_code
+        frontend_error_message=$first_message
+        return 1
+    fi
+}
+
+frontend_menu_enable_preflight() {
+    local node_ref sni sni_lower status config_file project_dir final_map final_stream
+    local -A seen_sni=()
+    frontend_migration_active=0
+    frontend_migration_handoff=0
+    frontend_allow_unknown_listener_range=0
+    frontend_load_profile || return 1
+    frontend_read_phase || {
+        frontend_error_code=$frontend_phase_error_code
+        frontend_error_message=$frontend_phase_error_message
         return 1
     }
-    frontend_main enable "${refs[@]}"
+    frontend_pending_change || return 1
+    if [[ $frontend_profile ]] && jq -e '.enabled == true' <<<"$frontend_profile" >/dev/null; then
+        frontend_set_error already_enabled 'The frontend is already enabled; node references are accepted only during first migration.'
+        return 1
+    fi
+    if [[ $frontend_profile ]] && jq -e '.bindings | length > 0' <<<"$frontend_profile" >/dev/null; then
+        frontend_set_error profile_bindings_present 'A disabled profile still contains bindings; refusing to enable an inconsistent state.'
+        return 1
+    fi
+    frontend_validate_migration_refs "$@" || return 1
+    frontend_listener_range_selected=0
+    frontend_allow_unknown_listener_range=1
+    frontend_refresh_detection
+    status=$?
+    frontend_allow_unknown_listener_range=0
+    frontend_migration_active=0
+    ((status == 0)) || return "$status"
+
+    for node_ref in "${frontend_migration_refs[@]}"; do
+        sni=$(jq -r '.inbounds[0].tls.server_name' "$is_conf_dir/$node_ref") || return 1
+        sni_lower=${sni,,}
+        [[ ! ${seen_sni[$sni_lower]+yes} ]] || {
+            frontend_set_error duplicate_sni "Reality SNI is already used by another binding: $sni"
+            return 1
+        }
+        seen_sni[$sni_lower]=1
+        frontend_assert_user_map_sni_free "$sni" || return 1
+    done
+
+    config_file=$(jq -r '.config' <<<"$frontend_nginx")
+    project_dir="$(dirname -- "$config_file")/one-singbox"
+    [[ $project_dir != *[[:space:]]* ]] || {
+        frontend_set_error nginx_path_unsupported 'Nginx project paths containing whitespace are not supported.'
+        return 1
+    }
+    [[ ! -L $project_dir && ( ! -e $project_dir || -d $project_dir ) ]] || {
+        frontend_set_error project_path_conflict "The Nginx project directory is not a regular directory: $project_dir"
+        return 1
+    }
+    final_map="$project_dir/reality-map.conf"
+    final_stream="$project_dir/stream.conf"
+    if [[ -e $final_map || -L $final_map || ( $frontend_entry_type == new_stream && ( -e $final_stream || -L $final_stream ) ) ]]; then
+        frontend_set_error project_file_conflict 'A project-owned Nginx file already exists without a matching enabled profile.'
+        return 1
+    fi
+}
+
+frontend_menu_check() {
+    local selected status
+    while :; do
+        frontend_main check
+        status=$?
+        ((status == 0)) && return 0
+        read -r -p '1) 重新检查  0) 返回：' selected || return "$status"
+        [[ $selected == 1 ]] || return "$status"
+    done
+}
+
+frontend_menu_enable() {
+    local frontend_menu_address_choice=1
+    local file selected status
+    local -a nodes=()
+    while :; do
+        nodes=()
+        frontend_migration_active=0
+        frontend_migration_handoff=0
+        frontend_allow_unknown_listener_range=0
+        shopt -s nullglob
+        for file in "$is_conf_dir"/*.json; do
+            [[ -f $file && ! -L $file ]] || continue
+            frontend_config_has_tcp_port "$file" 443 && nodes+=("${file##*/}")
+        done
+        shopt -u nullglob
+
+        status=0
+        frontend_menu_print_enable_candidates "${nodes[@]}" || status=$?
+        if ((status == 0)); then
+            frontend_menu_enable_preflight "${nodes[@]}" || status=$?
+        fi
+        if ((status != 0)); then
+            frontend_print_error_guidance "$frontend_error_code" "$frontend_error_message"
+            read -r -p '1) 重新检查  0) 返回：' selected || return "$status"
+            if [[ $selected == 1 ]]; then
+                continue
+            fi
+            printf '已返回操作菜单。\n'
+            return "$status"
+        fi
+
+        printf '\n启用影响说明：\n'
+        printf '  - 将重载整个 Nginx 实例，其他等待加载的配置也可能同时生效。\n'
+        printf '  - 操作期间连接可能短暂中断。\n'
+        printf '  - 仅迁移现有节点时会重启 sing-box 服务。\n'
+        printf '  - 网站内容和证书由你自行管理；此功能不会自动配置网站。\n'
+        read -r -p '1) 确认迁移全部候选节点并启用  0) 取消：' selected || selected=0
+        case $selected in
+        1) ;;
+        0)
+            printf '已取消启用，未更改节点、配置或服务。\n'
+            return 0
+            ;;
+        *)
+            printf '请输入 1 确认，或 0 取消。\n'
+            continue
+            ;;
+        esac
+
+        frontend_main enable "${nodes[@]}"
+        status=$?
+        if ((status == 0)); then
+            if ((${#nodes[@]} == 0)); then
+                printf '启用成功；当前没有受管节点。添加节点路径：首页 → 节点管理 → 添加节点。\n'
+            else
+                printf '启用成功；已纳管全部 %s 个现有公网 443 节点。\n' "${#nodes[@]}"
+            fi
+            return 0
+        fi
+        [[ $frontend_error_code == listen_addresses_cancelled ]] && return 0
+        read -r -p '1) 重新检查  0) 返回：' selected || return "$status"
+        [[ $selected == 1 ]] || return "$status"
+    done
 }
 
 frontend_menu() {
@@ -4117,7 +4304,7 @@ frontend_menu() {
         printf '\n---------- %s ----------\n' "$title"
         case $action in
         1) frontend_main status ;;
-        2) frontend_main check ;;
+        2) frontend_menu_check ;;
         3) frontend_menu_enable ;;
         4)
             printf '停用前需先删除或移出所有已加入的节点。\n'

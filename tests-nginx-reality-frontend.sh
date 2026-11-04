@@ -192,9 +192,19 @@ frontend_menu_output=$(printf '0\n' | frontend_menu 2>&1)
     echo "FAIL: the frontend submenu should expose enable and recovery actions: $frontend_menu_output"
     exit 1
 }
-menu_check_output=$(printf '2\n\n0\n' | (frontend_main() { printf '模拟检查结果\n'; return 1; }; frontend_menu) 2>&1)
-[[ $menu_check_output == *'---------- 检查 Nginx ----------'*'模拟检查结果'*'按回车返回操作菜单...'*'---------- 操作菜单 ----------'* ]] || fail "check result should be separated and remain visible until returning: $menu_check_output"
-[[ $(printf '%s\n' "$menu_check_output" | grep -c '什么时候用') == 1 ]] || fail "frontend introduction should not repeat after each action"
+menu_check_output=$(printf '2\n1\n0\n\n0\n' | (frontend_main() { printf '模拟检查结果\n'; return 1; }; frontend_menu) 2>&1)
+[[ $menu_check_output == *'---------- 检查 Nginx ----------'*'模拟检查结果'*'按回车返回操作菜单...'*'---------- 操作菜单 ----------'* ]] || {
+    echo "FAIL: check result should be separated and remain visible until returning: $menu_check_output"
+    exit 1
+}
+[[ $(printf '%s\n' "$menu_check_output" | grep -c '模拟检查结果') == 2 ]] || {
+    echo "FAIL: a failed environment check should allow another check before returning: $menu_check_output"
+    exit 1
+}
+[[ $(printf '%s\n' "$menu_check_output" | grep -c '什么时候用') == 1 ]] || {
+    echo "FAIL: frontend introduction should not repeat after each action: $menu_check_output"
+    exit 1
+}
 [[ ! -s "$FRONTEND_SERVICE_LOG" ]] || {
     echo "FAIL: frontend status contacted a service manager"
     cat "$FRONTEND_SERVICE_LOG"
@@ -370,14 +380,30 @@ jq -e '.ok == false and .errors[0].code == "nginx_unavailable"' <<<"$check_outpu
     echo "FAIL: check should explain unavailable Nginx: $check_output"
     exit 1
 }
-check_human=$(main frontend check 2>&1) && fail "human check should fail when Nginx is unavailable"
-[[ $check_human == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || fail "human check failure should link to the Nginx guide"
+check_human=$(main frontend check 2>&1) && {
+    echo 'FAIL: human check should fail when Nginx is unavailable'
+    exit 1
+}
+[[ $check_human == *'错误：Nginx 服务未运行'* && $check_human == *'建议：检查 Nginx 是否已安装并运行'* &&
+   $check_human == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || {
+    echo "FAIL: human check failure should include the error, an action, and the Nginx guide: $check_human"
+    exit 1
+}
 [[ $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$check_before" ]] || {
     echo "FAIL: frontend check modified the saved profile"
     exit 1
 }
 [[ ! -e "$is_core_dir/.frontend-state" ]] || {
     echo "FAIL: frontend check created transaction state"
+    exit 1
+}
+enable_check_error=$(main frontend enable 2>&1) && {
+    echo 'FAIL: enable should remain blocked while Nginx is unavailable'
+    exit 1
+}
+[[ $enable_check_error == *'错误：Nginx 服务未运行'* && $enable_check_error == *'建议：检查 Nginx 是否已安装并运行'* &&
+   $enable_check_error == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || {
+    echo "FAIL: enable should use the same actionable environment guidance as check: $enable_check_error"
     exit 1
 }
 
@@ -601,7 +627,7 @@ run_menu_address_case() {
     export FRONTEND_IP_FIXTURE
     config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
     profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
-    output=$(printf '3\n%s\n\n0\n' "$choice" | frontend_menu 2>&1)
+    output=$(printf '3\n1\n%s\n\n0\n' "$choice" | frontend_menu 2>&1)
     [[ $output == *"$expected_detection"* && $output == *"$expected_range"* ]] || {
         echo "FAIL: interactive address choice for $fixture should report detection and range $expected_range: $output"
         exit 1
@@ -629,7 +655,7 @@ FRONTEND_IP_FIXTURE=both
 export FRONTEND_IP_FIXTURE
 cancel_config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
 cancel_profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
-cancel_output=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1)
+cancel_output=$(printf '3\n1\n0\n\n0\n' | frontend_menu 2>&1)
 [[ $cancel_output == *'0) 取消启用，不修改配置'* && $cancel_output == *'已取消启用，配置未修改'* ]] || {
     echo "FAIL: interactive address choice should expose a clear no-change cancel path: $cancel_output"
     exit 1
@@ -656,14 +682,41 @@ cli_unknown_output=$(printf '1\n' | main frontend enable 2>&1) && {
 
 FRONTEND_REJECT_CANDIDATE=0
 export FRONTEND_REJECT_CANDIDATE
+cancel_enable=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: cancelling zero-node enable should return to the menu: $cancel_enable"
+    exit 1
+}
+[[ $cancel_enable == *'候选节点：无'* && $cancel_enable == *'Nginx 实例'* &&
+   $cancel_enable == *'短暂中断'* && $cancel_enable == *'仅迁移现有节点时会重启 sing-box 服务'* &&
+   $cancel_enable == *'已取消启用'* ]] || {
+    echo "FAIL: zero-node enable should show the impact and allow cancellation: $cancel_enable"
+    exit 1
+}
+[[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before" &&
+   $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before" &&
+   ! -e "$FRONTEND_RELOAD_COUNT_FILE" ]] || {
+    echo 'FAIL: cancelling zero-node enable changed configuration or reloaded Nginx'
+    exit 1
+}
 FRONTEND_IP_FIXTURE=ipv4
 export FRONTEND_IP_FIXTURE
-enable_output=$(printf '1\n' | main frontend enable 2>&1) || {
+enable_output=$(printf '3\n1\n1\n\n0\n' | frontend_menu 2>&1) || {
     echo "FAIL: empty-mode enable on a config without stream should succeed: $enable_output"
     exit 1
 }
-[[ $enable_output != *'选择影响 Nginx 监听 TCP 443 的地址族'* && $enable_output != *'0) 取消启用，不修改配置'* ]] || {
-    echo "FAIL: the noninteractive frontend CLI should keep its existing address-choice prompt: $enable_output"
+[[ $enable_output == *'当前没有受管节点'* && $enable_output == *'首页 → 节点管理 → 添加节点'* ]] || {
+    echo "FAIL: successful zero-node enable should explain the next step: $enable_output"
+    exit 1
+}
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+cli_idempotent_output=$(main frontend enable 2>&1) || {
+    echo "FAIL: noninteractive enable should remain compatible after menu enable: $cli_idempotent_output"
+    exit 1
+}
+[[ $cli_idempotent_output != *'选择影响 Nginx 监听 TCP 443 的地址族'* &&
+   $cli_idempotent_output != *'0) 取消启用，不修改配置'* ]] || {
+    echo "FAIL: direct frontend enable should not display interactive menu guidance: $cli_idempotent_output"
     exit 1
 }
 grep -Fq "include $CASE_DIR/empty-modules/*.conf;" "$FRONTEND_NGINX_CONF" || { echo "FAIL: enable must preserve the empty wildcard include"; exit 1; }
