@@ -2976,7 +2976,7 @@ sync_entry_addr_config_unlocked() {
     local cfg=$1
     local entry=$2
     local file="$is_conf_dir/$cfg"
-    local listen_addr tmp normalized_entry
+    local listen_addr new_json normalized_entry
 
     [[ -f "$file" ]] || err "配置文件不存在: $cfg"
 
@@ -2986,17 +2986,20 @@ sync_entry_addr_config_unlocked() {
     fi
 
     if jq -e '.inbounds[0].transport.headers.host? != null' "$file" >/dev/null 2>&1; then
-        tmp="$file.tmp"
-        jq --arg addr "$normalized_entry" '.inbounds[0].transport.headers.host = $addr' "$file" >"$tmp" && mv -f "$tmp" "$file"
-        meta_set "$cfg" entry_addr "$normalized_entry"
-        echo "$normalized_entry"
-        return
+        new_json=$(jq --arg addr "$normalized_entry" '.inbounds[0].transport.headers.host = $addr' "$file") || return 1
+    else
+        listen_addr=$(resolve_entry_addr_for_listen "$normalized_entry") || listen_addr=$(get_public_entry_addr)
+        new_json=$(jq --arg addr "$listen_addr" '.inbounds[0].listen = $addr' "$file") || return 1
     fi
 
-    listen_addr=$(resolve_entry_addr_for_listen "$normalized_entry") || listen_addr=$(get_public_entry_addr)
-    tmp="$file.tmp"
-    jq --arg addr "$listen_addr" '.inbounds[0].listen = $addr' "$file" >"$tmp" && mv -f "$tmp" "$file"
-    meta_set "$cfg" entry_addr "$normalized_entry"
+    apply_node_config_lifecycle_unlocked replace "$cfg" "$cfg" "$new_json" || {
+        echo "$node_lifecycle_error"
+        return 1
+    }
+    meta_set "$cfg" entry_addr "$normalized_entry" || {
+        echo "节点配置已应用，但无法保存分享地址"
+        return 1
+    }
     echo "$normalized_entry"
 }
 

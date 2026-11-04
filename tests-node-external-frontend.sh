@@ -15,10 +15,21 @@ is_core_bin=$workdir/sing-box
 is_dont_auto_exit=1
 export ip=203.0.113.10 is_dont_get_ip=1
 mkdir -p "$is_conf_dir" "$is_core_dir"
-printf '%s\n' '#!/bin/bash' '[[ $1 == generate ]] && printf "Private key: private-key-value\\nPublic key: public-key-value\\n"' 'exit 0' >"$is_core_bin"
+printf '%s\n' '#!/bin/bash' '[[ $1 == generate ]] && printf "Private key: private-key-value\\nPublic key: public-key-value\\n"' '[[ $1 == check && -f ${REJECT_CHECK_FILE:-/nonexistent} ]] && exit 1' 'exit 0' >"$is_core_bin"
 chmod +x "$is_core_bin"
+export REJECT_CHECK_FILE=$workdir/reject-check
 manage() { :; }
-manage_restart_confirmed() { :; }
+systemctl() {
+    case $1 in
+    restart)
+        if [[ -f $workdir/fail-restart ]]; then rm "$workdir/fail-restart"; return 1; fi
+        [[ ! -f $is_conf_dir/VLESS-REALITY-12345.json ]] || jq -r '.inbounds[0].listen' "$is_conf_dir/VLESS-REALITY-12345.json" >"$workdir/active-listen"
+        ;;
+    is-active) : ;;
+    show) echo 1234 ;;
+    esac
+}
+sleep() { :; }
 node_port_used() { :; }
 cat >"$is_conf_dir/VLESS-REALITY-12345.json" <<'JSON'
 {"inbounds":[{"tag":"VLESS-REALITY-12345.json","type":"vless","listen":"::","listen_port":12345,"users":[{"uuid":"11111111-1111-1111-1111-111111111111"}],"tls":{"enabled":true,"server_name":"old.example.com","reality":{"enabled":true,"private_key":"abcdefghijklmnopqrstuvwxyz1234567890abcd"}}}],"outbounds":[{"type":"direct"},{"tag":"public_key_abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd","type":"direct"}]}
@@ -42,8 +53,28 @@ if (main frontend status >/dev/null 2>&1); then fail 'removed frontend command a
 printf 'invalid old state\n' >"$is_core_dir/frontend.json"
 (main add reality 23456 22222222-2222-2222-2222-222222222222 new.example.com >/dev/null) || fail 'create ordinary Reality node'
 jq -e '.inbounds[0].listen == "::" and .inbounds[0].listen_port == 23456' "$is_conf_dir/VLESS-REALITY-23456.json" >/dev/null || fail 'new node default listener'
+cp "$is_conf_dir/VLESS-REALITY-12345.json" "$workdir/original-node"
+touch "$REJECT_CHECK_FILE"
+if output=$(main change VLESS-REALITY-12345.json entry 127.0.0.1 2>&1); then fail 'invalid candidate reported success'; fi
+[[ $output == *'完整候选节点配置校验失败'* ]] || fail "candidate validation failure not reported: $output"
+cmp -s "$workdir/original-node" "$is_conf_dir/VLESS-REALITY-12345.json" || fail 'failed validation changed node'
+[[ ! -e $workdir/active-listen ]] || fail 'failed validation restarted service'
+rm "$REJECT_CHECK_FILE"
+touch "$workdir/fail-restart"
+if output=$(main change VLESS-REALITY-12345.json entry 127.0.0.1 2>&1); then fail 'failed service restart reported success'; fi
+[[ $output == *'已恢复原配置并恢复服务'* ]] || fail "restart recovery not reported: $output"
+cmp -s "$workdir/original-node" "$is_conf_dir/VLESS-REALITY-12345.json" || fail 'failed restart did not restore node'
+[[ $(cat "$workdir/active-listen") == '::' ]] || fail 'failed restart did not restore running listener'
+is_dont_show_info=1
+info VLESS-REALITY-12345.json
+[[ $is_url == *'@203.0.113.10:12345'* ]] || fail "failed restart changed share address: $is_url"
 main change VLESS-REALITY-12345.json entry 127.0.0.1 >/dev/null || fail 'entry change'
 jq -e '.inbounds[0].listen == "127.0.0.1"' "$is_conf_dir/VLESS-REALITY-12345.json" >/dev/null || fail 'entry changes listener'
+[[ $(cat "$workdir/active-listen" 2>/dev/null) == 127.0.0.1 ]] || fail 'entry change applies the listener to the running service'
+unset is_change_id
+printf '8\n127.0.0.2\n' | main change VLESS-REALITY-12345.json >/dev/null 2>&1 || fail 'menu entry change'
+[[ $(cat "$workdir/active-listen") == 127.0.0.2 ]] || fail 'menu entry change applies the listener to the running service'
+main change VLESS-REALITY-12345.json entry 127.0.0.1 >/dev/null || fail 'restore entry after menu change'
 main change VLESS-REALITY-12345.json port 12346 >/dev/null || fail 'port change'
 node=$is_conf_dir/VLESS-REALITY-12346.json
 jq -e '.inbounds[0].listen == "127.0.0.1" and .inbounds[0].listen_port == 12346' "$node" >/dev/null || fail 'port change preserves internal listener'
