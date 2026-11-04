@@ -279,6 +279,7 @@ frontend_localize_error_message() {
     inline_443_node) printf '共享 sing-box 配置中包含无法通过节点引用纳管的 443 入站。' ;;
     invalid_profile) printf '前置配置文件无效或包含不安全的 Nginx 所有权信息。' ;;
     invalid_sni) printf 'Reality SNI 必须是由有效标签组成的 ASCII 域名。' ;;
+    listen_addresses_cancelled) printf '已取消启用，配置未修改。' ;;
     listen_addresses_invalid) printf '所选监听地址范围无效，或所需地址族不可用。' ;;
     listen_addresses_required) printf '必须明确选择 IPv4、IPv6 或双栈监听范围。' ;;
     listen_addresses_unavailable) printf '无法确定可用的全局 IPv4 或 IPv6 地址。' ;;
@@ -1588,22 +1589,47 @@ frontend_pending_change() {
 }
 
 frontend_choose_addresses() {
-    local ipv4 ipv6 choice
+    local ipv4= ipv6= choice detection_result=
     local -a options=()
     frontend_listener_range_selected=0
-    command -v ip >/dev/null 2>&1 || {
+    frontend_listen_addresses=()
+    if command -v ip >/dev/null 2>&1; then
+        ipv4=$(ip -o -4 addr show scope global 2>/dev/null) || ipv4=
+        ipv6=$(ip -o -6 addr show scope global 2>/dev/null) || ipv6=
+        detection_result=available
+    elif [[ ! $frontend_menu_address_choice ]]; then
         frontend_set_error listen_addresses_unavailable 'The ip utility is required to determine available address families.'
         return 1
-    }
-    ipv4=$(ip -o -4 addr show scope global 2>/dev/null) || ipv4=
-    ipv6=$(ip -o -6 addr show scope global 2>/dev/null) || ipv6=
+    else
+        detection_result=unavailable
+    fi
     [[ $ipv4 ]] && options+=(ipv4)
     [[ $ipv6 ]] && options+=(ipv6)
-    ((${#options[@]} > 0)) || {
-        frontend_set_error listen_addresses_unavailable 'No global IPv4 or IPv6 address is configured on this host.'
-        return 1
-    }
-    printf '\n选择客户端通过哪种 IP 地址连接 443：\n不确定时，请按服务器实际使用的地址类型选择。\n'
+    if ((${#options[@]} == 0)); then
+        if [[ ! $frontend_menu_address_choice ]]; then
+            frontend_set_error listen_addresses_unavailable 'No global IPv4 or IPv6 address is configured on this host.'
+            return 1
+        fi
+        options=(ipv4 ipv6)
+    fi
+    if [[ $frontend_menu_address_choice ]]; then
+        printf '\n选择影响 Nginx 监听 TCP 443 的地址族：IPv4 仅接收 IPv4 地址连接，IPv6 仅接收 IPv6 地址连接，双栈同时监听两类地址。\n'
+        printf '本机检测仅展示本机配置，不能证明公网可达；未检测到不等于无法使用，检测到也不等于公网可达。\n'
+        if [[ $ipv4 && $ipv6 ]]; then
+            printf '本机检测到的全局地址类型：IPv4、IPv6\n'
+        elif [[ $ipv4 ]]; then
+            printf '本机检测到的全局地址类型：IPv4\n'
+        elif [[ $ipv6 ]]; then
+            printf '本机检测到的全局地址类型：IPv6\n'
+        elif [[ $detection_result == unavailable ]]; then
+            printf '无法确定本机是否配置全局 IPv4 或 IPv6 地址（缺少 ip 命令）；请按服务器实际情况手动选择。\n'
+        else
+            printf '无法确定本机是否配置全局 IPv4 或 IPv6 地址（本机未检测到全局地址）；请按服务器实际情况手动选择。\n'
+        fi
+        printf '不确定时可选择取消。\n'
+    else
+        printf '\n选择客户端通过哪种 IP 地址连接 443：\n不确定时，请按服务器实际使用的地址类型选择。\n'
+    fi
     local index=1
     for choice in "${options[@]}"; do
         printf '%s) %s\n' "$index" "$([[ $choice == ipv4 ]] && printf 'IPv4 所有地址' || printf 'IPv6 所有地址')"
@@ -1612,11 +1638,19 @@ frontend_choose_addresses() {
     if ((${#options[@]} == 2)); then
         printf '3) IPv4 和 IPv6 所有地址\n'
     fi
+    [[ $frontend_menu_address_choice ]] && printf '0) 取消启用，不修改配置\n'
     read -r -p '请选择: ' choice || {
+        if [[ $frontend_menu_address_choice ]]; then
+            frontend_set_error listen_addresses_cancelled 'Address selection was cancelled before applying changes.'
+            return 1
+        fi
         frontend_set_error listen_addresses_required 'Choose an explicit IPv4, IPv6, or dual-stack listener range.'
         return 1
     }
-    frontend_listen_addresses=()
+    if [[ $choice == 0 && $frontend_menu_address_choice ]]; then
+        frontend_set_error listen_addresses_cancelled 'Address selection was cancelled before applying changes.'
+        return 1
+    fi
     case $choice in
     1) [[ ${options[0]} == ipv4 ]] && frontend_listen_addresses+=(0.0.0.0) || frontend_listen_addresses+=(::) ;;
     2)
@@ -4041,6 +4075,7 @@ frontend_main() {
 }
 
 frontend_menu_enable() {
+    local frontend_menu_address_choice=1
     local file selected
     local -a nodes=() refs=()
     shopt -s nullglob
