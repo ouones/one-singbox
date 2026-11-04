@@ -18,8 +18,15 @@ _green() { printf '%s' "$*"; }
 _red() { printf '%s' "$*"; }
 ask() {
     [[ ${is_tmp_list[1]} == '启动服务' ]] || fail 'service menu offers start action'
-    REPLY=$menu_choice
+    if [[ $menu_return_after_action ]]; then
+        REPLY=6
+        menu_return_after_action=
+    else
+        REPLY=$menu_choice
+        menu_return_after_action=1
+    fi
 }
+menu_pause() { :; }
 
 systemctl() {
     printf '%s\n' "$*" >>"$service_calls_file"
