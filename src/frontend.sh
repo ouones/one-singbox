@@ -400,8 +400,23 @@ frontend_localize_error_message() {
         printf 'Nginx 项目目录不是安全的普通目录：%s。' "$context"
         ;;
     recovery_failed)
-        context=$(frontend_localize_path_context "$message") || context=
-        if [[ $context ]]; then printf '前置事务恢复失败：%s。' "$context"; else printf '前置事务恢复未通过验证。'; fi
+        case $message in
+        'Nginx recovery could not be verified; sing-box files were left untouched: '*)
+            context=${message#* untouched: }
+            printf 'Nginx 配置已回滚，但 reload 未通过验证；sing-box 节点配置尚未恢复。原因：%s' "$context"
+            ;;
+        'Nginx recovery listener could not be confirmed; sing-box files were left untouched: '*)
+            context=${message#* untouched: }
+            printf 'Nginx 配置已回滚，但监听状态未通过验证；sing-box 节点配置尚未恢复。原因：%s' "$context"
+            ;;
+        'sing-box files were restored, but the original service could not be confirmed running.')
+            printf 'sing-box 节点配置已恢复，但 sing-box 服务未能确认运行。'
+            ;;
+        *)
+            context=$(frontend_localize_path_context "$message") || context=
+            if [[ $context ]]; then printf '前置事务恢复失败：%s。' "$context"; else printf '前置事务恢复未通过验证。'; fi
+            ;;
+        esac
         ;;
     recovery_required) printf '前置事务尚未完成；请先运行 frontend recover。' ;;
     shared_entry_changed)
@@ -4019,17 +4034,56 @@ frontend_recover() {
         return 0
     fi
     frontend_lock_state || {
-        printf '%s\n' "$frontend_error_message" >&2
+        frontend_print_recovery_failure "$frontend_error_code" "$frontend_error_message"
         return 1
     }
     frontend_recover_locked
     status=$?
     frontend_unlock_state
     if ((status != 0)); then
-        printf '%s\n' "$frontend_error_message" >&2
+        frontend_print_recovery_failure "$frontend_error_code" "$frontend_error_message"
         return "$status"
     fi
     return 0
+}
+
+frontend_recovery_next_step() {
+    case $1 in
+    config_drift)
+        printf '程序因文件与事务记录不一致而拒绝覆盖。请核对该文件；确认原因并处理后，再运行 sb frontend recover。不确定时保留文件和事务备份并联系项目维护者。'
+        ;;
+    nginx_instance_drift)
+        printf '当前 Nginx 实例或活动配置路径与事务记录不一致，程序已拒绝重载。切回事务记录中的服务和配置路径后再运行 sb frontend recover。'
+        ;;
+    transaction_corrupt|transaction_path_invalid|transaction_candidate_missing)
+        printf '恢复未执行。请勿删除 .frontend-state 下的事务记录或备份；保留错误信息并交由项目维护者检查。'
+        ;;
+    recovery_failed)
+        printf '检查 Nginx 和 sing-box 服务日志及上面的失败原因；处理后再次运行 sb frontend recover，直到确认恢复完成。'
+        ;;
+    *)
+        printf '恢复尚未完成。检查上面的原因和 Nginx、sing-box 服务状态，处理后再次运行 sb frontend recover；确认恢复前不要开始新的前置操作。'
+        ;;
+    esac
+}
+
+frontend_print_recovery_failure() {
+    local code=$1 message=$2
+    case $code in
+    config_drift)
+        printf '恢复已拒绝：检测到与事务记录不一致的文件，未覆盖该文件。\n原因：%s\n' "$message" >&2
+        ;;
+    nginx_instance_drift)
+        printf '恢复已拒绝：当前 Nginx 实例与事务记录不一致，未重载 Nginx。\n原因：%s\n' "$message" >&2
+        ;;
+    transaction_corrupt|transaction_path_invalid|transaction_candidate_missing)
+        printf '无法判断前置事务状态，未执行恢复。\n原因：%s\n' "$message" >&2
+        ;;
+    *)
+        printf '恢复未完成，结果尚未确认。\n原因：%s\n' "$message" >&2
+        ;;
+    esac
+    printf '下一步：%s\n' "$(frontend_recovery_next_step "$code")" >&2
 }
 
 frontend_check() {
@@ -4284,13 +4338,74 @@ frontend_menu_enable() {
     done
 }
 
+frontend_menu_read_recovery_state() {
+    local status
+    frontend_menu_recovery_required=0
+    frontend_menu_recovery_unknown=0
+    frontend_menu_recovery_phase=idle
+    frontend_menu_recovery_error_code=
+    frontend_menu_recovery_error_message=
+    frontend_read_phase
+    status=$?
+    frontend_menu_recovery_phase=$frontend_phase
+    if ((status != 0)); then
+        frontend_menu_recovery_unknown=1
+        frontend_menu_recovery_error_code=$frontend_phase_error_code
+        frontend_menu_recovery_error_message=$frontend_phase_error_message
+        return 0
+    fi
+    case $frontend_phase in
+    prepared | backend_applied | frontend_applied | verified | rolling_back | recovery_required)
+        frontend_menu_recovery_required=1
+        ;;
+    esac
+}
+
+frontend_menu_recover() {
+    local selected
+    frontend_menu_read_recovery_state
+    if ((frontend_menu_recovery_unknown)); then
+        frontend_print_recovery_failure "$frontend_menu_recovery_error_code" "$frontend_menu_recovery_error_message"
+        return 1
+    fi
+    if ((frontend_menu_recovery_required == 0)); then
+        printf '没有需要恢复的操作。\n'
+        return 0
+    fi
+    printf '将尝试回滚到操作前保存的节点和 Nginx 配置，并在适用时恢复相关 Nginx、sing-box 服务状态。若发现外部修改、事务异常或无法确认服务状态，会拒绝覆盖或报告原因。\n'
+    read -r -p '1) 确认恢复  0) 取消：' selected || selected=0
+    case $selected in
+    1)
+        frontend_main recover
+        ;;
+    0)
+        printf '已取消恢复，未更改配置或服务。\n'
+        ;;
+    *)
+        printf '请输入 1 确认，或 0 取消。\n'
+        ;;
+    esac
+}
+
 frontend_menu() {
     local action title
     printf '\n========== 443 SNI 前置 ==========\n'
     printf '作用：让多个普通 VLESS-REALITY 节点共用服务器的 TCP 443 端口，Nginx 根据连接中的域名将流量转给对应节点。\n什么时候用：需要让多个这类节点共用 443 端口，且服务器已安装并运行 Nginx。\n什么时候不用：没有这个需求时保持关闭即可，现有节点不需要为此修改。\n网站和证书仍需自行管理；此功能不会自动配置网站。\n'
     while :; do
+        frontend_menu_read_recovery_state
         printf '\n---------- 操作菜单 ----------\n'
-        printf '1) 查看状态\n2) 检查 Nginx 环境\n3) 启用 Nginx SNI 分流\n4) 停用 Nginx SNI 分流\n5) 恢复中断的操作\n0) 返回\n'
+        if ((frontend_menu_recovery_required)); then
+            printf '⚠ 检测到未完成的前置操作（阶段：%s），继续更改前请先恢复。\n' "$frontend_menu_recovery_phase"
+        elif ((frontend_menu_recovery_unknown)); then
+            printf '⚠ 无法判断前置事务状态。原因：%s\n' "$frontend_menu_recovery_error_message"
+        fi
+        printf '1) 查看状态\n2) 检查 Nginx 环境\n3) 启用 Nginx SNI 分流\n4) 停用 Nginx SNI 分流\n'
+        if ((frontend_menu_recovery_required)); then
+            printf '5) ⚠ 恢复中断的操作\n'
+        elif ((frontend_menu_recovery_unknown)); then
+            printf '5) ⚠ 查看恢复问题\n'
+        fi
+        printf '0) 返回\n'
         read -r -p '请选择: ' action || return
         case $action in
         0) return ;;
@@ -4298,7 +4413,16 @@ frontend_menu() {
         2) title='检查 Nginx' ;;
         3) title='启用 Nginx SNI 分流' ;;
         4) title='停用 Nginx SNI 分流' ;;
-        5) title='恢复操作' ;;
+        5)
+            if ((frontend_menu_recovery_required)); then
+                title='恢复操作'
+            elif ((frontend_menu_recovery_unknown)); then
+                title='查看恢复问题'
+            else
+                printf '\n无效选项，请重新选择。\n'
+                continue
+            fi
+            ;;
         *) printf '\n无效选项，请重新选择。\n'; continue ;;
         esac
         printf '\n---------- %s ----------\n' "$title"
@@ -4310,10 +4434,7 @@ frontend_menu() {
             printf '停用前需先删除或移出所有已加入的节点。\n'
             frontend_main disable
             ;;
-        5)
-            printf '仅在提示需要恢复时使用此操作。\n'
-            frontend_main recover
-            ;;
+        5) frontend_menu_recover ;;
         esac
         printf '\n------------------------------\n按回车返回操作菜单...'
         read -r || return

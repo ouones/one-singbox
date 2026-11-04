@@ -166,6 +166,11 @@ load() {
     [[ $1 == frontend.sh ]] || return 0
     source <(sed -n '/^frontend_menu() {/,/^}/p' "$REPO_ROOT/src/frontend.sh")
 }
+frontend_menu_read_recovery_state() {
+    frontend_menu_recovery_required=0
+    frontend_menu_recovery_unknown=0
+    frontend_menu_recovery_phase=idle
+}
 
 is_script_name=one-singbox
 is_sh_ver=1.46

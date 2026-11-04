@@ -170,6 +170,11 @@ is_sh_dir="$REPO_ROOT"
 is_dont_auto_exit=1
 mkdir -p "$is_conf_dir"
 
+file_state_sha() {
+    [[ -f $1 ]] || { printf 'absent'; return; }
+    sha256sum "$1" | awk '{print $1}'
+}
+
 status=$(main frontend status --json 2>&1) || {
     echo "FAIL: frontend status should work without a profile: $status"
     exit 1
@@ -188,8 +193,8 @@ jq -e '.ok == true and .enabled == false and .revision == 0 and .phase == "idle"
 }
 load frontend.sh
 frontend_menu_output=$(printf '0\n' | frontend_menu 2>&1)
-[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用 Nginx SNI 分流"* && $frontend_menu_output == *"5) 恢复中断的操作"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* ]] || {
-    echo "FAIL: the frontend submenu should expose enable and recovery actions: $frontend_menu_output"
+[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用 Nginx SNI 分流"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* && $frontend_menu_output != *"恢复中断的操作"* ]] || {
+    echo "FAIL: the normal frontend submenu should not distract with recovery: $frontend_menu_output"
     exit 1
 }
 menu_check_output=$(printf '2\n1\n0\n\n0\n' | (frontend_main() { printf '模拟检查结果\n'; return 1; }; frontend_menu) 2>&1)
@@ -232,6 +237,11 @@ pending_human=$(main frontend status 2>&1) && {
     echo "FAIL: human-readable status should explain how to recover: $pending_human"
     exit 1
 }
+pending_menu=$(printf '0\n' | frontend_menu 2>&1)
+[[ $pending_menu == *'检测到未完成的前置操作'* && $pending_menu == *'5) ⚠ 恢复中断的操作'* ]] || {
+    echo "FAIL: the menu should prominently expose recovery for a pending transaction: $pending_menu"
+    exit 1
+}
 jq -n '{phase:42}' >"$is_core_dir/.frontend-state/transaction.json"
 corrupt_status=$(main frontend status --json 2>&1) && {
     echo 'FAIL: status must reject a transaction record with an invalid phase type'
@@ -247,6 +257,24 @@ corrupt_human=$(main frontend status 2>&1) && {
 }
 [[ $corrupt_human == *'前置事务记录'* ]] || {
     echo "FAIL: human-readable corrupt transaction status should be localized: $corrupt_human"
+    exit 1
+}
+unknown_menu=$(printf '0\n' | frontend_menu 2>&1)
+[[ $unknown_menu == *'无法判断前置事务状态'* && $unknown_menu == *'前置事务记录'* && $unknown_menu == *'5) ⚠ 查看恢复问题'* ]] || {
+    echo "FAIL: the menu should explain an unknown recovery state and expose the recovery issue: $unknown_menu"
+    exit 1
+}
+unknown_action=$(printf '5\n\n0\n' | frontend_menu 2>&1)
+[[ $unknown_action == *'无法判断前置事务状态，未执行恢复'* && $unknown_action == *'请勿删除 .frontend-state'* && $unknown_action != *'确认恢复'* ]] || {
+    echo "FAIL: inspecting an unknown recovery state should explain the cause without attempting a rollback: $unknown_action"
+    exit 1
+}
+unknown_recovery_cli=$(main frontend recover 2>&1) && {
+    echo 'FAIL: CLI recovery must reject an unreadable transaction record'
+    exit 1
+}
+[[ $unknown_recovery_cli == *'无法判断前置事务状态，未执行恢复'* && $unknown_recovery_cli == *'前置事务记录'* && $unknown_recovery_cli == *'请勿删除 .frontend-state'* ]] || {
+    echo "FAIL: CLI recovery should explain the unreadable record and next step: $unknown_recovery_cli"
     exit 1
 }
 jq -n '{phase:"frontend_applied"}' >"$is_core_dir/.frontend-state/transaction.json"
@@ -948,6 +976,22 @@ flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
     echo "FAIL: interrupted disable did not release its transaction lock"
     exit 1
 }
+config_before_cancel=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
+profile_before_cancel=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+map_before_cancel=$(file_state_sha "$CASE_DIR/one-singbox/reality-map.conf")
+service_log_before_cancel=$(sha256sum "$FRONTEND_SERVICE_LOG" | awk '{print $1}')
+cancelled_recovery=$(printf '5\n0\n\n0\n' | frontend_menu 2>&1)
+[[ $cancelled_recovery == *'将尝试回滚到操作前保存的节点和 Nginx 配置'* && $cancelled_recovery == *'已取消恢复，未更改配置或服务'* && $cancelled_recovery != *'中断的操作已恢复'* ]] || {
+    echo "FAIL: cancelling recovery should explain the effect and perform no recovery: $cancelled_recovery"
+    exit 1
+}
+[[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before_cancel" &&
+   $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before_cancel" &&
+   $(file_state_sha "$CASE_DIR/one-singbox/reality-map.conf") == "$map_before_cancel" &&
+   $(sha256sum "$FRONTEND_SERVICE_LOG" | awk '{print $1}') == "$service_log_before_cancel" ]] || {
+    echo "FAIL: cancelling recovery changed configuration or contacted a service"
+    exit 1
+}
 FRONTEND_PAUSE_RELOAD_AT=0
 export FRONTEND_PAUSE_RELOAD_AT
 FRONTEND_NGINX_MASTER_PID=321
@@ -959,8 +1003,29 @@ cp "$saved_nginx_config" "$drifted_nginx_config"
 interrupted_profile_hash=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 FRONTEND_NGINX_CONF=$drifted_nginx_config
 export FRONTEND_NGINX_CONF
-drifted_recovery=$(main frontend recover 2>&1) && {
+drifted_recovery=$(printf '5\n1\n\n0\n' | frontend_menu 2>&1)
+[[ $drifted_recovery == *'恢复已拒绝'* && $drifted_recovery == *'当前 Nginx 实例与事务记录不一致'* && $drifted_recovery == *'切回事务记录中的服务和配置路径'* ]] || {
+    echo "FAIL: drifted recovery should refuse overwrite and tell the operator what to do: $drifted_recovery"
+    exit 1
+}
+[[ $drifted_recovery != *'中断的操作已恢复'* ]] || {
+    echo 'FAIL: drifted recovery must not report success'
+    exit 1
+}
+[[ $drifted_recovery == *'恢复操作'* ]] || {
+    echo 'FAIL: recovery should require explicit user confirmation'
+    exit 1
+}
+[[ $(sha256sum "$saved_nginx_config" | awk '{print $1}') == "$config_before_interruption" ]] || {
+    echo "FAIL: identity drift changed the saved Nginx config: $drifted_recovery"
+    exit 1
+}
+drifted_recovery_cli=$(main frontend recover 2>&1) && {
     echo 'FAIL: recovery must reject an active Nginx config path that differs from the transaction target'
+    exit 1
+}
+[[ $drifted_recovery_cli == *'恢复已拒绝'* && $drifted_recovery_cli == *'当前 Nginx 实例与事务记录不一致'* && $drifted_recovery_cli != *'请选择:'* ]] || {
+    echo "FAIL: non-interactive CLI recovery should preserve drift refusal without asking for confirmation: $drifted_recovery_cli"
     exit 1
 }
 [[ $(sha256sum "$saved_nginx_config" | awk '{print $1}') == "$config_before_interruption" &&
@@ -974,15 +1039,32 @@ drifted_recovery=$(main frontend recover 2>&1) && {
 }
 FRONTEND_NGINX_CONF=$saved_nginx_config
 export FRONTEND_NGINX_CONF
-recover_output=$(main frontend recover 2>&1) || {
-    echo "FAIL: recover should roll back an interrupted disable transaction after the selected service restarts: $recover_output"
+FRONTEND_FAIL_RELOAD_AT=9
+export FRONTEND_FAIL_RELOAD_AT
+failed_recovery=$(printf '5\n1\n\n0\n' | frontend_menu 2>&1)
+FRONTEND_FAIL_RELOAD_AT=0
+export FRONTEND_FAIL_RELOAD_AT
+[[ $failed_recovery == *'恢复未完成'* && $failed_recovery == *'Nginx 配置已回滚，但 reload 未通过验证'* && $failed_recovery == *'Nginx 服务 reload 命令执行失败'* && $failed_recovery == *'再次运行 sb frontend recover'* && $failed_recovery != *'中断的操作已恢复'* ]] || {
+    echo "FAIL: failed recovery should report its uncertain result and next step: $failed_recovery"
+    exit 1
+}
+[[ $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == recovery_required ]] || {
+    echo "FAIL: failed recovery should retain the recovery-required state: $failed_recovery"
+    exit 1
+}
+recover_output=$(printf '5\n1\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: confirmed recovery should roll back an interrupted disable transaction after the selected service restarts: $recover_output"
+    exit 1
+}
+[[ $recover_output == *'中断的操作已恢复'* ]] || {
+    echo "FAIL: confirmed recovery should report success: $recover_output"
     exit 1
 }
 [[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before_interruption" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before_interruption" && $(sha256sum "$CASE_DIR/one-singbox/reality-map.conf" | awk '{print $1}') == "$map_before_interruption" ]] || {
     echo "FAIL: recovery did not restore the pre-interruption enabled state: $recover_output"
     exit 1
 }
-[[ $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == rolled_back && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 9 ]] || {
+[[ $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == rolled_back && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 10 ]] || {
     echo "FAIL: recovery should persist rollback completion and confirm the restored Nginx workers"
     exit 1
 }
@@ -994,7 +1076,7 @@ jq -e '.enabled == false and .revision == 8 and .ownership == {}' "$is_core_dir/
     echo "FAIL: successful empty-stream disable should leave the profile disabled: $disable_output"
     exit 1
 }
-[[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 10 ]] || {
+[[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 11 ]] || {
     echo "FAIL: successful empty-stream disable should remove its file and reload once"
     exit 1
 }
