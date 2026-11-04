@@ -172,6 +172,7 @@ assert_add_result() {
   file="$is_conf_dir/$( [[ $protocol == rh2 ]] && echo VLESS-HTTP2-REALITY || echo VLESS-REALITY )-12345.json"
   [[ -f $file ]] || fail "automatic REALITY add did not write a configuration"
   assert_created_sni "$file" "$expected"
+  [[ $(jq -r '.inbounds[0].listen' "$file") == "::" ]] || fail "default listener changed"
   [[ $is_url == *"sni=$expected"* ]] || fail "share URL did not use the selected SNI"
   if [[ $protocol == rh2 ]]; then
     [[ $(jq -r '.inbounds[0].transport.type' "$file") == http ]] || fail "HTTP2-REALITY transport changed"

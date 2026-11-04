@@ -130,8 +130,8 @@ CASE
 }
 
 run_home_return_case() {
-    local core_file=$1 frontend_choice=${2:-1}
-    CORE_FILE="$core_file" REPO_ROOT="$repo_root" FRONTEND_CHOICE="$frontend_choice" bash <<'CASE' || exit 1
+    local core_file=$1 menu_choice=${2:-1}
+    CORE_FILE="$core_file" MENU_CHOICE="$menu_choice" bash <<'CASE' || exit 1
 set -o pipefail
 
 fail() {
@@ -162,15 +162,7 @@ qrcode_dependency_checked() { return 0; }
 core_status_read() { is_core_ver=1.46; is_core_status=运行中; }
 log_limit_read() { printf '100'; }
 log_usage_read() { printf '0'; }
-load() {
-    [[ $1 == frontend.sh ]] || return 0
-    source <(sed -n '/^frontend_menu() {/,/^}/p' "$REPO_ROOT/src/frontend.sh")
-}
-frontend_menu_read_recovery_state() {
-    frontend_menu_recovery_required=0
-    frontend_menu_recovery_unknown=0
-    frontend_menu_recovery_phase=idle
-}
+load() { :; }
 
 is_script_name=one-singbox
 is_sh_ver=1.46
@@ -179,20 +171,18 @@ is_core_name=sing-box
 is_core_ver=1.46
 is_core_status=运行中
 
-case $FRONTEND_CHOICE in
+case $MENU_CHOICE in
 1) input=$'1\n5\n\n' ;;
-2) input=$'2\n0\n\n' ;;
-3) input=$'3\n5\n\n' ;;
-4) input=$'4\n6\n\n' ;;
-5) input=$'5\n3\n\n' ;;
-6) input=$'6\n5\n\n' ;;
-7) input=$'1\n\n5\n\n' ;;
+2) input=$'2\n5\n\n' ;;
+3) input=$'3\n6\n\n' ;;
+4) input=$'4\n3\n\n' ;;
+5) input=$'5\n5\n\n' ;;
+6) input=$'1\n\n5\n\n' ;;
 esac
 output=$(printf '%s' "$input" | is_main_menu)
+[[ $output != *'443 SNI 前置'* ]] || fail "home must not offer Nginx frontend management: $output"
 [[ $(grep -o 'one-singbox script' <<<"$output" | wc -l) == 2 ]] || fail "returning from a child menu goes back to home: $output"
-if [[ $FRONTEND_CHOICE == 2 ]]; then
-    [[ $output == *'443 SNI 前置'* ]] || fail "frontend menu is shown before returning home: $output"
-elif [[ $FRONTEND_CHOICE == 7 ]]; then
+if [[ $MENU_CHOICE == 6 ]]; then
     [[ $output == *'输入无效'* ]] || fail "blank input in a child menu is not exit: $output"
 fi
 CASE
@@ -343,11 +333,13 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     run_home_return_case "$core_file" 4
     run_home_return_case "$core_file" 5
     run_home_return_case "$core_file" 6
-    run_home_return_case "$core_file" 7
     run_child_back_case "$core_file"
     run_protocol_cancel_case "$core_file"
     run_cli_relay_list_case "$core_file"
     run_cli_add_case "$core_file"
+    help_output=$(bash -c 'msg() { printf "%b\n" "$*"; }; msg_ul() { printf "%s" "$*"; }; source "$1"; show_help' _ "$repo_root/src/help.sh") || fail 'help output failed'
+    [[ $help_output == *'节点出站'* ]] || fail 'help output is missing'
+    [[ $help_output != *frontend* && $help_output != *'443 SNI 前置'* ]] || fail 'help must not offer frontend management'
 done
 
 echo 'PASS: empty node and relay states return to their menus'

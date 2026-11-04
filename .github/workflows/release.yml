@@ -34,8 +34,8 @@ jobs:
             echo "No Bash scripts found for syntax validation." >&2
             exit 1
           fi
-          sudo -n bash tests-nginx-reality-frontend.sh
-          sudo -n bash tests-nginx-reality-node-bindings.sh
+          sudo -n bash tests-menu-navigation.sh
+          sudo -n bash tests-node-external-frontend.sh
           sudo -n bash tests-node-name-label.sh
           sudo -n bash tests-node-proxy-outbound.sh
           bash tests-skill-inventory.sh
@@ -90,7 +90,7 @@ jobs:
       - name: tar
         run: |
           mkdir -p .release-artifacts
-          tar zcvf .release-artifacts/code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md docs/usage.md docs/nginx-reality-frontend-support.md assets/readme
+          tar zcvf .release-artifacts/code.tar.gz install.sh core.sh sing-box.sh src LICENSE README.md docs/usage.md assets/readme
       - name: update main version
         run: |
           for attempt in {1..10}; do
