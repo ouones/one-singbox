@@ -115,9 +115,14 @@ FAKE_SS
 
     cat >"$case_dir/bin/ip" <<'FAKE_IP'
 #!/usr/bin/env bash
-case "$*" in
-    '-o -4 addr show scope global') printf '2: eth0 inet 203.0.113.10/24 scope global eth0\n' ;;
-    '-o -6 addr show scope global') exit 1 ;;
+case "${FRONTEND_IP_FIXTURE:-ipv4}:$*" in
+    ipv4:'-o -4 addr show scope global') printf '2: eth0 inet 203.0.113.10/24 scope global eth0\n' ;;
+    ipv4:'-o -6 addr show scope global') exit 1 ;;
+    ipv6:'-o -4 addr show scope global') exit 1 ;;
+    ipv6:'-o -6 addr show scope global') printf '2: eth0 inet6 2001:db8::10/64 scope global eth0\n' ;;
+    both:'-o -4 addr show scope global') printf '2: eth0 inet 203.0.113.10/24 scope global eth0\n' ;;
+    both:'-o -6 addr show scope global') printf '2: eth0 inet6 2001:db8::10/64 scope global eth0\n' ;;
+    unknown:'-o -4 addr show scope global' | unknown:'-o -6 addr show scope global') exit 1 ;;
     *) exit 2 ;;
 esac
 FAKE_IP
@@ -165,6 +170,11 @@ is_sh_dir="$REPO_ROOT"
 is_dont_auto_exit=1
 mkdir -p "$is_conf_dir"
 
+file_state_sha() {
+    [[ -f $1 ]] || { printf 'absent'; return; }
+    sha256sum "$1" | awk '{print $1}'
+}
+
 status=$(main frontend status --json 2>&1) || {
     echo "FAIL: frontend status should work without a profile: $status"
     exit 1
@@ -183,13 +193,23 @@ jq -e '.ok == true and .enabled == false and .revision == 0 and .phase == "idle"
 }
 load frontend.sh
 frontend_menu_output=$(printf '0\n' | frontend_menu 2>&1)
-[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用 Nginx SNI 分流"* && $frontend_menu_output == *"5) 恢复中断的操作"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* ]] || {
-    echo "FAIL: the frontend submenu should expose enable and recovery actions: $frontend_menu_output"
+[[ $frontend_menu_output == *"443 SNI 前置"* && $frontend_menu_output == *"3) 启用 Nginx SNI 分流"* && $frontend_menu_output == *"什么时候用"* && $frontend_menu_output == *"什么时候不用"* && $frontend_menu_output != *"恢复中断的操作"* ]] || {
+    echo "FAIL: the normal frontend submenu should not distract with recovery: $frontend_menu_output"
     exit 1
 }
-menu_check_output=$(printf '2\n\n0\n' | (frontend_main() { printf '模拟检查结果\n'; return 1; }; frontend_menu) 2>&1)
-[[ $menu_check_output == *'---------- 检查 Nginx ----------'*'模拟检查结果'*'按回车返回操作菜单...'*'---------- 操作菜单 ----------'* ]] || fail "check result should be separated and remain visible until returning: $menu_check_output"
-[[ $(printf '%s\n' "$menu_check_output" | grep -c '什么时候用') == 1 ]] || fail "frontend introduction should not repeat after each action"
+menu_check_output=$(printf '2\n1\n0\n\n0\n' | (frontend_main() { printf '模拟检查结果\n'; return 1; }; frontend_menu) 2>&1)
+[[ $menu_check_output == *'---------- 检查 Nginx ----------'*'模拟检查结果'*'按回车返回操作菜单...'*'---------- 操作菜单 ----------'* ]] || {
+    echo "FAIL: check result should be separated and remain visible until returning: $menu_check_output"
+    exit 1
+}
+[[ $(printf '%s\n' "$menu_check_output" | grep -c '模拟检查结果') == 2 ]] || {
+    echo "FAIL: a failed environment check should allow another check before returning: $menu_check_output"
+    exit 1
+}
+[[ $(printf '%s\n' "$menu_check_output" | grep -c '什么时候用') == 1 ]] || {
+    echo "FAIL: frontend introduction should not repeat after each action: $menu_check_output"
+    exit 1
+}
 [[ ! -s "$FRONTEND_SERVICE_LOG" ]] || {
     echo "FAIL: frontend status contacted a service manager"
     cat "$FRONTEND_SERVICE_LOG"
@@ -217,6 +237,11 @@ pending_human=$(main frontend status 2>&1) && {
     echo "FAIL: human-readable status should explain how to recover: $pending_human"
     exit 1
 }
+pending_menu=$(printf '0\n' | frontend_menu 2>&1)
+[[ $pending_menu == *'检测到未完成的前置操作'* && $pending_menu == *'5) ⚠ 恢复中断的操作'* ]] || {
+    echo "FAIL: the menu should prominently expose recovery for a pending transaction: $pending_menu"
+    exit 1
+}
 jq -n '{phase:42}' >"$is_core_dir/.frontend-state/transaction.json"
 corrupt_status=$(main frontend status --json 2>&1) && {
     echo 'FAIL: status must reject a transaction record with an invalid phase type'
@@ -232,6 +257,24 @@ corrupt_human=$(main frontend status 2>&1) && {
 }
 [[ $corrupt_human == *'前置事务记录'* ]] || {
     echo "FAIL: human-readable corrupt transaction status should be localized: $corrupt_human"
+    exit 1
+}
+unknown_menu=$(printf '0\n' | frontend_menu 2>&1)
+[[ $unknown_menu == *'无法判断前置事务状态'* && $unknown_menu == *'前置事务记录'* && $unknown_menu == *'5) ⚠ 查看恢复问题'* ]] || {
+    echo "FAIL: the menu should explain an unknown recovery state and expose the recovery issue: $unknown_menu"
+    exit 1
+}
+unknown_action=$(printf '5\n\n0\n' | frontend_menu 2>&1)
+[[ $unknown_action == *'无法判断前置事务状态，未执行恢复'* && $unknown_action == *'请勿删除 .frontend-state'* && $unknown_action != *'确认恢复'* ]] || {
+    echo "FAIL: inspecting an unknown recovery state should explain the cause without attempting a rollback: $unknown_action"
+    exit 1
+}
+unknown_recovery_cli=$(main frontend recover 2>&1) && {
+    echo 'FAIL: CLI recovery must reject an unreadable transaction record'
+    exit 1
+}
+[[ $unknown_recovery_cli == *'无法判断前置事务状态，未执行恢复'* && $unknown_recovery_cli == *'前置事务记录'* && $unknown_recovery_cli == *'请勿删除 .frontend-state'* ]] || {
+    echo "FAIL: CLI recovery should explain the unreadable record and next step: $unknown_recovery_cli"
     exit 1
 }
 jq -n '{phase:"frontend_applied"}' >"$is_core_dir/.frontend-state/transaction.json"
@@ -365,14 +408,30 @@ jq -e '.ok == false and .errors[0].code == "nginx_unavailable"' <<<"$check_outpu
     echo "FAIL: check should explain unavailable Nginx: $check_output"
     exit 1
 }
-check_human=$(main frontend check 2>&1) && fail "human check should fail when Nginx is unavailable"
-[[ $check_human == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || fail "human check failure should link to the Nginx guide"
+check_human=$(main frontend check 2>&1) && {
+    echo 'FAIL: human check should fail when Nginx is unavailable'
+    exit 1
+}
+[[ $check_human == *'错误：Nginx 服务未运行'* && $check_human == *'建议：检查 Nginx 是否已安装并运行'* &&
+   $check_human == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || {
+    echo "FAIL: human check failure should include the error, an action, and the Nginx guide: $check_human"
+    exit 1
+}
 [[ $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$check_before" ]] || {
     echo "FAIL: frontend check modified the saved profile"
     exit 1
 }
 [[ ! -e "$is_core_dir/.frontend-state" ]] || {
     echo "FAIL: frontend check created transaction state"
+    exit 1
+}
+enable_check_error=$(main frontend enable 2>&1) && {
+    echo 'FAIL: enable should remain blocked while Nginx is unavailable'
+    exit 1
+}
+[[ $enable_check_error == *'错误：Nginx 服务未运行'* && $enable_check_error == *'建议：检查 Nginx 是否已安装并运行'* &&
+   $enable_check_error == *"https://github.com/ouones/one-singbox/blob/main/docs/nginx-sni-setup.md"* ]] || {
+    echo "FAIL: enable should use the same actionable environment guidance as check: $enable_check_error"
     exit 1
 }
 
@@ -589,10 +648,112 @@ candidate_error=$(printf '1\n' | main frontend enable 2>&1) && {
     echo "FAIL: candidate validation failure wrote project files or reloaded Nginx"
     exit 1
 }
+
+run_menu_address_case() {
+    local fixture=$1 choice=$2 expected_range=$3 expected_detection=$4 output config_before profile_before
+    FRONTEND_IP_FIXTURE=$fixture
+    export FRONTEND_IP_FIXTURE
+    config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
+    profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+    output=$(printf '3\n1\n%s\n\n0\n' "$choice" | frontend_menu 2>&1)
+    [[ $output == *"$expected_detection"* && $output == *"$expected_range"* ]] || {
+        echo "FAIL: interactive address choice for $fixture should report detection and range $expected_range: $output"
+        exit 1
+    }
+    [[ $output == *'选择影响 Nginx 监听 TCP 443 的地址族'* && $output == *'不能证明公网可达'* && $output == *'未检测到不等于无法使用'* && $output == *'检测到也不等于公网可达'* ]] || {
+        echo "FAIL: interactive address choice should explain its effect and local-detection limits: $output"
+        exit 1
+    }
+    if [[ $fixture == ipv4 ]]; then
+        [[ $output == *'1) IPv4 所有地址'* && $output == *'2) IPv6 所有地址'* && $output == *'3) IPv4 和 IPv6 所有地址'* ]] || {
+            echo "FAIL: interactive address choice should offer every family when only IPv4 is detected: $output"
+            exit 1
+        }
+    fi
+    [[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before" ]] || {
+        echo "FAIL: rejected interactive address choice changed active config or profile for $fixture"
+        exit 1
+    }
+    [[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && ! -e "$FRONTEND_RELOAD_COUNT_FILE" ]] || {
+        echo "FAIL: rejected interactive address choice wrote files or reloaded Nginx for $fixture"
+        exit 1
+    }
+}
+
+run_menu_address_case ipv4 1 '监听范围：0.0.0.0' '本机检测到的全局地址类型：IPv4'
+run_menu_address_case ipv4 2 '监听范围：::' '本机检测到的全局地址类型：IPv4'
+run_menu_address_case ipv4 3 '监听范围：0.0.0.0,::' '本机检测到的全局地址类型：IPv4'
+run_menu_address_case ipv6 1 '监听范围：0.0.0.0' '本机检测到的全局地址类型：IPv6'
+run_menu_address_case ipv6 2 '监听范围：::' '本机检测到的全局地址类型：IPv6'
+run_menu_address_case both 3 '监听范围：0.0.0.0,::' '本机检测到的全局地址类型：IPv4、IPv6'
+run_menu_address_case unknown 2 '监听范围：::' '无法确定本机是否配置全局 IPv4 或 IPv6 地址'
+
+FRONTEND_IP_FIXTURE=ipv4
+export FRONTEND_IP_FIXTURE
+cancel_config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
+cancel_profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+cancel_output=$(printf '3\n1\n0\n\n0\n' | frontend_menu 2>&1)
+[[ $cancel_output == *'2) IPv6 所有地址'* && $cancel_output == *'3) IPv4 和 IPv6 所有地址'* && $cancel_output == *'0) 取消启用，不修改配置'* && $cancel_output == *'已取消启用，配置未修改'* ]] || {
+    echo "FAIL: interactive address choice should expose a clear no-change cancel path: $cancel_output"
+    exit 1
+}
+[[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$cancel_config_before" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$cancel_profile_before" ]] || {
+    echo "FAIL: cancelling address choice changed active config or profile"
+    exit 1
+}
+[[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && ! -e "$FRONTEND_RELOAD_COUNT_FILE" ]] || {
+    echo "FAIL: cancelling address choice wrote project files or reloaded Nginx"
+    exit 1
+}
+
+FRONTEND_IP_FIXTURE=unknown
+export FRONTEND_IP_FIXTURE
+cli_unknown_output=$(printf '1\n' | main frontend enable 2>&1) && {
+    echo 'FAIL: the direct CLI should retain its existing failure when no address family is detected'
+    exit 1
+}
+[[ $cli_unknown_output == *'无法确定可用的全局 IPv4 或 IPv6 地址'* && $cli_unknown_output != *'以下选项按服务器实际情况手动选择'* && $cli_unknown_output != *'0) 取消启用，不修改配置'* ]] || {
+    echo "FAIL: direct CLI address detection should keep its existing noninteractive behavior: $cli_unknown_output"
+    exit 1
+}
+
 FRONTEND_REJECT_CANDIDATE=0
 export FRONTEND_REJECT_CANDIDATE
-enable_output=$(printf '1\n' | main frontend enable 2>&1) || {
+cancel_enable=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: cancelling zero-node enable should return to the menu: $cancel_enable"
+    exit 1
+}
+[[ $cancel_enable == *'候选节点：无'* && $cancel_enable == *'Nginx 实例'* &&
+   $cancel_enable == *'短暂中断'* && $cancel_enable == *'仅迁移现有节点时会重启 sing-box 服务'* &&
+   $cancel_enable == *'已取消启用'* ]] || {
+    echo "FAIL: zero-node enable should show the impact and allow cancellation: $cancel_enable"
+    exit 1
+}
+[[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before" &&
+   $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before" &&
+   ! -e "$FRONTEND_RELOAD_COUNT_FILE" ]] || {
+    echo 'FAIL: cancelling zero-node enable changed configuration or reloaded Nginx'
+    exit 1
+}
+FRONTEND_IP_FIXTURE=ipv4
+export FRONTEND_IP_FIXTURE
+enable_output=$(printf '3\n1\n1\n\n0\n' | frontend_menu 2>&1) || {
     echo "FAIL: empty-mode enable on a config without stream should succeed: $enable_output"
+    exit 1
+}
+[[ $enable_output == *'当前没有受管节点'* && $enable_output == *'首页 → 节点管理 → 添加节点'* ]] || {
+    echo "FAIL: successful zero-node enable should explain the next step: $enable_output"
+    exit 1
+}
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+cli_idempotent_output=$(main frontend enable 2>&1) || {
+    echo "FAIL: noninteractive enable should remain compatible after menu enable: $cli_idempotent_output"
+    exit 1
+}
+[[ $cli_idempotent_output != *'选择影响 Nginx 监听 TCP 443 的地址族'* &&
+   $cli_idempotent_output != *'0) 取消启用，不修改配置'* ]] || {
+    echo "FAIL: direct frontend enable should not display interactive menu guidance: $cli_idempotent_output"
     exit 1
 }
 grep -Fq "include $CASE_DIR/empty-modules/*.conf;" "$FRONTEND_NGINX_CONF" || { echo "FAIL: enable must preserve the empty wildcard include"; exit 1; }
@@ -824,6 +985,22 @@ flock -n "$is_core_dir/.frontend-state/lock" -c true 2>/dev/null || {
     echo "FAIL: interrupted disable did not release its transaction lock"
     exit 1
 }
+config_before_cancel=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
+profile_before_cancel=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+map_before_cancel=$(file_state_sha "$CASE_DIR/one-singbox/reality-map.conf")
+service_log_before_cancel=$(sha256sum "$FRONTEND_SERVICE_LOG" | awk '{print $1}')
+cancelled_recovery=$(printf '5\n0\n\n0\n' | frontend_menu 2>&1)
+[[ $cancelled_recovery == *'将尝试回滚到操作前保存的节点和 Nginx 配置'* && $cancelled_recovery == *'已取消恢复，未更改配置或服务'* && $cancelled_recovery != *'中断的操作已恢复'* ]] || {
+    echo "FAIL: cancelling recovery should explain the effect and perform no recovery: $cancelled_recovery"
+    exit 1
+}
+[[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before_cancel" &&
+   $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before_cancel" &&
+   $(file_state_sha "$CASE_DIR/one-singbox/reality-map.conf") == "$map_before_cancel" &&
+   $(sha256sum "$FRONTEND_SERVICE_LOG" | awk '{print $1}') == "$service_log_before_cancel" ]] || {
+    echo "FAIL: cancelling recovery changed configuration or contacted a service"
+    exit 1
+}
 FRONTEND_PAUSE_RELOAD_AT=0
 export FRONTEND_PAUSE_RELOAD_AT
 FRONTEND_NGINX_MASTER_PID=321
@@ -835,8 +1012,29 @@ cp "$saved_nginx_config" "$drifted_nginx_config"
 interrupted_profile_hash=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 FRONTEND_NGINX_CONF=$drifted_nginx_config
 export FRONTEND_NGINX_CONF
-drifted_recovery=$(main frontend recover 2>&1) && {
+drifted_recovery=$(printf '5\n1\n\n0\n' | frontend_menu 2>&1)
+[[ $drifted_recovery == *'恢复已拒绝'* && $drifted_recovery == *'当前 Nginx 实例与事务记录不一致'* && $drifted_recovery == *'切回事务记录中的服务和配置路径'* ]] || {
+    echo "FAIL: drifted recovery should refuse overwrite and tell the operator what to do: $drifted_recovery"
+    exit 1
+}
+[[ $drifted_recovery != *'中断的操作已恢复'* ]] || {
+    echo 'FAIL: drifted recovery must not report success'
+    exit 1
+}
+[[ $drifted_recovery == *'恢复操作'* ]] || {
+    echo 'FAIL: recovery should require explicit user confirmation'
+    exit 1
+}
+[[ $(sha256sum "$saved_nginx_config" | awk '{print $1}') == "$config_before_interruption" ]] || {
+    echo "FAIL: identity drift changed the saved Nginx config: $drifted_recovery"
+    exit 1
+}
+drifted_recovery_cli=$(main frontend recover 2>&1) && {
     echo 'FAIL: recovery must reject an active Nginx config path that differs from the transaction target'
+    exit 1
+}
+[[ $drifted_recovery_cli == *'恢复已拒绝'* && $drifted_recovery_cli == *'当前 Nginx 实例与事务记录不一致'* && $drifted_recovery_cli != *'请选择:'* ]] || {
+    echo "FAIL: non-interactive CLI recovery should preserve drift refusal without asking for confirmation: $drifted_recovery_cli"
     exit 1
 }
 [[ $(sha256sum "$saved_nginx_config" | awk '{print $1}') == "$config_before_interruption" &&
@@ -850,15 +1048,32 @@ drifted_recovery=$(main frontend recover 2>&1) && {
 }
 FRONTEND_NGINX_CONF=$saved_nginx_config
 export FRONTEND_NGINX_CONF
-recover_output=$(main frontend recover 2>&1) || {
-    echo "FAIL: recover should roll back an interrupted disable transaction after the selected service restarts: $recover_output"
+FRONTEND_FAIL_RELOAD_AT=9
+export FRONTEND_FAIL_RELOAD_AT
+failed_recovery=$(printf '5\n1\n\n0\n' | frontend_menu 2>&1)
+FRONTEND_FAIL_RELOAD_AT=0
+export FRONTEND_FAIL_RELOAD_AT
+[[ $failed_recovery == *'恢复未完成'* && $failed_recovery == *'Nginx 配置已回滚，但 reload 未通过验证'* && $failed_recovery == *'Nginx 服务 reload 命令执行失败'* && $failed_recovery == *'再次运行 sb frontend recover'* && $failed_recovery != *'中断的操作已恢复'* ]] || {
+    echo "FAIL: failed recovery should report its uncertain result and next step: $failed_recovery"
+    exit 1
+}
+[[ $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == recovery_required ]] || {
+    echo "FAIL: failed recovery should retain the recovery-required state: $failed_recovery"
+    exit 1
+}
+recover_output=$(printf '5\n1\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: confirmed recovery should roll back an interrupted disable transaction after the selected service restarts: $recover_output"
+    exit 1
+}
+[[ $recover_output == *'中断的操作已恢复'* ]] || {
+    echo "FAIL: confirmed recovery should report success: $recover_output"
     exit 1
 }
 [[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before_interruption" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before_interruption" && $(sha256sum "$CASE_DIR/one-singbox/reality-map.conf" | awk '{print $1}') == "$map_before_interruption" ]] || {
     echo "FAIL: recovery did not restore the pre-interruption enabled state: $recover_output"
     exit 1
 }
-[[ $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == rolled_back && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 9 ]] || {
+[[ $(jq -r '.phase' "$is_core_dir/.frontend-state/transaction.json") == rolled_back && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 10 ]] || {
     echo "FAIL: recovery should persist rollback completion and confirm the restored Nginx workers"
     exit 1
 }
@@ -870,7 +1085,7 @@ jq -e '.enabled == false and .revision == 8 and .ownership == {}' "$is_core_dir/
     echo "FAIL: successful empty-stream disable should leave the profile disabled: $disable_output"
     exit 1
 }
-[[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 10 ]] || {
+[[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && $(cat "$FRONTEND_RELOAD_COUNT_FILE") == 11 ]] || {
     echo "FAIL: successful empty-stream disable should remove its file and reload once"
     exit 1
 }
