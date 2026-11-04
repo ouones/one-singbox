@@ -196,6 +196,51 @@ untouched_before=$(sha256sum "$is_conf_dir/untouched-node.json" "$(meta_file unt
 FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("sing-box",pid=777,fd=7))'
 export FRONTEND_NGINX_LISTENERS
 
+load frontend.sh
+preview_before=$(sha256sum "$is_conf_dir/existing-node.json" "$is_conf_dir/unselected-node.json" "$is_config_json" | sha256sum | awk '{print $1}')
+preview_cancel=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: cancelling the migration preview should return to the menu: $preview_cancel"
+    exit 1
+}
+preview_after=$(sha256sum "$is_conf_dir/existing-node.json" "$is_conf_dir/unselected-node.json" "$is_config_json" | sha256sum | awk '{print $1}')
+preview_profile_state=absent
+[[ -e "$is_core_dir/frontend.json" ]] && preview_profile_state=present
+preview_events=$(cat "$FRONTEND_EVENT_LOG")
+preview_reloads=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
+preview_singbox_restarts=$(cat "$FRONTEND_SINGBOX_RESTART_COUNT_FILE")
+[[ $preview_reloads ]] || preview_reloads=0
+[[ $preview_singbox_restarts ]] || preview_singbox_restarts=0
+[[ $preview_cancel == *'existing-node.json'* && $preview_cancel == *'unselected-node.json'* &&
+   $preview_cancel == *'Nginx 实例'* && $preview_cancel == *'已取消'* ]] || {
+    echo "FAIL: the enable preview should list every candidate and explain the impact before cancellation: $preview_cancel"
+    exit 1
+}
+[[ $(sha256sum "$is_conf_dir/existing-node.json" "$is_conf_dir/unselected-node.json" "$is_config_json" | sha256sum | awk '{print $1}') == "$preview_before" &&
+   $preview_profile_state == absent && ! -s "$FRONTEND_EVENT_LOG" && $preview_reloads == 0 && $preview_singbox_restarts == 0 ]] || {
+    echo "FAIL: cancelling the enable preview changed configuration or restarted a service: before=$preview_before after=$preview_after profile=$preview_profile_state events=$preview_events reloads=$preview_reloads singbox=$preview_singbox_restarts"
+    exit 1
+}
+
+cat >"$is_conf_dir/incompatible-node.json" <<'NODE'
+{"inbounds":[{"type":"vmess","listen":"::","listen_port":443,"users":[{"uuid":"33333333-3333-4333-8333-333333333333"}]}]}
+NODE
+incompatible_before=$(sha256sum "$is_conf_dir/incompatible-node.json" "$is_conf_dir/existing-node.json" "$is_conf_dir/unselected-node.json" "$is_config_json" | sha256sum | awk '{print $1}')
+incompatible_menu=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: returning from an incompatible-node preview should return to the menu: $incompatible_menu"
+    exit 1
+}
+[[ $incompatible_menu == *'incompatible-node.json'* && $incompatible_menu == *'阻断'* &&
+   $incompatible_menu == *'普通 VLESS-REALITY'* && $incompatible_menu != *'启用影响说明'* ]] || {
+    echo "FAIL: incompatible candidates should be listed and block confirmation: $incompatible_menu"
+    exit 1
+}
+[[ $(sha256sum "$is_conf_dir/incompatible-node.json" "$is_conf_dir/existing-node.json" "$is_conf_dir/unselected-node.json" "$is_config_json" | sha256sum | awk '{print $1}') == "$incompatible_before" &&
+   ! -e "$is_core_dir/frontend.json" && ! -s "$FRONTEND_EVENT_LOG" ]] || {
+    echo 'FAIL: the incompatible-node preview changed configuration or services'
+    exit 1
+}
+rm "$is_conf_dir/incompatible-node.json"
+
 unselected_before=$(sha256sum "$is_conf_dir/existing-node.json" "$is_conf_dir/unselected-node.json" "$is_config_json" | sha256sum | awk '{print $1}')
 unselected_error=$(printf '1\n' | main frontend enable existing-node.json 2>&1) && {
     echo 'FAIL: enable must reject a partial migration while another direct-443 node is unselected'
@@ -206,8 +251,12 @@ unselected_error=$(printf '1\n' | main frontend enable existing-node.json 2>&1) 
     exit 1
 }
 
-migration_output=$(printf '1\n' | main frontend enable existing-node.json unselected-node.json 2>&1) || {
+migration_output=$(printf '3\n1\n1\n\n0\n' | frontend_menu 2>&1) || {
     echo "FAIL: explicit migration of all eligible direct-443 nodes should succeed: $migration_output"
+    exit 1
+}
+[[ $migration_output == *'existing-node.json'* && $migration_output == *'unselected-node.json'* && $migration_output == *'已纳管全部 2 个'* ]] || {
+    echo "FAIL: menu confirmation should migrate every previewed node without asking for filenames: $migration_output"
     exit 1
 }
 jq -e '.enabled == true and (.bindings | length == 2) and ([.bindings[].node_ref] | sort == ["existing-node.json","unselected-node.json"])' "$is_core_dir/frontend.json" >/dev/null || {
@@ -748,10 +797,25 @@ printf 'taken.example 127.0.0.1:9444;\n' >"$CASE_DIR/maps/user.conf"
 FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("sing-box",pid=777,fd=7))'
 export FRONTEND_NGINX_LISTENERS
 : >"$FRONTEND_EVENT_LOG"
+reloads_before_map_preview=$(cat "$FRONTEND_RELOAD_COUNT_FILE")
 cat >"$is_conf_dir/migration-conflict.json" <<'NODE'
 {"inbounds":[{"type":"vless","listen":"::","listen_port":443,"users":[{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"taken.example","reality":{"enabled":true,"handshake":{"server":"taken.example","server_port":443},"private_key":"legacy-private","short_id":["abcd"]}}}]}
 NODE
 migration_before=$(sha256sum "$is_conf_dir/migration-conflict.json" "$is_config_json" | sha256sum | awk '{print $1}')
+map_preview=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
+    echo "FAIL: returning from an SNI-conflict preview should return to the menu: $map_preview"
+    exit 1
+}
+[[ $map_preview == *'migration-conflict.json'* && $map_preview == *'SNI 与用户 Nginx map 规则冲突'* &&
+   $map_preview == *'教程入口：'* && $map_preview != *'启用影响说明'* ]] || {
+    echo "FAIL: an SNI conflict should block the menu before confirmation with repair guidance: $map_preview"
+    exit 1
+}
+[[ ! -e "$is_core_dir/frontend.json" && ! -s "$FRONTEND_EVENT_LOG" &&
+   $(cat "$FRONTEND_RELOAD_COUNT_FILE") == "$reloads_before_map_preview" ]] || {
+    echo 'FAIL: the SNI-conflict preview changed configuration or reloaded a service'
+    exit 1
+}
 migration_map_error=$(main frontend enable migration-conflict.json 2>&1) && {
     echo 'FAIL: first-enable migration should reject an SNI already present in the reused user map'
     exit 1
