@@ -55,7 +55,7 @@ sb
 
 ### 443 SNI 分流
 
-需要让多个普通 VLESS-REALITY 节点共用公网 TCP 443 时，请先阅读 [Nginx SNI 分流准备与排查教程](docs/nginx-sni-setup.md)。
+使用外部前置时，请自行维护分流并调整分享链接；参见[外部前置与节点监听](docs/usage.md#外部前置与节点监听)。
 
 ### 创建节点并获取分享信息
 

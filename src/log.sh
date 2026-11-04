@@ -190,7 +190,7 @@ log_set() {
         }
         local config_lock=
         if [[ $is_log_level_use != del ]]; then
-            shared_config_lock || err "${frontend_error_message:-无法获取公共配置锁}"
+            shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
             config_lock=1
         fi
         case $is_log_level_use in
