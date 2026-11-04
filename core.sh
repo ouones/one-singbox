@@ -3851,6 +3851,60 @@ manage() {
     fi
 }
 
+service_action_result() {
+    local action=$1 service=${2:-$is_core} service_arg=${2:-} action_label expected_state action_status service_state service_status_text service_label
+    case $action in
+        start) action_label=启动; expected_state=running ;;
+        stop) action_label=停止; expected_state=stopped ;;
+        r | restart) action=restart; action_label=重启; expected_state=running ;;
+        *) return 2 ;;
+    esac
+
+    if manage "$action" "$service_arg"; then
+        action_status=0
+    else
+        action_status=$?
+    fi
+
+    if [[ $service == "$is_core" ]]; then
+        core_status_read
+        service_state=$is_core_state
+    else
+        service_status_read "$service"
+        service_state=$is_service_state
+    fi
+    service_label=$service
+    [[ $service == "$is_core" ]] && service_label=$is_core_name
+    [[ $service == caddy ]] && service_label=Caddy
+    case $service_state in
+        running) service_status_text='运行中' ;;
+        stopped) service_status_text='已停止' ;;
+        failed) service_status_text='启动失败' ;;
+        *) service_status_text='状态未知' ;;
+    esac
+
+    if [[ $service_state == unknown ]]; then
+        msg "无法确认 ${service_label} 当前状态；未报告${action_label}成功。"
+    elif [[ $service_state == "$expected_state" && $action_status == 0 ]]; then
+        msg "${action_label}服务成功：已确认 ${service_label} 当前状态为${service_status_text}。"
+        return 0
+    elif [[ $service_state == "$expected_state" ]]; then
+        msg "${action_label}服务命令返回失败，但已确认 ${service_label} 当前状态为${service_status_text}。"
+    else
+        msg "${action_label}服务未达到目标状态：${service_label} 当前状态为${service_status_text}。"
+    fi
+    if [[ $is_systemd ]]; then
+        msg "查看服务日志：journalctl -u ${service}.service -n 100 --no-pager"
+    elif [[ $is_openrc && $service == "$is_core" ]]; then
+        msg "查看服务错误日志：tail -n 100 ${is_log_dir:-/var/log/$is_core}/error.log"
+    elif [[ $is_openrc ]]; then
+        msg "请查看 OpenRC 服务日志（logread，或 /var/log/messages）。"
+    else
+        msg "请从服务管理菜单选择“查看日志”，检查服务运行日志。"
+    fi
+    return 1
+}
+
 # add a config
 add() {
     local caddy_shared_lock= caddy_error_message
@@ -4881,16 +4935,13 @@ service_menu() {
         [[ $is_caddy ]] && msg "Caddy：$is_caddy_status (版本 $is_caddy_ver)"
         ;;
     2)
-        manage start &
-        msg "已提交启动服务请求。"
+        service_action_result start
         ;;
     3)
-        manage stop &
-        msg "已提交停止服务请求。"
+        service_action_result stop
         ;;
     4)
-        manage restart &
-        msg "已提交重启服务请求。"
+        service_action_result restart
         ;;
     5)
         load log.sh
@@ -5315,7 +5366,7 @@ main() {
         ;;
     start | stop | r | restart)
         [[ $2 && $2 != 'caddy' ]] && err "无法识别 ($2), 请使用: $is_core $1 [caddy]"
-        manage $1 $2 &
+        service_action_result "$1" "$2"
         ;;
     reinstall)
         get $1
