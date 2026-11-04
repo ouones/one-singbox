@@ -3605,6 +3605,7 @@ del() {
     # dont get ip
     is_dont_get_ip=1
     local deleted_config_file
+    [[ $is_select_delete_node ]] && unset is_config_file is_conf_dir_empty
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
     [[ ! $is_config_file ]] && get info $1
@@ -4180,7 +4181,7 @@ get() {
         done
         shopt -u nullglob
         [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
-        [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
+        [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
             ask get_config_file
@@ -4780,7 +4781,7 @@ node_menu() {
             ;;
         4)
             node_menu_empty_state && continue
-            del
+            is_select_delete_node=1 del
             menu_pause
             ;;
         5) return ;;
