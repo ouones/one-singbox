@@ -116,37 +116,44 @@ is_tls_key=$is_core_dir/bin/tls.key
     rm $is_tls_tmp
 }
 
-core_status_read() {
-    local service_status service_status_code
-    is_core_stop=
+service_status_read() {
+    local service=${1:-$is_core} service_status service_status_code
+    is_service_state=unknown
     if [[ $is_systemd ]]; then
-        if service_status=$(systemctl is-active "$is_core" 2>/dev/null); then
+        if service_status=$(systemctl is-active "$service" 2>/dev/null); then
             service_status_code=0
         else
             service_status_code=$?
         fi
         case "$service_status_code:$service_status" in
-            0:active) is_core_status=$(_green "运行中") ;;
-            3:failed) is_core_status=$(_red "启动失败"); is_core_stop=1 ;;
-            3:inactive) is_core_status=$(_red "已停止"); is_core_stop=1 ;;
-            *) is_core_status=$(_red "状态读取失败"); is_core_stop=1 ;;
+            0:active) is_service_state=running ;;
+            3:failed) is_service_state=failed ;;
+            3:inactive) is_service_state=stopped ;;
         esac
     elif [[ $is_openrc ]]; then
-        if rc-service "$is_core" status >/dev/null 2>&1; then
+        if rc-service "$service" status >/dev/null 2>&1; then
             service_status_code=0
         else
             service_status_code=$?
         fi
         case $service_status_code in
-            0) is_core_status=$(_green "运行中") ;;
-            3 | 4 | 8 | 16) is_core_status=$(_red "已停止"); is_core_stop=1 ;;
-            32) is_core_status=$(_red "启动失败"); is_core_stop=1 ;;
-            *) is_core_status=$(_red "状态读取失败"); is_core_stop=1 ;;
+            0) is_service_state=running ;;
+            3 | 4 | 8 | 16) is_service_state=stopped ;;
+            32) is_service_state=failed ;;
         esac
-    else
-        is_core_status=$(_red "状态读取失败")
-        is_core_stop=1
     fi
+}
+
+core_status_read() {
+    service_status_read "$is_core"
+    is_core_state=$is_service_state
+    is_core_stop=
+    case $is_core_state in
+        running) is_core_status=$(_green "运行中") ;;
+        stopped) is_core_status=$(_red "已停止"); is_core_stop=1 ;;
+        failed) is_core_status=$(_red "启动失败"); is_core_stop=1 ;;
+        *) is_core_status=$(_red "状态读取失败"); is_core_stop=1 ;;
+    esac
 }
 core_status_read
 if [[ -f $is_caddy_bin && -d $is_caddy_dir && $is_caddy_service ]]; then
