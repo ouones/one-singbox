@@ -1666,14 +1666,15 @@ frontend_choose_addresses() {
     else
         detection_result=unavailable
     fi
-    [[ $ipv4 ]] && options+=(ipv4)
-    [[ $ipv6 ]] && options+=(ipv6)
-    if ((${#options[@]} == 0)); then
-        if [[ ! $frontend_menu_address_choice ]]; then
+    if [[ $frontend_menu_address_choice ]]; then
+        options=(ipv4 ipv6)
+    else
+        [[ $ipv4 ]] && options+=(ipv4)
+        [[ $ipv6 ]] && options+=(ipv6)
+        if ((${#options[@]} == 0)); then
             frontend_set_error listen_addresses_unavailable 'No global IPv4 or IPv6 address is configured on this host.'
             return 1
         fi
-        options=(ipv4 ipv6)
     fi
     if [[ $frontend_menu_address_choice ]]; then
         printf '\n选择影响 Nginx 监听 TCP 443 的地址族：IPv4 仅接收 IPv4 地址连接，IPv6 仅接收 IPv6 地址连接，双栈同时监听两类地址。\n'
@@ -4047,43 +4048,31 @@ frontend_recover() {
     return 0
 }
 
-frontend_recovery_next_step() {
-    case $1 in
-    config_drift)
-        printf '程序因文件与事务记录不一致而拒绝覆盖。请核对该文件；确认原因并处理后，再运行 sb frontend recover。不确定时保留文件和事务备份并联系项目维护者。'
-        ;;
-    nginx_instance_drift)
-        printf '当前 Nginx 实例或活动配置路径与事务记录不一致，程序已拒绝重载。切回事务记录中的服务和配置路径后再运行 sb frontend recover。'
-        ;;
-    transaction_corrupt|transaction_path_invalid|transaction_candidate_missing)
-        printf '恢复未执行。请勿删除 .frontend-state 下的事务记录或备份；保留错误信息并交由项目维护者检查。'
-        ;;
-    recovery_failed)
-        printf '检查 Nginx 和 sing-box 服务日志及上面的失败原因；处理后再次运行 sb frontend recover，直到确认恢复完成。'
-        ;;
-    *)
-        printf '恢复尚未完成。检查上面的原因和 Nginx、sing-box 服务状态，处理后再次运行 sb frontend recover；确认恢复前不要开始新的前置操作。'
-        ;;
-    esac
-}
-
 frontend_print_recovery_failure() {
-    local code=$1 message=$2
+    local code=$1 message=$2 next_step
     case $code in
     config_drift)
         printf '恢复已拒绝：检测到与事务记录不一致的文件，未覆盖该文件。\n原因：%s\n' "$message" >&2
+        next_step='程序因文件与事务记录不一致而拒绝覆盖。请核对该文件；确认原因并处理后，再运行 sb frontend recover。不确定时保留文件和事务备份并联系项目维护者。'
         ;;
     nginx_instance_drift)
         printf '恢复已拒绝：当前 Nginx 实例与事务记录不一致，未重载 Nginx。\n原因：%s\n' "$message" >&2
+        next_step='当前 Nginx 实例或活动配置路径与事务记录不一致，程序已拒绝重载。切回事务记录中的服务和配置路径后再运行 sb frontend recover。'
         ;;
     transaction_corrupt|transaction_path_invalid|transaction_candidate_missing)
         printf '无法判断前置事务状态，未执行恢复。\n原因：%s\n' "$message" >&2
+        next_step='恢复未执行。请勿删除 .frontend-state 下的事务记录或备份；保留错误信息并交由项目维护者检查。'
+        ;;
+    recovery_failed)
+        printf '恢复未完成，结果尚未确认。\n原因：%s\n' "$message" >&2
+        next_step='检查 Nginx 和 sing-box 服务日志及上面的失败原因；处理后再次运行 sb frontend recover，直到确认恢复完成。'
         ;;
     *)
         printf '恢复未完成，结果尚未确认。\n原因：%s\n' "$message" >&2
+        next_step='恢复尚未完成。检查上面的原因和 Nginx、sing-box 服务状态，处理后再次运行 sb frontend recover；确认恢复前不要开始新的前置操作。'
         ;;
     esac
-    printf '下一步：%s\n' "$(frontend_recovery_next_step "$code")" >&2
+    printf '下一步：%s\n' "$next_step" >&2
 }
 
 frontend_check() {

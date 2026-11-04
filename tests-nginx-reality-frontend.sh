@@ -664,6 +664,12 @@ run_menu_address_case() {
         echo "FAIL: interactive address choice should explain its effect and local-detection limits: $output"
         exit 1
     }
+    if [[ $fixture == ipv4 ]]; then
+        [[ $output == *'1) IPv4 所有地址'* && $output == *'2) IPv6 所有地址'* && $output == *'3) IPv4 和 IPv6 所有地址'* ]] || {
+            echo "FAIL: interactive address choice should offer every family when only IPv4 is detected: $output"
+            exit 1
+        }
+    fi
     [[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before" ]] || {
         echo "FAIL: rejected interactive address choice changed active config or profile for $fixture"
         exit 1
@@ -675,16 +681,19 @@ run_menu_address_case() {
 }
 
 run_menu_address_case ipv4 1 '监听范围：0.0.0.0' '本机检测到的全局地址类型：IPv4'
-run_menu_address_case ipv6 1 '监听范围：::' '本机检测到的全局地址类型：IPv6'
+run_menu_address_case ipv4 2 '监听范围：::' '本机检测到的全局地址类型：IPv4'
+run_menu_address_case ipv4 3 '监听范围：0.0.0.0,::' '本机检测到的全局地址类型：IPv4'
+run_menu_address_case ipv6 1 '监听范围：0.0.0.0' '本机检测到的全局地址类型：IPv6'
+run_menu_address_case ipv6 2 '监听范围：::' '本机检测到的全局地址类型：IPv6'
 run_menu_address_case both 3 '监听范围：0.0.0.0,::' '本机检测到的全局地址类型：IPv4、IPv6'
 run_menu_address_case unknown 2 '监听范围：::' '无法确定本机是否配置全局 IPv4 或 IPv6 地址'
 
-FRONTEND_IP_FIXTURE=both
+FRONTEND_IP_FIXTURE=ipv4
 export FRONTEND_IP_FIXTURE
 cancel_config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
 cancel_profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
 cancel_output=$(printf '3\n1\n0\n\n0\n' | frontend_menu 2>&1)
-[[ $cancel_output == *'0) 取消启用，不修改配置'* && $cancel_output == *'已取消启用，配置未修改'* ]] || {
+[[ $cancel_output == *'2) IPv6 所有地址'* && $cancel_output == *'3) IPv4 和 IPv6 所有地址'* && $cancel_output == *'0) 取消启用，不修改配置'* && $cancel_output == *'已取消启用，配置未修改'* ]] || {
     echo "FAIL: interactive address choice should expose a clear no-change cancel path: $cancel_output"
     exit 1
 }

@@ -15,7 +15,7 @@
 | `bash tests-menu-navigation.sh` | 通过。覆盖首页子菜单返回、空节点和空中转状态停留及返回、协议清单顺序和取消不改配置，以及 20 列终端中的服务结果和返回提示。 | 这是隔离菜单测试；不是从已安装入口进行的完整窄屏走查。 |
 | `bash tests-service-results.sh` | 通过。以 systemd/OpenRC 命令替身核对菜单和非交互服务命令的启动、停止、重启结果；状态未知或操作失败时不报告成功，并显示日志指引。 | 未调用本机真实 systemd/OpenRC 服务。 |
 | `bash tests-reality-sni.sh` | 通过。覆盖固定区域 SNI、后备选择、异常输入、手动 SNI 和现有节点元数据保护。 | 不证明节点可从公网连接；也不替代地址选择菜单验收。 |
-| `sudo -n bash tests-nginx-reality-frontend.sh` | 通过。替身环境覆盖前置检查、IPv4/IPv6 地址选择、取消、启用、冲突阻断和恢复。 | Nginx 与服务管理操作由替身提供。 |
+| `sudo -n bash tests-nginx-reality-frontend.sh` | 通过。替身环境覆盖前置检查、地址选择、启用、冲突阻断和恢复；本轮 review-fixes 分支复跑还覆盖仅检测到一种地址族时选择另一种或双栈，以及取消不修改配置。 | Nginx 与服务管理操作由替身提供；不证明真实 Nginx 或服务管理行为。 |
 | `timeout 240s sudo -n bash tests-nginx-reality-node-bindings.sh` | 通过（约 116 秒）。替身环境覆盖候选迁移、节点与映射联动、冲突、分享地址、迁移/修改失败恢复和联合回滚。 | 不是实际 Nginx 重载或真实服务验收。 |
 | 仓库内所有 `*.sh` 的 `bash -n`；`git diff --check` | 通过。 | 语法和空白检查不证明运行时或安装结果。 |
 
