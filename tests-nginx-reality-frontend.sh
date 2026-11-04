@@ -115,9 +115,14 @@ FAKE_SS
 
     cat >"$case_dir/bin/ip" <<'FAKE_IP'
 #!/usr/bin/env bash
-case "$*" in
-    '-o -4 addr show scope global') printf '2: eth0 inet 203.0.113.10/24 scope global eth0\n' ;;
-    '-o -6 addr show scope global') exit 1 ;;
+case "${FRONTEND_IP_FIXTURE:-ipv4}:$*" in
+    ipv4:'-o -4 addr show scope global') printf '2: eth0 inet 203.0.113.10/24 scope global eth0\n' ;;
+    ipv4:'-o -6 addr show scope global') exit 1 ;;
+    ipv6:'-o -4 addr show scope global') exit 1 ;;
+    ipv6:'-o -6 addr show scope global') printf '2: eth0 inet6 2001:db8::10/64 scope global eth0\n' ;;
+    both:'-o -4 addr show scope global') printf '2: eth0 inet 203.0.113.10/24 scope global eth0\n' ;;
+    both:'-o -6 addr show scope global') printf '2: eth0 inet6 2001:db8::10/64 scope global eth0\n' ;;
+    unknown:'-o -4 addr show scope global' | unknown:'-o -6 addr show scope global') exit 1 ;;
     *) exit 2 ;;
 esac
 FAKE_IP
@@ -615,6 +620,66 @@ candidate_error=$(printf '1\n' | main frontend enable 2>&1) && {
     echo "FAIL: candidate validation failure wrote project files or reloaded Nginx"
     exit 1
 }
+
+run_menu_address_case() {
+    local fixture=$1 choice=$2 expected_range=$3 expected_detection=$4 output config_before profile_before
+    FRONTEND_IP_FIXTURE=$fixture
+    export FRONTEND_IP_FIXTURE
+    config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
+    profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+    output=$(printf '3\n1\n%s\n\n0\n' "$choice" | frontend_menu 2>&1)
+    [[ $output == *"$expected_detection"* && $output == *"$expected_range"* ]] || {
+        echo "FAIL: interactive address choice for $fixture should report detection and range $expected_range: $output"
+        exit 1
+    }
+    [[ $output == *'选择影响 Nginx 监听 TCP 443 的地址族'* && $output == *'不能证明公网可达'* && $output == *'未检测到不等于无法使用'* && $output == *'检测到也不等于公网可达'* ]] || {
+        echo "FAIL: interactive address choice should explain its effect and local-detection limits: $output"
+        exit 1
+    }
+    [[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$config_before" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$profile_before" ]] || {
+        echo "FAIL: rejected interactive address choice changed active config or profile for $fixture"
+        exit 1
+    }
+    [[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && ! -e "$FRONTEND_RELOAD_COUNT_FILE" ]] || {
+        echo "FAIL: rejected interactive address choice wrote files or reloaded Nginx for $fixture"
+        exit 1
+    }
+}
+
+run_menu_address_case ipv4 1 '监听范围：0.0.0.0' '本机检测到的全局地址类型：IPv4'
+run_menu_address_case ipv6 1 '监听范围：::' '本机检测到的全局地址类型：IPv6'
+run_menu_address_case both 3 '监听范围：0.0.0.0,::' '本机检测到的全局地址类型：IPv4、IPv6'
+run_menu_address_case unknown 2 '监听范围：::' '无法确定本机是否配置全局 IPv4 或 IPv6 地址'
+
+FRONTEND_IP_FIXTURE=both
+export FRONTEND_IP_FIXTURE
+cancel_config_before=$(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}')
+cancel_profile_before=$(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}')
+cancel_output=$(printf '3\n1\n0\n\n0\n' | frontend_menu 2>&1)
+[[ $cancel_output == *'0) 取消启用，不修改配置'* && $cancel_output == *'已取消启用，配置未修改'* ]] || {
+    echo "FAIL: interactive address choice should expose a clear no-change cancel path: $cancel_output"
+    exit 1
+}
+[[ $(sha256sum "$FRONTEND_NGINX_CONF" | awk '{print $1}') == "$cancel_config_before" && $(sha256sum "$is_core_dir/frontend.json" | awk '{print $1}') == "$cancel_profile_before" ]] || {
+    echo "FAIL: cancelling address choice changed active config or profile"
+    exit 1
+}
+[[ ! -e "$CASE_DIR/one-singbox/reality-map.conf" && ! -e "$FRONTEND_RELOAD_COUNT_FILE" ]] || {
+    echo "FAIL: cancelling address choice wrote project files or reloaded Nginx"
+    exit 1
+}
+
+FRONTEND_IP_FIXTURE=unknown
+export FRONTEND_IP_FIXTURE
+cli_unknown_output=$(printf '1\n' | main frontend enable 2>&1) && {
+    echo 'FAIL: the direct CLI should retain its existing failure when no address family is detected'
+    exit 1
+}
+[[ $cli_unknown_output == *'无法确定可用的全局 IPv4 或 IPv6 地址'* && $cli_unknown_output != *'以下选项按服务器实际情况手动选择'* && $cli_unknown_output != *'0) 取消启用，不修改配置'* ]] || {
+    echo "FAIL: direct CLI address detection should keep its existing noninteractive behavior: $cli_unknown_output"
+    exit 1
+}
+
 FRONTEND_REJECT_CANDIDATE=0
 export FRONTEND_REJECT_CANDIDATE
 cancel_enable=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
@@ -633,12 +698,25 @@ cancel_enable=$(printf '3\n0\n\n0\n' | frontend_menu 2>&1) || {
     echo 'FAIL: cancelling zero-node enable changed configuration or reloaded Nginx'
     exit 1
 }
+FRONTEND_IP_FIXTURE=ipv4
+export FRONTEND_IP_FIXTURE
 enable_output=$(printf '3\n1\n1\n\n0\n' | frontend_menu 2>&1) || {
     echo "FAIL: empty-mode enable on a config without stream should succeed: $enable_output"
     exit 1
 }
 [[ $enable_output == *'当前没有受管节点'* && $enable_output == *'首页 → 节点管理 → 添加节点'* ]] || {
     echo "FAIL: successful zero-node enable should explain the next step: $enable_output"
+    exit 1
+}
+FRONTEND_NGINX_LISTENERS='LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=6))'
+export FRONTEND_NGINX_LISTENERS
+cli_idempotent_output=$(main frontend enable 2>&1) || {
+    echo "FAIL: noninteractive enable should remain compatible after menu enable: $cli_idempotent_output"
+    exit 1
+}
+[[ $cli_idempotent_output != *'选择影响 Nginx 监听 TCP 443 的地址族'* &&
+   $cli_idempotent_output != *'0) 取消启用，不修改配置'* ]] || {
+    echo "FAIL: direct frontend enable should not display interactive menu guidance: $cli_idempotent_output"
     exit 1
 }
 grep -Fq "include $CASE_DIR/empty-modules/*.conf;" "$FRONTEND_NGINX_CONF" || { echo "FAIL: enable must preserve the empty wildcard include"; exit 1; }

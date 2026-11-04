@@ -105,6 +105,7 @@ grep -qx 'del sing-box-log-limit default' "$workdir/service-calls" || fail 'Open
 qrcode_dependency_checked() { return 0; }
 qrcode_dependency_install() { fail 'unexpected QR migration in isolated menu test'; }
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+    source <(sed -n '/^service_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
     is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
