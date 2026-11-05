@@ -390,6 +390,11 @@ source <(sed -n '/^relay_menu_empty_state() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^is_main_menu() {/,/^}/p' "$CORE_FILE")
 
+[[ ${mainmenu[4]} == '系统设置' ]] || fail "home system settings label is clear: ${mainmenu[4]}"
+[[ ${mainmenu[5]} == '帮助反馈' ]] || fail "home help label is clear: ${mainmenu[5]}"
+[[ ${mainmenu[6]} == '关于' ]] || fail "home about label is clear: ${mainmenu[6]}"
+[[ ${mainmenu[7]} == '卸载' ]] || fail "home uninstall label is clear: ${mainmenu[7]}"
+
 msg() { printf '%b\n' "$*"; }
 msg_ul() { printf '%s' "$1"; }
 show_list() { printf '%s\n' "$@"; }
@@ -422,10 +427,217 @@ if [[ $MENU_CHOICE == 2 ]]; then
     [[ $output == *'请选择端口中转操作'* ]] || fail "home choice 2 still opens relay management: $output"
 fi
 [[ $output != *'443 SNI 前置'* ]] || fail "home must not offer Nginx frontend management: $output"
+[[ $output == *'回车退出'* ]] || fail "home clearly explains that Enter exits: $output"
 [[ $(grep -o 'one-singbox script' <<<"$output" | wc -l) == 2 ]] || fail "returning from a child menu goes back to home: $output"
 if [[ $MENU_CHOICE == 6 ]]; then
     [[ $output == *'输入无效'* ]] || fail "blank input in a child menu is not exit: $output"
 fi
+CASE
+}
+
+run_system_settings_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^system_tools_menu() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
+load() { action_calls+=("load:$1"); }
+_try_enable_bbr() { action_calls+=(bbr); }
+dns_set() { action_calls+=(dns); }
+log_limit_set() { action_calls+=(log-limit); }
+get() { action_calls+=("get:$1"); }
+
+action_calls=()
+input_file=$(mktemp)
+output_file=$(mktemp)
+trap 'rm -f "$input_file" "$output_file"' EXIT
+printf '1\n\n2\n\n3\n\n4\n\n5\n' >"$input_file"
+system_tools_menu <"$input_file" >"$output_file"
+output=$(cat "$output_file")
+for label in '启用 BBR' 'DNS' '日志上限' '重装脚本' '返回'; do
+    [[ $output == *"$label"* ]] || fail "system settings show '$label': $output"
+done
+[[ $output == *'请选择系统设置'* ]] || fail "system settings prompt uses its menu name: $output"
+[[ ${action_calls[*]} == 'load:bbr.sh bbr load:dns.sh dns log-limit get:reinstall' ]] || fail "system setting choices keep their actions: ${action_calls[*]}"
+CASE
+}
+
+run_dns_display_mapping_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" REPO_ROOT="$repo_root" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source "$REPO_ROOT/src/dns.sh"
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
+_green() { printf '%s' "$*"; }
+shared_config_lock() { :; }
+shared_config_unlock() { :; }
+sync_runtime_node_outbound_modes() { cp "$1" "$2"; }
+manage() { :; }
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+is_config_json=$case_dir/config.json
+is_conf_dir=$case_dir/conf
+mkdir -p "$is_conf_dir"
+is_core_ver=1.16.0
+printf '%s\n' '{"dns":{"servers":[{"tag":"old"}]},"route":{"default_domain_resolver":"old"}}' >"$is_config_json"
+printf '6\nh3://dns.google/dns-query\n' >"$case_dir/custom-input"
+dns_set <"$case_dir/custom-input" >"$case_dir/custom-output"
+output=$(cat "$case_dir/custom-output")
+for address in 1.1.1.1 8.8.8.8 h3://dns.google/dns-query h3://cloudflare-dns.com/dns-query h3://family.cloudflare-dns.com/dns-query; do
+    [[ $output == *"$address"* ]] || fail "DNS menu retains service address '$address': $output"
+done
+[[ $output == *'自定义'* ]] || fail "DNS menu names custom DNS in Chinese: $output"
+[[ $output != *$'\nset\n'* && $output != *$'\nnone\n'* ]] || fail "DNS menu hides internal option names: $output"
+jq -e '.dns.servers[0].type == "h3" and .dns.servers[0].server == "dns.google" and .route.default_domain_resolver == "dns"' "$is_config_json" >/dev/null || fail 'custom DNS selection still applies the entered address'
+[[ $output != *'已更新 DNS 为: none'* ]] || fail "custom DNS success output does not expose an internal option name: $output"
+
+printf '%s\n' '{"dns":{"servers":[{"tag":"old"}]},"route":{"default_domain_resolver":"old"}}' >"$is_config_json"
+printf '7\n' >"$case_dir/none-input"
+dns_set <"$case_dir/none-input" >"$case_dir/none-output"
+output=$(cat "$case_dir/none-output")
+[[ $output == *'不设置'* ]] || fail "DNS menu names the disabled option in Chinese: $output"
+[[ $output != *$'\nset\n'* && $output != *$'\nnone\n'* ]] || fail "DNS menu hides internal option names: $output"
+jq -e '.dns == {} and (.route | has("default_domain_resolver") | not)' "$is_config_json" >/dev/null || fail 'no-DNS selection still removes DNS configuration'
+[[ $output == *'已更新 DNS 为: 不设置'* ]] || fail "no-DNS result uses the display name: $output"
+CASE
+}
+
+run_interactive_help_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" REPO_ROOT="$repo_root" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^mainmenu=(/,/^)/p' "$CORE_FILE")
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^is_main_menu() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+msg_ul() { printf '%s' "$1"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
+qrcode_dependency_checked() { return 0; }
+core_status_read() { is_core_ver=1.16; is_core_status=运行中; }
+log_limit_read() { printf '200'; }
+log_usage_read() { printf '0'; }
+load() {
+    [[ $1 == help.sh ]] && source "$REPO_ROOT/src/help.sh"
+}
+
+is_script_name=one-singbox
+is_sh_ver=1.50
+author=ouones
+is_core=sing-box
+is_core_name=sing-box
+is_sh_repo=ouones/one-singbox
+is_core_repo=SagerNet/sing-box
+output=$(printf '6\n' | is_main_menu)
+[[ $output == *'命令行帮助'* ]] || fail "interactive help identifies itself as command-line help: $output"
+[[ $output == *'Usage: sing-box [options]'* ]] || fail "interactive help still shows command usage: $output"
+CASE
+}
+
+run_uninstall_copy_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
+confirm_action() {
+    confirmation=$1
+    printf '%s [y/N]: ' "$1"
+    return 1
+}
+
+run_case() {
+    local caddy=$1 choice=$2 expected_label=$3
+    is_caddy=$caddy
+    confirmation=
+    input_file=$(mktemp)
+    output_file=$(mktemp)
+    if [[ $caddy ]]; then printf '%s\n' "$choice" >"$input_file"; else : >"$input_file"; fi
+    uninstall <"$input_file" >"$output_file"
+    output=$(cat "$output_file")
+    rm -f "$input_file" "$output_file"
+    if [[ $caddy ]]; then
+        [[ $output == *'卸载内核和脚本'* ]] || fail "uninstall choice explains core and script: $output"
+        [[ $output == *'全部卸载'* ]] || fail "uninstall choice explains full removal: $output"
+        [[ $output != *'仅卸载 sing-box 和 one-singbox'* && $output != *'卸载 sing-box、one-singbox 和 Caddy'* ]] || fail "uninstall choices use concise labels: $output"
+    else
+        [[ $output != *'全部卸载'* ]] || fail "full uninstall is only shown when Caddy exists: $output"
+    fi
+    [[ $output == *"$expected_label"* ]] || fail "selected uninstall confirms '$expected_label': $output"
+    [[ $output == *'已取消卸载。'* ]] || fail "declining uninstall cancels before changes: $output"
+}
+
+run_case 1 1 'one-singbox 脚本'
+[[ $confirmation != *'Caddy'* ]] || fail "core-and-script uninstall does not remove Caddy: $confirmation"
+run_case 1 2 'Caddy'
+[[ $confirmation == *'Caddy 服务'* ]] || fail "full uninstall confirms Caddy service removal: $confirmation"
+[[ $confirmation == *'/etc/caddy'* ]] || fail "full uninstall confirms the Caddy directory scope: $confirmation"
+run_case '' '' 'one-singbox 脚本'
+CASE
+}
+
+run_log_limit_prompt_case() {
+    REPO_ROOT="$repo_root" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL: $*"
+    exit 1
+}
+
+source "$REPO_ROOT/src/log.sh"
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+is_core_dir=$case_dir/core
+is_log_dir=$case_dir/log
+mkdir -p "$is_core_dir" "$is_log_dir"
+printf '125\n' >"$is_core_dir/log-limit-mb"
+prompt_output=
+msg() { prompt_output+="$*"$'\n'; }
+log_limit_service() { fail 'pressing Enter must not restart the log service'; }
+limit_before=$(log_limit_read)
+log_limit_set <<<''
+[[ $prompt_output == *'单位 MB；留空保留当前值'* ]] || fail "log limit prompt explains units and Enter behavior: $prompt_output"
+[[ $(log_limit_read) == "$limit_before" ]] || fail 'pressing Enter preserves the configured limit'
 CASE
 }
 
@@ -604,6 +816,10 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     run_home_return_case "$core_file" 4
     run_home_return_case "$core_file" 5
     run_home_return_case "$core_file" 6
+    run_system_settings_case "$core_file"
+    run_dns_display_mapping_case "$core_file"
+    run_interactive_help_case "$core_file"
+    run_uninstall_copy_case "$core_file"
     run_child_back_case "$core_file"
     run_protocol_cancel_case "$core_file"
     run_cli_relay_list_case "$core_file"
@@ -613,6 +829,8 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     [[ $help_output != *frontend* && $help_output != *'443 SNI 前置'* ]] || fail 'help must not offer frontend management'
 done
 
+run_log_limit_prompt_case
+
 run_log_exit_prompt_case "$repo_root/src/log.sh"
 
-echo 'PASS: empty node and relay states return to their menus'
+echo 'PASS: terminal menu navigation, labels, DNS mapping, uninstall, and log prompts'
