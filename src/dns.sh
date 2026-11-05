@@ -8,7 +8,8 @@ is_dns_list=(
     none
 )
 dns_set() {
-    local candidate_config
+    local candidate_config is_interactive is_dns_use_bak
+    [[ ! $1 ]] && is_interactive=1
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
     fi
@@ -57,7 +58,7 @@ dns_set() {
         fi
     fi
     is_dns_use_bak=$is_dns_use
-    [[ $is_dns_use_bak == none ]] && is_dns_use_bak="不设置"
+    [[ $is_interactive && $is_dns_use_bak == none ]] && is_dns_use_bak="不设置"
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || err "无法创建 DNS 候选配置"
     if [[ $is_dns_use == "none" ]]; then

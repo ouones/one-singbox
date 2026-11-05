@@ -187,51 +187,28 @@ info_list=(
     "混淆模式 (obfs_mode)"
     "运行模式 (mode)"
 )
-change_list=(
-    "更改协议"
-    "更改端口"
-    "更改域名"
-    "更改路径"
-    "更改密码"
-    "更改 UUID"
-    "更改加密方式"
-    "更改目标地址"
-    "更改目标端口"
-    "更改密钥"
-    "更改 SNI (serverName)"
-    "更改反向代理目标域名"
-    "更改用户名"
-    "更改节点名称"
-    "更改节点出站方式"
-    "更改分享地址"
-    "查看分享链接"
-    "更改 PSK"
-    "更改 Snell 版本"
-    "更改 Snell 混淆模式"
-    "更改 Snell 运行模式"
-)
-change_menu_list=(
-    "协议"
-    "监听端口"
-    "域名"
-    "路径"
-    "密码"
-    "UUID"
-    "加密方式"
-    "目标地址"
-    "目标端口"
-    "密钥"
-    "SNI"
-    "反向代理域名"
-    "用户名"
-    "节点名称"
-    "出口方式"
-    "分享地址"
-    "查看分享链接"
-    "PSK"
-    "Snell 版本"
-    "混淆模式"
-    "运行模式"
+change_labels=(
+    "协议|更改协议"
+    "监听端口|更改端口"
+    "域名|更改域名"
+    "路径|更改路径"
+    "密码|更改密码"
+    "UUID|更改 UUID"
+    "加密方式|更改加密方式"
+    "目标地址|更改目标地址"
+    "目标端口|更改目标端口"
+    "密钥|更改密钥"
+    "SNI|更改 SNI (serverName)"
+    "反向代理域名|更改反向代理目标域名"
+    "用户名|更改用户名"
+    "节点名称|更改节点名称"
+    "出口方式|更改节点出站方式"
+    "分享地址|更改分享地址"
+    "查看分享链接|查看分享链接"
+    "PSK|更改 PSK"
+    "Snell 版本|更改 Snell 版本"
+    "混淆模式|更改 Snell 混淆模式"
+    "运行模式|更改 Snell 运行模式"
 )
 # shuf fallback for systems without shuf (e.g., Alpine BusyBox)
 if ! type -P shuf &>/dev/null; then
@@ -639,7 +616,7 @@ ask() {
     set_change_list)
         is_tmp_list=()
         for v in ${is_can_change[@]}; do
-            is_tmp_list+=("${change_menu_list[$v]}")
+            is_tmp_list+=("${change_labels[$v]%%|*}")
         done
         is_opt_msg="\n请选择更改:\n"
         is_ask_set=is_change_str
@@ -3294,10 +3271,11 @@ change() {
         get info $1
     } || {
         [[ $is_change_id ]] && {
-            is_change_msg=${change_list[$is_change_id]}
-            [[ $is_change_id == 'full' ]] && {
+            if [[ $is_change_id == 'full' ]]; then
                 [[ $3 ]] && is_change_msg="更改多个参数" || is_change_msg=
-            }
+            else
+                is_change_msg=${change_labels[$is_change_id]#*|}
+            fi
             [[ $is_change_msg ]] && _green "\n快速执行: $is_change_msg"
         }
         info $1
@@ -4060,7 +4038,7 @@ add() {
             is_install_caddy=1
         fi
         # set host
-        [[ ! $host ]] && ask string host "请输入域名 (需解析到本机公网 IP):"
+        [[ ! $host ]] && ask string host "输入域名 (需解析到本机公网 IP):"
         # test host dns
         get host-test
     else
@@ -4071,18 +4049,18 @@ add() {
             [[ ! $port ]] && {
                 get_port
                 is_default_arg=$tmp_port
-                ask string port "请输入监听端口 (1-65535，回车自动分配 $is_default_arg):"
+                ask string port "输入监听端口 (1-65535，回车自动分配 $is_default_arg):"
             }
 
             case ${is_new_protocol,,} in
             socks)
                 # set user
-                [[ ! $is_socks_user ]] && ask string is_socks_user "请输入用户名:"
+                [[ ! $is_socks_user ]] && ask string is_socks_user "输入用户名:"
                 # set password
                 [[ ! $is_socks_pass ]] && {
                     [[ ! $tmp_uuid ]] && get_uuid
                     is_default_arg=$tmp_uuid
-                    ask string is_socks_pass "请输入密码 (回车自动生成；输入不显示):"
+                    ask string is_socks_pass "输入密码 (回车自动生成；输入不显示):"
                 }
                 ;;
             shadowsocks)
@@ -4096,7 +4074,7 @@ add() {
                         [[ ! $tmp_uuid ]] && get_uuid
                         is_default_arg=$tmp_uuid
                     fi
-                    ask string ss_password "请输入密码 (回车自动生成；输入不显示):"
+                    ask string ss_password "输入密码 (回车自动生成；输入不显示):"
                 }
                 ;;
             esac
@@ -4121,9 +4099,9 @@ add() {
     # Dokodemo-Door
     if [[ $is_new_protocol == 'Direct' ]]; then
         # set remote addr
-        [[ ! $door_addr ]] && ask string door_addr "请输入目标地址 (IPv4、IPv6 或域名):"
+        [[ ! $door_addr ]] && ask string door_addr "输入目标地址 (IPv4、IPv6 或域名):"
         # set remote port
-        [[ ! $door_port ]] && ask string door_port "请输入目标端口 (1-65535):"
+        [[ ! $door_port ]] && ask string door_port "输入目标端口 (1-65535):"
     fi
 
     # Shadowsocks 2022
@@ -4159,7 +4137,7 @@ add() {
     fi
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
-        echo -ne "请输入节点名称 (回车自动生成 8 位名称):"
+        echo -ne "输入节点名称 (回车自动生成 8 位名称):"
         read is_custom_node_name
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
