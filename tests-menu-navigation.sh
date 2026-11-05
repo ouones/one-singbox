@@ -64,19 +64,172 @@ source <(sed -n '/^relay_menu_empty_state() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
 
 msg() { printf '%b\n' "$*"; }
-show_list() { printf '%s\n' "$@"; }
+show_list() { printf '%s\n' "$@" >"$menu_file"; }
 is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+menu_file=$case_dir/menu
+is_conf_dir=$case_dir/conf
+mkdir -p "$is_conf_dir"
+is_main_start=1
+
+output=$(printf '2\n\n5\n' | relay_menu)
+[[ $output == *'暂无转发，请先添加'* ]] || fail "empty relay state is explained: $output"
+[[ $(cat "$menu_file") == $'添加\n列表\n查看\n删除\n返回' ]] || fail "relay menu uses concise action labels in order: $(cat "$menu_file")"
+[[ $output == *'按回车返回菜单'* ]] || fail "empty relay state remains visible until return: $output"
+[[ $(grep -o '请选择端口中转操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to relay menu: $output"
+[[ -z $(find "$is_conf_dir" -type f -print -quit) ]] || fail 'empty relay listing must not change configuration'
+CASE
+}
+
+run_relay_add_copy_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_add() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() {
+    case $1 in
+        number) [[ $2 =~ ^[1-9][0-9]*$ ]] && printf '1' ;;
+        port) [[ $2 =~ ^[0-9]+$ && $2 -ge 1 && $2 -le 65535 ]] && printf '1' ;;
+        port_used) return 1 ;;
+    esac
+}
+node_port_used() { return 1; }
+get_port() { tmp_port=12000; }
+config_port_used() { return 1; }
+shared_config_lock() { return 0; }
+shared_config_unlock() { :; }
+manage() { :; }
+relay_warn_security() { :; }
+_green() { printf '%s' "$*"; }
 
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_conf_dir=$case_dir/conf
 mkdir -p "$is_conf_dir"
+is_core_bin=/bin/true
+is_main_start=1
 
-output=$(printf '2\n\n5\n' | relay_menu)
-[[ $output == *'当前未配置任何中转'* ]] || fail "empty relay state is explained: $output"
-[[ $output == *'按回车返回菜单'* ]] || fail "empty relay state remains visible until return: $output"
-[[ $(grep -o '请选择端口中转操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to relay menu: $output"
-[[ -z $(find "$is_conf_dir" -type f -print -quit) ]] || fail 'empty relay listing must not change configuration'
+output=$(printf '1\n\n203.0.113.50\n20050\n\n5\n' | relay_menu)
+[[ $output == *'输入监听端口'* && $output == *'回车自动分配'* ]] || fail "add explains the auto-assigned listener port: $output"
+[[ $output == *'输入目标地址'* && $output == *'输入目标端口'* ]] || fail "add labels both target inputs: $output"
+[[ $output == *'自动分配本地端口: 12000'* ]] || fail "Enter still selects and reports the automatic listener port: $output"
+jq -e '.inbounds[0].listen_port == 12000 and .inbounds[0].override_address == "203.0.113.50" and .inbounds[0].override_port == 20050' "$is_conf_dir/relay-12000.json" >/dev/null || fail 'add keeps listener port, target address, and target port mapped to their existing fields'
+CASE
+}
+
+run_relay_view_copy_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_info() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_list() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu_has_entries() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu_empty_state() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() {
+    case $1 in
+        number) [[ $2 =~ ^[1-9][0-9]*$ ]] && printf '1' ;;
+        port) [[ $2 =~ ^[0-9]+$ && $2 -ge 1 && $2 -le 65535 ]] && printf '1' ;;
+    esac
+}
+node_port_used() { return 1; }
+relay_warn_security() { :; }
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+is_conf_dir=$case_dir/conf
+mkdir -p "$is_conf_dir"
+cat >"$is_conf_dir/relay-10000.json" <<'JSON'
+{"inbounds":[{"listen_port":10000,"override_address":"203.0.113.60","override_port":20060}]}
+JSON
+is_main_start=1
+
+output=$(printf '3\n10000\n\n5\n' | relay_menu)
+[[ $output == *'输入要查看的监听端口'* ]] || fail "view requests the listener port by name: $output"
+[[ $output == *'监听端口: 10000'* && $output == *'目标地址: 203.0.113.60'* && $output == *'目标端口: 20060'* ]] || fail "view maps the entered listener port to its existing relay: $output"
+CASE
+}
+
+run_relay_delete_cancel_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_delete() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_list() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu_has_entries() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu_empty_state() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_test() {
+    case $1 in
+        number) [[ $2 =~ ^[1-9][0-9]*$ ]] && printf '1' ;;
+        port) [[ $2 =~ ^[0-9]+$ && $2 -ge 1 && $2 -le 65535 ]] && printf '1' ;;
+    esac
+}
+node_port_used() { return 1; }
+relay_warn_security() { :; }
+shared_config_lock() { return 0; }
+shared_config_unlock() { :; }
+manage() { :; }
+_green() { printf '%s' "$*"; }
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+is_conf_dir=$case_dir/conf
+mkdir -p "$is_conf_dir"
+cat >"$is_conf_dir/relay-10000.json" <<'JSON'
+{"inbounds":[{"listen_port":10000,"override_address":"203.0.113.60","override_port":20060}]}
+JSON
+is_main_start=1
+
+output=$(printf '4\n10000\nn\n\n5\n' | relay_menu)
+[[ $output == *'输入要删除的监听端口'* ]] || fail "delete requests the listener port by name: $output"
+[[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
+[[ $output == *'已取消删除转发'* ]] || fail "cancel is reported without deleting the relay: $output"
+[[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
+
+output=$(printf '4\n10000\ny\n\n5\n' | relay_menu)
+[[ $output == *'将删除监听端口 10000 的转发配置。确认删除 [y/N]'* ]] || fail "confirmed deletion retains the original yes/no confirmation: $output"
+[[ $output == *'已删除中转配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
+[[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'
 CASE
 }
 
@@ -273,6 +426,10 @@ case $MENU_CHOICE in
 esac
 output=$(printf '%s' "$input" | is_main_menu)
 [[ ${mainmenu[2]} == '内核管理' && ${mainmenu[3]} == '更新' ]] || fail "home labels distinguish kernel management and updates: ${mainmenu[*]}"
+[[ ${mainmenu[1]} == '端口转发' ]] || fail "home labels relay management as port forwarding: ${mainmenu[1]}"
+if [[ $MENU_CHOICE == 2 ]]; then
+    [[ $output == *'请选择端口中转操作'* ]] || fail "home choice 2 still opens relay management: $output"
+fi
 [[ $output != *'443 SNI 前置'* ]] || fail "home must not offer Nginx frontend management: $output"
 [[ $output == *'回车退出'* ]] || fail "home clearly explains that Enter exits: $output"
 [[ $(grep -o 'one-singbox script' <<<"$output" | wc -l) == 2 ]] || fail "returning from a child menu goes back to home: $output"
@@ -650,6 +807,9 @@ CASE
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     run_empty_node_case "$core_file"
     run_empty_relay_case "$core_file"
+    run_relay_add_copy_case "$core_file"
+    run_relay_view_copy_case "$core_file"
+    run_relay_delete_cancel_case "$core_file"
     run_service_result_case "$core_file"
     run_narrow_terminal_case "$core_file"
     run_kernel_management_copy_case "$core_file"
