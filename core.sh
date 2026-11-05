@@ -210,6 +210,29 @@ change_list=(
     "更改 Snell 混淆模式"
     "更改 Snell 运行模式"
 )
+change_menu_list=(
+    "协议"
+    "监听端口"
+    "域名"
+    "路径"
+    "密码"
+    "UUID"
+    "加密方式"
+    "目标地址"
+    "目标端口"
+    "密钥"
+    "SNI"
+    "反向代理域名"
+    "用户名"
+    "节点名称"
+    "出口方式"
+    "分享地址"
+    "查看分享链接"
+    "PSK"
+    "Snell 版本"
+    "混淆模式"
+    "运行模式"
+)
 # shuf fallback for systems without shuf (e.g., Alpine BusyBox)
 if ! type -P shuf &>/dev/null; then
     shuf() {
@@ -597,7 +620,7 @@ ask() {
     set_ss_method)
         is_tmp_list=(${ss_method_list[@]})
         is_default_arg=$is_random_ss_method
-        is_opt_msg="\n请选择加密方式:\n"
+        is_opt_msg="\n选择加密方式:\n"
         is_opt_input_msg="(默认\e[92m $is_default_arg\e[0m):"
         is_ask_set=ss_method
         ;;
@@ -610,20 +633,20 @@ ask() {
             done
         }
         is_tmp_list+=("返回节点管理")
-        is_opt_msg="\n请选择协议:\n"
+        is_opt_msg="\n选择协议:\n"
         is_ask_set=is_new_protocol
         ;;
     set_change_list)
         is_tmp_list=()
         for v in ${is_can_change[@]}; do
-            is_tmp_list+=("${change_list[$v]}")
+            is_tmp_list+=("${change_menu_list[$v]}")
         done
         is_opt_msg="\n请选择更改:\n"
         is_ask_set=is_change_str
         is_opt_input_msg=$3
         ;;
     set_outbound_mode)
-        is_tmp_list=("IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 代理出站" "VLESS 代理出站")
+        is_tmp_list=("IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 出口" "VLESS 出口")
         outbound_display=$(current_outbound_mode_display "$is_config_file")
         is_ask_set=is_outbound_mode
         ;;
@@ -639,7 +662,7 @@ ask() {
         ;;
     get_config_file)
         is_tmp_list=("${is_all_json[@]}")
-        is_opt_msg="\n请选择节点:\n"
+        is_opt_msg="\n选择节点:\n"
         is_ask_set=is_config_file
         ;;
     mainmenu)
@@ -653,9 +676,9 @@ ask() {
     *pass* | *psk* | *private_key* | *uuid* | *token* | *secret*) is_secret_input=1 ;;
     esac
     if [[ $is_ask_set == is_outbound_mode ]]; then
-        printf '\n当前出站方式: %s\n' "$outbound_display"
-        msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出站可选 Shadowsocks 或 VLESS。"
-        printf '\n请选择出站方式:\n'
+        printf '\n当前出口方式: %s\n' "$outbound_display"
+        msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出口可选 Shadowsocks 或 VLESS。"
+        printf '\n选择出口方式:\n'
     else
         msg $is_opt_msg
     fi
@@ -724,7 +747,15 @@ ask() {
                     is_ask_result=${is_tmp_list[$REPLY - 1]}
                 fi
             fi
-            [[ $is_ask_result ]] && export $is_ask_set="$is_ask_result" && msg "选择: ${!is_ask_set}" && break
+            if [[ $is_ask_result ]]; then
+                export $is_ask_set="$is_ask_result"
+                if [[ $is_ask_set == is_outbound_mode ]]; then
+                    msg "选择: ${is_tmp_list[$REPLY - 1]}"
+                else
+                    msg "选择: ${!is_ask_set}"
+                fi
+                break
+            fi
         fi
 
         if [[ $is_tmp_list ]]; then
@@ -833,8 +864,8 @@ outbound_mode_display_name() {
     "V4优先") echo "IPv4 优先" ;;
     "仅V4") echo "仅 IPv4" ;;
     "仅V6") echo "仅 IPv6" ;;
-    "SS 出站") echo "Shadowsocks 代理出站" ;;
-    "VLESS 出站") echo "VLESS 代理出站" ;;
+    "SS 出站") echo "Shadowsocks 出口" ;;
+    "VLESS 出站") echo "VLESS 出口" ;;
     *) echo "$1" ;;
     esac
 }
@@ -1617,7 +1648,7 @@ edit_node_outbound_mode() {
         fi
         current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
         if [[ $current_proxy_type == shadowsocks ]]; then
-            echo -ne "请输入 Shadowsocks 分享链接 (留空复用当前配置；输入内容隐藏):"
+            echo -ne "请输入 Shadowsocks 分享链接 (回车保留当前配置；输入内容隐藏):"
         else
             echo -ne "请输入 Shadowsocks 分享链接 (输入内容隐藏):"
         fi
@@ -1639,7 +1670,7 @@ edit_node_outbound_mode() {
         fi
         current_proxy_type=$(jq -r '.config.type // empty' <<<"$proxy_json" 2>/dev/null)
         if [[ $current_proxy_type == vless ]]; then
-            echo -ne "请输入 VLESS 分享链接 (留空复用当前配置；输入内容隐藏):"
+            echo -ne "请输入 VLESS 分享链接 (回车保留当前配置；输入内容隐藏):"
         else
             echo -ne "请输入 VLESS 分享链接 (输入内容隐藏):"
         fi
@@ -4029,7 +4060,7 @@ add() {
             is_install_caddy=1
         fi
         # set host
-        [[ ! $host ]] && ask string host "请输入服务器域名 (需解析到本机公网 IP):"
+        [[ ! $host ]] && ask string host "请输入域名 (需解析到本机公网 IP):"
         # test host dns
         get host-test
     else
@@ -4040,18 +4071,18 @@ add() {
             [[ ! $port ]] && {
                 get_port
                 is_default_arg=$tmp_port
-                ask string port "请输入监听端口 (1-65535，留空使用自动分配的 $is_default_arg):"
+                ask string port "请输入监听端口 (1-65535，回车自动分配 $is_default_arg):"
             }
 
             case ${is_new_protocol,,} in
             socks)
                 # set user
-                [[ ! $is_socks_user ]] && ask string is_socks_user "请输入 SOCKS 用户名:"
+                [[ ! $is_socks_user ]] && ask string is_socks_user "请输入用户名:"
                 # set password
                 [[ ! $is_socks_pass ]] && {
                     [[ ! $tmp_uuid ]] && get_uuid
                     is_default_arg=$tmp_uuid
-                    ask string is_socks_pass "请输入 SOCKS 密码 (留空随机生成；输入不显示):"
+                    ask string is_socks_pass "请输入密码 (回车自动生成；输入不显示):"
                 }
                 ;;
             shadowsocks)
@@ -4065,7 +4096,7 @@ add() {
                         [[ ! $tmp_uuid ]] && get_uuid
                         is_default_arg=$tmp_uuid
                     fi
-                    ask string ss_password "请输入 Shadowsocks 密码 (留空随机生成；输入不显示):"
+                    ask string ss_password "请输入密码 (回车自动生成；输入不显示):"
                 }
                 ;;
             esac
@@ -4128,7 +4159,7 @@ add() {
     fi
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
-        echo -ne "请输入节点名称 (留空自动生成 8 位名称):"
+        echo -ne "请输入节点名称 (回车自动生成 8 位名称):"
         read is_custom_node_name
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
@@ -4754,14 +4785,14 @@ node_menu_has_nodes() {
 
 node_menu_empty_state() {
     node_menu_has_nodes && return 1
-    msg "\n尚未添加任何节点。可以先选择“添加节点”。\n"
+    msg "\n暂无节点，请先添加。\n"
     menu_pause
     return 0
 }
 
 node_menu() {
     while :; do
-        is_tmp_list=("添加节点" "修改节点" "查看节点信息" "删除节点" "返回首页")
+        is_tmp_list=("添加" "修改" "查看" "删除" "返回")
         ask list is_node_action null "\n请选择节点操作:\n"
         case $REPLY in
         1)

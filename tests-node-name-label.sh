@@ -9,7 +9,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-source "$repo_root/core.sh"
+source <(sed '/EUID != 0/d' "$repo_root/core.sh")
 is_core_dir="$workdir/core"
 manage() { :; }
 mkdir -p "$workdir/bin"
@@ -370,7 +370,7 @@ jq -e '.route.rules[] | select((.inbound[0] == "demo.json") and .outbound == "di
 }
 
 current_display=$(current_outbound_mode_display "node-c.json")
-[[ "$current_display" == "Shadowsocks 代理出站 (美国 dedirock ss 落地)" ]] || {
+[[ "$current_display" == "Shadowsocks 出口 (美国 dedirock ss 落地)" ]] || {
   echo "FAIL: current ss outbound mode display should prefer node name"
   echo "$current_display"
   exit 1
@@ -378,7 +378,7 @@ current_display=$(current_outbound_mode_display "node-c.json")
 
 jq -n '{outbound_mode:"SS 出站",outbound_ss_server:"69.12.75.251",outbound_ss_port:"9969",outbound_ss_method:"2022-blake3-aes-128-gcm",outbound_ss_password:"NrLbB58cIo4a7lKak1YCog=="}' > "$is_conf_dir/.quan-meta/node-c.json.meta.json"
 current_display=$(current_outbound_mode_display "node-c.json")
-[[ "$current_display" == "Shadowsocks 代理出站 (69.12.75.251:9969)" ]] || {
+[[ "$current_display" == "Shadowsocks 出口 (69.12.75.251:9969)" ]] || {
   echo "FAIL: current ss outbound mode display should fall back to server:port"
   echo "$current_display"
   exit 1

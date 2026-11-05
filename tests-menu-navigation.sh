@@ -35,7 +35,11 @@ is_conf_dir=$case_dir/conf
 mkdir -p "$is_conf_dir"
 
 output=$(printf '3\n\n5\n' | node_menu)
-[[ $output == *'尚未添加任何节点'* ]] || fail "empty node state is explained: $output"
+[[ $output == *'暂无节点，请先添加'* ]] || fail "empty node state is explained: $output"
+[[ $output != *'尚未添加任何节点'* ]] || fail "empty node state uses the concise prompt: $output"
+for item in 添加 修改 查看 删除 返回; do
+    grep -Fxq "$item" <<<"$output" || fail "node menu shows $item: $output"
+done
 [[ $output == *'按回车返回菜单'* ]] || fail "empty node state remains visible until return: $output"
 [[ $output == *'unexpected info call'* ]] && fail 'empty node state must not enter node details'
 [[ $(grep -o '请选择节点操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to node menu: $output"
