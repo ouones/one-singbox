@@ -129,6 +129,89 @@ pause_width=$(grep -F '按回车返回菜单。' <<<"$output" | wc -L)
 CASE
 }
 
+run_kernel_management_copy_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+menu_file=$case_dir/menu
+action_file=$case_dir/actions
+
+ask() {
+    [[ -s $menu_file ]] || printf '%s\n' "${is_tmp_list[@]}" >"$menu_file"
+    printf '%s\n' "${is_tmp_list[@]}"
+    read -r REPLY
+}
+menu_pause() { IFS= read -r _pause || :; }
+msg() { printf '%b\n' "$*"; }
+core_status_read() { is_core_ver=1.50; is_core_status=运行中; is_caddy_status=已停止; is_caddy_ver=2.10; }
+service_action_result() { printf '%s\n' "$1" >>"$action_file"; printf '%s 服务结果\n' "$1"; }
+log_set() { printf 'log\n' >>"$action_file"; }
+load() { [[ $1 == log.sh ]]; }
+
+is_caddy=1
+output=$(printf '1\n\n2\n\n3\n\n4\n\n5\n\n6\n' | service_menu)
+[[ $(cat "$menu_file") == $'状态\n启动\n停止\n重启\n日志\n返回' ]] || fail "kernel menu uses the requested labels in order: $(cat "$menu_file")"
+[[ $output == *'sing-box 内核：运行中 (版本 1.50)'* && $output == *'Caddy：已停止 (版本 2.10)'* ]] || fail "status identifies sing-box kernel and Caddy: $output"
+[[ $(cat "$action_file") == $'start\nstop\nrestart\nlog' ]] || fail "kernel menu choices retain their actions: $(cat "$action_file")"
+
+: >"$menu_file"
+is_caddy=
+output=$(printf '1\n\n6\n' | service_menu)
+[[ $output == *'sing-box 内核：运行中 (版本 1.50)'* ]] || fail "status keeps the kernel when Caddy is absent: $output"
+[[ $output != *'Caddy：'* ]] || fail "status hides Caddy when it is not installed: $output"
+CASE
+}
+
+run_update_copy_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+menu_file=$case_dir/menu
+update_file=$case_dir/updates
+
+ask() {
+    [[ -s $menu_file ]] || printf '%s\n' "${is_tmp_list[@]}" >"$menu_file"
+    printf '%s\n' "${is_tmp_list[@]}"
+    read -r REPLY
+}
+menu_pause() { IFS= read -r _pause || :; }
+update() { printf '%s\n' "$*" >>"$update_file"; }
+
+is_caddy=1
+output=$(printf '1\n\n2\n\n3\n\n4\n' | update_menu)
+[[ $(cat "$menu_file") == $'更新 sing-box 内核\n更新脚本\n更新 Caddy\n返回' ]] || fail "update menu includes Caddy in the requested order: $(cat "$menu_file")"
+[[ $(cat "$update_file") == $'1\n2\ncaddy' ]] || fail "installed update choices keep their targets: $(cat "$update_file")"
+[[ $output == *'更新脚本'* ]] || fail "update menu text is visible: $output"
+
+: >"$menu_file"
+: >"$update_file"
+is_caddy=
+output=$(printf '1\n\n2\n\n3\n' | update_menu)
+[[ $(cat "$menu_file") == $'更新 sing-box 内核\n更新脚本\n返回' ]] || fail "update menu hides Caddy when it is not installed: $(cat "$menu_file")"
+[[ $(cat "$update_file") == $'1\n2' ]] || fail "without Caddy, update choices still target core and script: $(cat "$update_file")"
+CASE
+}
+
 run_home_return_case() {
     local core_file=$1 menu_choice=${2:-1}
     CORE_FILE="$core_file" MENU_CHOICE="$menu_choice" bash <<'CASE' || exit 1
@@ -185,6 +268,7 @@ case $MENU_CHOICE in
 6) input=$'1\n\n5\n\n' ;;
 esac
 output=$(printf '%s' "$input" | is_main_menu)
+[[ ${mainmenu[2]} == '内核管理' && ${mainmenu[3]} == '更新' ]] || fail "home labels distinguish kernel management and updates: ${mainmenu[*]}"
 [[ $output != *'443 SNI 前置'* ]] || fail "home must not offer Nginx frontend management: $output"
 [[ $output == *'回车退出'* ]] || fail "home clearly explains that Enter exits: $output"
 [[ $(grep -o 'one-singbox script' <<<"$output" | wc -l) == 2 ]] || fail "returning from a child menu goes back to home: $output"
@@ -534,11 +618,38 @@ main add reality 443 sample-uuid example.com
 CASE
 }
 
+run_log_exit_prompt_case() {
+    local log_file=$1
+    LOG_FILE="$log_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${LOG_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^log_set() {/,/^}/p' "$LOG_FILE")
+
+is_log_dir=$(mktemp -d)
+trap 'rm -rf "$is_log_dir"' EXIT
+touch "$is_log_dir/access.log"
+_green() { printf '%s' "$*"; }
+msg() { printf '%b\n' "$*"; }
+tail() { printf 'log stream started\n'; }
+
+output=$(log_set)
+[[ $output == *'按 Ctrl+C 退出'* ]] || fail "log exit prompt names the Ctrl+C shortcut: $output"
+[[ $output == *'log stream started'* ]] || fail "log streaming remains active after the prompt: $output"
+CASE
+}
+
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     run_empty_node_case "$core_file"
     run_empty_relay_case "$core_file"
     run_service_result_case "$core_file"
     run_narrow_terminal_case "$core_file"
+    run_kernel_management_copy_case "$core_file"
+    run_update_copy_case "$core_file"
     run_home_return_case "$core_file" 1
     run_home_return_case "$core_file" 2
     run_home_return_case "$core_file" 3
@@ -560,4 +671,6 @@ done
 
 run_log_limit_prompt_case
 
-echo 'PASS: terminal menu navigation, labels, DNS mapping, and uninstall confirmation'
+run_log_exit_prompt_case "$repo_root/src/log.sh"
+
+echo 'PASS: terminal menu navigation, labels, DNS mapping, uninstall, and log prompts'
