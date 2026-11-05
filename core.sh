@@ -151,7 +151,7 @@ ss_method_list=(
 )
 mainmenu=(
     "节点管理"
-    "TCP/UDP 端口中转"
+    "端口转发"
     "内核管理"
     "更新"
     "系统工具"
@@ -4935,7 +4935,7 @@ relay_add() {
         done
         local auto_port=$local_port
         is_default_arg=$auto_port
-        ask string local_port "请输入本地监听端口 (1-65535，留空使用自动分配的 $local_port):"
+        ask string local_port "输入监听端口 (1-65535，回车自动分配 $local_port):"
         [[ -z "$REPLY" ]] && msg "自动分配本地端口: $local_port"
     fi
     local_port=$(echo "$local_port" | tr -d ' ')
@@ -4944,13 +4944,13 @@ relay_add() {
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
 
     if [[ ! $remote_addr ]]; then
-        ask string remote_addr "请输入目标地址 (IPv4、IPv6 或域名):"
+        ask string remote_addr "输入目标地址 (IPv4、IPv6 或域名):"
     fi
     remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [[ -n $remote_addr ]] || err "目标地址不能为空."
 
     if [[ ! $remote_port ]]; then
-        ask string remote_port "请输入目标端口 (1-65535):"
+        ask string remote_port "输入目标端口 (1-65535):"
     fi
     remote_port=$(echo "$remote_port" | tr -d ' ')
     [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
@@ -5002,7 +5002,7 @@ relay_info() {
     local local_port=$1
     if [[ ! $local_port ]]; then
         relay_list
-        ask string local_port "请输入要查看的中转监听端口:"
+        ask string local_port "输入要查看的监听端口:"
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
@@ -5023,7 +5023,11 @@ relay_list() {
     files=("$is_conf_dir"/relay-*.json)
     shopt -u nullglob
     if [[ ${#files[@]} -eq 0 ]]; then
-        msg "\n当前未配置任何中转.\n"
+        if [[ $is_main_start ]]; then
+            msg "\n暂无转发，请先添加\n"
+        else
+            msg "\n当前未配置任何中转.\n"
+        fi
         return
     fi
     msg "\n------------- 中转列表 -------------"
@@ -5045,14 +5049,14 @@ relay_delete() {
         relay_list
         # Existing relays may be listening; only validate the port format here.
         local is_cant_test_port=1
-        ask string local_port "请输入要删除的中转监听端口:"
+        ask string local_port "输入要删除的监听端口:"
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     relay_file="$is_conf_dir/relay-${local_port}.json"
     [[ -f $relay_file ]] || err "未找到中转配置 (relay-${local_port}.json)."
     if [[ $is_main_start ]]; then
-        confirm_action "将删除监听端口 $local_port 的中转配置。确认删除" || { msg "已取消删除中转。"; return; }
+        confirm_action "将删除监听端口 $local_port 的转发配置。确认删除" || { msg "已取消删除转发。"; return; }
     fi
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
@@ -5089,7 +5093,7 @@ relay_menu_empty_state() {
 
 relay_menu() {
     while :; do
-        is_tmp_list=("添加端口中转" "查看中转列表" "查看中转详情" "删除端口中转" "返回首页")
+        is_tmp_list=("添加" "列表" "查看" "删除" "返回")
         ask list is_relay_action null "\n请选择端口中转操作:\n"
         case $REPLY in
         1)
