@@ -152,11 +152,11 @@ ss_method_list=(
 mainmenu=(
     "节点管理"
     "TCP/UDP 端口中转"
-    "服务控制"
-    "更新软件"
-    "系统工具"
-    "命令帮助与反馈"
-    "版本与项目信息"
+    "内核管理"
+    "更新"
+    "系统设置"
+    "帮助反馈"
+    "关于"
     "卸载"
 )
 info_list=(
@@ -669,7 +669,7 @@ ask() {
         is_tmp_list=("${mainmenu[@]}")
         is_ask_set=is_main_pick
         is_emtpy_exit=1
-        is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (直接回车退出):"
+        is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (回车退出):"
         ;;
     esac
     case $is_ask_set in
@@ -3672,16 +3672,17 @@ del() {
 
 # uninstall
 uninstall() {
+    local uninstall_scope="将删除 sing-box 内核、服务和配置，日志维护服务及日志，以及 one-singbox 脚本和快捷命令"
     if [[ $is_caddy ]]; then
-        is_tmp_list=("仅卸载 sing-box 和 one-singbox" "卸载 sing-box、one-singbox 和 Caddy")
+        is_tmp_list=("卸载内核和脚本" "全部卸载")
         ask list is_do_uninstall
         if [[ $REPLY == '2' ]]; then
-            confirm_action "将删除 sing-box 配置、one-singbox 脚本，以及整个 Caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return; }
+            confirm_action "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return; }
         else
-            confirm_action "将删除 sing-box 配置、one-singbox 脚本和服务。确认卸载" || { msg "已取消卸载。"; return; }
+            confirm_action "$uninstall_scope。确认卸载" || { msg "已取消卸载。"; return; }
         fi
     else
-        confirm_action "将删除 sing-box 配置、one-singbox 脚本和服务。确认卸载" || { msg "已取消卸载。"; return; }
+        confirm_action "$uninstall_scope。确认卸载" || { msg "已取消卸载。"; return; }
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
@@ -4821,7 +4822,7 @@ node_menu() {
 service_menu() {
     local menu_status=0 action_status
     while :; do
-        is_tmp_list=("查看服务状态" "启动服务" "停止服务" "重启服务" "查看日志" "返回首页")
+        is_tmp_list=("状态" "启动" "停止" "重启" "日志" "返回")
         ask list is_service_action null "\n请选择服务操作:\n"
         case $REPLY in
         1)
@@ -4860,9 +4861,9 @@ service_menu() {
 
 update_menu() {
     while :; do
-        is_tmp_list=("更新 sing-box 内核" "更新 one-singbox 脚本")
+        is_tmp_list=("更新 sing-box 内核" "更新脚本")
         [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
-        is_tmp_list+=("返回首页")
+        is_tmp_list+=("返回")
         ask list is_do_update null "\n请选择要更新的软件:\n"
         case $REPLY in
         1 | 2)
@@ -4884,8 +4885,8 @@ update_menu() {
 
 system_tools_menu() {
     while :; do
-        is_tmp_list=("启用 BBR" "设置 DNS" "设置日志占用上限" "重装 one-singbox 脚本" "返回首页")
-        ask list is_system_tool null "\n请选择系统工具:\n"
+        is_tmp_list=("启用 BBR" "DNS" "日志上限" "重装脚本" "返回")
+        ask list is_system_tool null "\n请选择系统设置:\n"
         case $REPLY in
         1)
             load bbr.sh
@@ -4936,7 +4937,7 @@ is_main_menu() {
         3) service_menu ;;
         4) update_menu ;;
         5) system_tools_menu ;;
-        6) msg; load help.sh; show_help ;;
+        6) msg "\n命令行帮助"; load help.sh; show_help ;;
         7) load help.sh; about ;;
         8) uninstall ;;
         esac
