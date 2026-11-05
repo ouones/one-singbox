@@ -17,7 +17,7 @@ msg() { menu_output+="$*"$'\n'; }
 _green() { printf '%s' "$*"; }
 _red() { printf '%s' "$*"; }
 ask() {
-    [[ ${is_tmp_list[1]} == '启动服务' ]] || fail 'service menu offers start action'
+    [[ ${is_tmp_list[1]} == '启动' ]] || fail 'service menu offers start action'
     if [[ $menu_return_after_action ]]; then
         REPLY=6
         menu_return_after_action=
