@@ -3016,7 +3016,7 @@ create() {
     case $1 in
     server)
         local previous_config_file is_snell_tmp_file node_migration_applied new_node_lock new_node_transport
-        previous_config_file=$is_config_file
+        [[ $is_change ]] && previous_config_file=$is_config_file
         is_tls=none
         get new
         # listen
@@ -3103,7 +3103,6 @@ create() {
                 err "保存 Snell 配置失败, 原有配置未改变."
             fi
         else
-            [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
             cat <<<$is_new_json >"$is_json_file"
         fi
         [[ $is_config_name ]] && is_config_file=$is_config_name
@@ -4765,22 +4764,22 @@ node_menu() {
         ask list is_node_action null "\n请选择节点操作:\n"
         case $REPLY in
         1)
-            add
+            ( add )
             menu_pause
             ;;
         2)
             node_menu_empty_state && continue
-            change
+            ( change )
             menu_pause
             ;;
         3)
             node_menu_empty_state && continue
-            info
+            ( info )
             menu_pause
             ;;
         4)
             node_menu_empty_state && continue
-            is_select_delete_node=1 del
+            ( is_select_delete_node=1 del )
             menu_pause
             ;;
         5) return ;;
