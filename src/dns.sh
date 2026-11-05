@@ -8,7 +8,8 @@ is_dns_list=(
     none
 )
 dns_set() {
-    local candidate_config
+    local candidate_config is_interactive is_dns_use_bak
+    [[ ! $1 ]] && is_interactive=1
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
     fi
@@ -44,13 +45,20 @@ dns_set() {
             ;;
         esac
     else
-        is_tmp_list=(${is_dns_list[@]})
-        ask list is_dns_use null "\n请选择 DNS；选择 set 输入自定义地址，选择 none 表示不设置 DNS:\n"
+        is_tmp_list=("${is_dns_list[@]}")
+        is_tmp_list[5]="自定义"
+        is_tmp_list[6]="不设置"
+        ask list is_dns_use null "\n请选择 DNS；选择“自定义”输入地址，选择“不设置”清除 DNS 配置:\n"
+        case $is_dns_use in
+        自定义) is_dns_use=set ;;
+        不设置) is_dns_use=none ;;
+        esac
         if [[ $is_dns_use == "set" ]]; then
             ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): "
         fi
     fi
     is_dns_use_bak=$is_dns_use
+    [[ $is_interactive && $is_dns_use_bak == none ]] && is_dns_use_bak="不设置"
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || err "无法创建 DNS 候选配置"
     if [[ $is_dns_use == "none" ]]; then

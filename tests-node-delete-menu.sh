@@ -6,7 +6,7 @@ trap 'rm -rf "$workdir"' EXIT
 
 for core in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
   (
-    source "$core"
+    source <(sed '/EUID != 0/d' "$core")
     is_core_dir="$workdir/core"
     is_conf_dir="$workdir/conf"
     is_config_json="$workdir/config.json"
@@ -35,12 +35,12 @@ y
 5
 INPUT
     output=$(cat "$workdir/output")
-    [[ $(grep -c '请选择节点:' <<<"$output") == 3 ]] || { echo "FAIL: node list not displayed for every deletion"; exit 1; }
+    [[ $(grep -Fx -c '选择节点:' <<<"$output") == 3 ]] || { echo "FAIL: node list prompt is concise and shown for every deletion"; exit 1; }
     [[ $(grep -c '将删除节点“a.json”' <<<"$output") == 1 ]] || { echo "FAIL: deleted node selected again"; exit 1; }
     [[ $(grep -c '将删除节点“b.json”' <<<"$output") == 2 ]] || { echo "FAIL: second node confirmation missing"; exit 1; }
     [[ $(grep -c '已取消删除节点' <<<"$output") == 1 ]] || { echo "FAIL: cancellation not honored"; exit 1; }
     [[ ! -f $is_conf_dir/a.json && ! -f $is_conf_dir/b.json ]] || { echo "FAIL: confirmed deletion failed"; exit 1; }
-    grep -q '尚未添加任何节点' <<<"$output" || { echo "FAIL: empty list not reported"; exit 1; }
+    grep -q '暂无节点，请先添加' <<<"$output" || { echo "FAIL: empty list not reported"; exit 1; }
     echo "PASS: $core"
     rm -rf "$is_conf_dir" "$is_core_dir"
   ) || exit 1

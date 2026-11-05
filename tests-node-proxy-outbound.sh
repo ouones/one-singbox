@@ -122,7 +122,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-source "$CORE_FILE"
+source <(sed '/EUID != 0/d' "$CORE_FILE")
 is_core_dir="$case_dir/core"
 
 is_conf_dir="$case_dir/conf"
@@ -184,18 +184,18 @@ ss-import-encoding)
     auth=$(printf '%s' 'aes-128-gcm:💩' | base64 | tr '+/' '-_' | tr -d '=\n')
     ss_uri="ss://${auth}@node.example:8388/#中文+Name%20one"
     change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
-    [[ $change_output == *"配置已应用"* && $change_output == *"Shadowsocks 代理出站 (中文+Name one)"* ]] || fail "Base64URL credentials and an encoded display name should import: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"Shadowsocks 出口 (中文+Name one)"* ]] || fail "Base64URL credentials and an encoded display name should import: $change_output"
     jq -e '.outbound_proxy.name == "中文+Name one" and .outbound_proxy.config.server == "node.example" and .outbound_proxy.config.server_port == 8388 and .outbound_proxy.config.password == "💩"' "$meta_file" >/dev/null || fail "Base64URL credentials should preserve the decoded SS fields"
     jq -e '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .server == "node.example" and .server_port == 8388 and .password == "💩"' "$is_config_json" >/dev/null || fail "Base64URL credentials should reach the runtime outbound"
     ss_uri='ss://aes-256-gcm:p%3Aass%2B%2525%26%3D@127.0.0.1:443/?plugin=&remarks=R%2B%20%26%3DName'
     change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
-    [[ $change_output == *"配置已应用"* && $change_output == *"Shadowsocks 代理出站 (R+ &=Name)"* ]] || fail "percent-encoded plaintext credentials and remarks should import: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"Shadowsocks 出口 (R+ &=Name)"* ]] || fail "percent-encoded plaintext credentials and remarks should import: $change_output"
     jq -e '.outbound_proxy.name == "R+ &=Name" and .outbound_proxy.config.server == "127.0.0.1" and .outbound_proxy.config.server_port == 443 and .outbound_proxy.config.password == "p:ass+%25&="' "$meta_file" >/dev/null || fail "plaintext credentials should split at the first colon and decode exactly once"
     jq -e '.outbounds[] | select(.tag == "managed_node_ss_node-one_json") | .password == "p:ass+%25&="' "$is_config_json" >/dev/null || fail "plaintext credentials should be saved to runtime JSON"
     [[ $change_output != *"p:ass"* && $change_output != *"ss://"* ]] || fail "SS credentials must not be echoed"
     ss_uri='ss://aes-128-gcm:ipv6-secret@[2001:db8::1]:8388/'
     change_output=$(printf '5\n%s\n' "$ss_uri" | change node-one.json outbound 2>&1)
-    [[ $change_output == *"配置已应用"* && $change_output == *"Shadowsocks 代理出站 ([2001:db8::1]:8388)"* ]] || fail "unnamed IPv6 SS should display a bracketed endpoint: $change_output"
+    [[ $change_output == *"配置已应用"* && $change_output == *"Shadowsocks 出口 ([2001:db8::1]:8388)"* ]] || fail "unnamed IPv6 SS should display a bracketed endpoint: $change_output"
     [[ $change_output != *"ipv6-secret"* && $change_output != *"ss://"* ]] || fail "IPv6 SS credentials must not be echoed"
     exit 0
     ;;
@@ -250,9 +250,9 @@ ss-import-invalid)
 vless-display-escaped-name)
     escaped_name_uri='vless://550e8400-e29b-41d4-a716-446655440000@tls.example.com:443?security=tls&insecure=1#foo%5Cc'
     change_output=$(printf '6\n%s\n' "$escaped_name_uri" | change node-one.json outbound 2>&1) || fail "VLESS with a literal backslash in its name should apply: $change_output"
-    [[ $change_output == *'VLESS 代理出站 (foo\c)，跳过 TLS 证书校验'* ]] || fail "VLESS success display should preserve a literal backslash and certificate status: $change_output"
+    [[ $change_output == *'VLESS 出口 (foo\c)，跳过 TLS 证书校验'* ]] || fail "VLESS success display should preserve a literal backslash and certificate status: $change_output"
     change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "opening the outbound menu should still work: $change_output"
-    [[ $change_output == *'当前出站方式: VLESS 代理出站 (foo\c)，跳过 TLS 证书校验'* ]] || fail "outbound menu should preserve a literal backslash and certificate status: $change_output"
+    [[ $change_output == *'当前出口方式: VLESS 出口 (foo\c)，跳过 TLS 证书校验'* ]] || fail "outbound menu should preserve a literal backslash and certificate status: $change_output"
     exit 0
     ;;
 vless-pcs-hex-compat)
@@ -548,7 +548,7 @@ vless-menu)
     [[ $change_output != *"$vless_uuid"* && $change_output != *"$vless_pbk"* && $change_output != *"vless://"* ]] || fail "VLESS menu output must not expose credentials or the share link"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "VLESS 节点" and .outbound_proxy.config.type == "vless" and .outbound_proxy.config.uuid == "'"$vless_uuid"'" and .outbound_proxy.config.tls.reality.public_key == "'"$vless_pbk"'"' "$meta_file" >/dev/null || fail "VLESS normalized config should be saved in the shared per-node proxy cache"
     jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .type == "vless" and .flow == "xtls-rprx-vision" and .tls.reality.public_key == "'"$vless_pbk"'" and (has("network") | not) and (has("transport") | not)' "$is_config_json" >/dev/null || fail "runtime VLESS outbound should carry native Reality/Vision fields without restricting proxied traffic to TCP"
-    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 代理出站 (VLESS 节点)，跳过 TLS 证书校验' ]] || fail "VLESS renderer should display the upstream name and skipped certificate verification"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出口 (VLESS 节点)，跳过 TLS 证书校验' ]] || fail "VLESS renderer should display the upstream name and skipped certificate verification"
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
     restart_before=$(restart_count)
@@ -575,7 +575,7 @@ vless-menu)
     [[ $change_output != *"$vless_uuid"* && $change_output != *"vless://"* ]] || fail "VLESS WS output must not expose credentials or the share link"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "WS-Upstream" and .outbound_proxy.config.transport.type == "ws" and .outbound_proxy.config.transport.path == "/socket?token=a%26b" and .outbound_proxy.config.transport.max_early_data == 16' "$meta_file" >/dev/null || fail "VLESS WS normalized config should be cached"
     jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "ws" and .transport.path == "/socket?token=a%26b" and .tls.server_name == "tls.example.com" and .transport.headers.Host == "ws.example.com"' "$is_config_json" >/dev/null || fail "runtime VLESS WS outbound should preserve the normalized transport and TLS fields"
-    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 代理出站 (WS-Upstream)，校验 TLS 证书' ]] || fail "VLESS WS renderer should display the upstream name and default certificate verification"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出口 (WS-Upstream)，校验 TLS 证书' ]] || fail "VLESS WS renderer should display the upstream name and default certificate verification"
     change_output=$(printf '3\n' | change node-one.json outbound 2>&1) || fail "switching cached WS VLESS to direct should succeed: $change_output"
     jq -e '.outbound_mode == "仅V4" and .outbound_proxy.config.transport.type == "ws"' "$meta_file" >/dev/null || fail "switching direct should retain the WS VLESS cache"
     change_output=$(printf '6\n\n' | change node-one.json outbound 2>&1) || fail "cached WS VLESS config should be reusable: $change_output"
@@ -587,7 +587,7 @@ vless-menu)
     [[ $change_output != *"$vless_uuid"* && $change_output != *"vless://"* ]] || fail "VLESS gRPC output must not expose credentials or the share link"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.name == "GRPC-Upstream" and .outbound_proxy.config.transport.type == "grpc" and .outbound_proxy.config.transport.service_name == "api/v1"' "$meta_file" >/dev/null || fail "VLESS gRPC normalized config should be cached"
     jq -e '.outbounds[] | select(.tag | startswith("managed_node_vless_")) | .transport.type == "grpc" and .transport.service_name == "api/v1" and .tls.server_name == "grpc-tls.example.com"' "$is_config_json" >/dev/null || fail "runtime VLESS gRPC outbound should preserve serviceName and separate TLS SNI"
-    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 代理出站 (GRPC-Upstream)，校验 TLS 证书' ]] || fail "VLESS gRPC renderer should display the upstream name and default certificate verification"
+    [[ $(current_outbound_mode_display node-one.json) == 'VLESS 出口 (GRPC-Upstream)，校验 TLS 证书' ]] || fail "VLESS gRPC renderer should display the upstream name and default certificate verification"
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
     restart_before=$(restart_count)

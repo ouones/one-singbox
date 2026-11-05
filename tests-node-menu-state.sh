@@ -90,7 +90,7 @@ ask() {
     fi
 }
 node_menu >"$case_dir/output" 2>&1 <<<"$(printf '3\n1\n\n%s\n2\n\n5\n' "$ACTION")"
-[[ $(grep -c '请选择节点:' "$case_dir/output") == 2 ]] || { echo "FAIL: $CORE_FILE did not prompt for the second node"; exit 1; }
+[[ $(grep -Fx -c '选择节点:' "$case_dir/output") == 2 ]] || { echo "FAIL: $CORE_FILE did not prompt for the second node"; exit 1; }
 if [[ $ACTION == 2 ]]; then
     [[ $(cat "$case_dir/changed-target") == node2.json ]] || { echo "FAIL: $CORE_FILE selected the wrong node for modification"; exit 1; }
 else
