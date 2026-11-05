@@ -152,8 +152,8 @@ ss_method_list=(
 mainmenu=(
     "节点管理"
     "TCP/UDP 端口中转"
-    "服务控制"
-    "更新软件"
+    "内核管理"
+    "更新"
     "系统工具"
     "命令帮助与反馈"
     "版本与项目信息"
@@ -4791,7 +4791,7 @@ node_menu() {
 service_menu() {
     local menu_status=0 action_status
     while :; do
-        is_tmp_list=("查看服务状态" "启动服务" "停止服务" "重启服务" "查看日志" "返回首页")
+        is_tmp_list=("状态" "启动" "停止" "重启" "日志" "返回")
         ask list is_service_action null "\n请选择服务操作:\n"
         case $REPLY in
         1)
@@ -4830,9 +4830,9 @@ service_menu() {
 
 update_menu() {
     while :; do
-        is_tmp_list=("更新 sing-box 内核" "更新 one-singbox 脚本")
+        is_tmp_list=("更新 sing-box 内核" "更新脚本")
         [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
-        is_tmp_list+=("返回首页")
+        is_tmp_list+=("返回")
         ask list is_do_update null "\n请选择要更新的软件:\n"
         case $REPLY in
         1 | 2)

@@ -213,7 +213,7 @@ log_set() {
         [[ $1 != 'del' ]] && msg "\n已更新 Log 设定为: $(_green $is_log_level_use)\n"
     else
         if [[ -f $is_log_dir/access.log ]]; then
-            msg "\n 提醒: 按 $(_green Ctrl + C) 退出\n"
+            msg "\n 按 $(_green Ctrl+C) 退出\n"
             tail -f $is_log_dir/access.log
         else
             err "无法找到 log 文件."
