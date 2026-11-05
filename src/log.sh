@@ -136,7 +136,7 @@ log_limit_set() {
     local current=$(log_limit_read) value
     msg "\n当前日志占用上限: $current MB (默认上限 200 MB)"
     while :; do
-        msg "请输入新的日志占用上限 (大于 0 的整数，单位 MB；留空保留当前值):"
+        msg "输入日志上限 (大于 0 的整数，单位 MB；回车保留当前值):"
         IFS= read -r value || return
         [[ ! $value ]] && return 0
         if log_limit_valid "$value"; then

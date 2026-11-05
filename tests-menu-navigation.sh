@@ -525,6 +525,12 @@ output=$(cat "$case_dir/none-output")
 [[ $output != *$'\nset\n'* && $output != *$'\nnone\n'* ]] || fail "DNS menu hides internal option names: $output"
 jq -e '.dns == {} and (.route | has("default_domain_resolver") | not)' "$is_config_json" >/dev/null || fail 'no-DNS selection still removes DNS configuration'
 [[ $output == *'已更新 DNS 为: 不设置'* ]] || fail "no-DNS result uses the display name: $output"
+
+printf '%s\n' '{"dns":{"servers":[{"tag":"old"}]},"route":{"default_domain_resolver":"old"}}' >"$is_config_json"
+dns_set none >"$case_dir/cli-none-output"
+output=$(cat "$case_dir/cli-none-output")
+[[ $output == *'已更新 DNS 为: none'* ]] || fail "CLI DNS success output keeps the argument value: $output"
+[[ $output != *'已更新 DNS 为: 不设置'* ]] || fail "CLI DNS success output does not use interactive display copy: $output"
 CASE
 }
 
@@ -640,7 +646,7 @@ msg() { prompt_output+="$*"$'\n'; }
 log_limit_service() { fail 'pressing Enter must not restart the log service'; }
 limit_before=$(log_limit_read)
 log_limit_set <<<''
-[[ $prompt_output == *'单位 MB；留空保留当前值'* ]] || fail "log limit prompt explains units and Enter behavior: $prompt_output"
+[[ $prompt_output == *'输入日志上限'* && $prompt_output == *'单位 MB'* && $prompt_output == *'回车保留当前值'* ]] || fail "log limit prompt explains the value, units, and Enter behavior: $prompt_output"
 [[ $(log_limit_read) == "$limit_before" ]] || fail 'pressing Enter preserves the configured limit'
 CASE
 }
