@@ -921,10 +921,204 @@ runtime_node_vless_outbound_tag() {
     echo "managed_node_vless_$safe"
 }
 
+block_cn_is_enabled() {
+    [[ -f ${is_core_dir:-/etc/sing-box}/.block-cn-enabled ]]
+}
+
+block_cn_status_text() {
+    if block_cn_is_enabled; then
+        echo "已启用"
+    else
+        echo "未启用"
+    fi
+}
+
+block_cn_inject_inbounds_sniffing_json() {
+    local json_input=${1:-}
+    local filter='if .inbounds then .inbounds |= map(if type == "object" then .sniff = true | .sniff_override_destination = true else . end) else . end'
+    if [[ -n $json_input ]]; then
+        jq "$filter" <<<"$json_input"
+    else
+        jq "$filter"
+    fi
+}
+
+block_cn_ensure_inbounds_sniffing() {
+    local target_file=$1
+    [[ -f $target_file ]] || return 0
+    local tmp
+    tmp=$(mktemp "$target_file.tmp.XXXXXX") || return 1
+    if block_cn_inject_inbounds_sniffing_json <"$target_file" >"$tmp"; then
+        mv -f "$tmp" "$target_file"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+block_cn_ensure_all_nodes_sniffing() {
+    local conf_dir=${1:-$is_conf_dir}
+    [[ -d $conf_dir ]] || return 0
+    local file
+    for file in "$conf_dir"/*.json; do
+        [[ -f $file ]] || continue
+        [[ $file =~ dynamic-port-.*-link ]] && continue
+        block_cn_ensure_inbounds_sniffing "$file"
+    done
+}
+
+block_cn_load_whitelist_rules() {
+    local file=${1:-${is_core_dir:-/etc/sing-box}/.cn-whitelist.json}
+    if [[ -f $file ]] && jq -e . "$file" >/dev/null 2>&1; then
+        jq -c '
+            if type == "array" then
+                .
+            elif type == "object" then
+                [.]
+            else
+                []
+            end
+            | map(select(type == "object" and (((.domain // []) + (.domain_suffix // [])) | length > 0)))
+        ' "$file" 2>/dev/null || echo "[]"
+    else
+        echo "[]"
+    fi
+}
+
+block_cn_sync_whitelist() {
+    local core_dir=${is_core_dir:-/etc/sing-box}
+    local cache_file="$core_dir/.cn-whitelist.json"
+    local url="${BLOCK_CN_WHITELIST_URL:-https://raw.githubusercontent.com/ouones/quan/refs/heads/main/sing-box/cn-whitelist.jsonc}"
+    local tmp_download tmp_clean tmp_json
+    local download_ok=0
+
+    mkdir -p "$core_dir" 2>/dev/null || true
+    tmp_download=$(mktemp "$core_dir/.cn-whitelist.download.XXXXXX" 2>/dev/null || mktemp)
+
+    if type -P curl >/dev/null 2>&1; then
+        if curl -fsSL --connect-timeout 10 -m 30 "$url" -o "$tmp_download" 2>/dev/null; then
+            download_ok=1
+        fi
+    elif type -P wget >/dev/null 2>&1; then
+        if wget --no-check-certificate -q -T 10 -t 2 "$url" -O "$tmp_download" 2>/dev/null; then
+            download_ok=1
+        fi
+    fi
+
+    if [[ $download_ok -eq 1 && -s $tmp_download ]]; then
+        tmp_clean=$(json_strip_comments "$tmp_download" 2>/dev/null)
+        if [[ $tmp_clean ]]; then
+            tmp_json=$(jq -c '
+                if type == "object" then
+                    del(.inbound) | .action = (.action // "route") | .outbound = "direct"
+                elif type == "array" then
+                    map(if type == "object" then del(.inbound) | .action = (.action // "route") | .outbound = "direct" else empty end)
+                else
+                    empty
+                end
+            ' <<<"$tmp_clean" 2>/dev/null)
+        fi
+    fi
+
+    if [[ $tmp_json ]] && jq -e 'if type == "array" then length > 0 elif type == "object" then (((.domain // []) + (.domain_suffix // [])) | length > 0) else false end' <<<"$tmp_json" >/dev/null 2>&1; then
+        printf '%s\n' "$tmp_json" | jq . >"$tmp_download" && mv -f "$tmp_download" "$cache_file"
+        return 0
+    fi
+
+    rm -f "$tmp_download"
+
+    if [[ -f $cache_file ]] && jq -e . "$cache_file" >/dev/null 2>&1; then
+        warn "下载回国白名单失败，自动降级采用本地缓存白名单"
+        return 0
+    fi
+
+    warn "下载回国白名单失败且无本地缓存，将跳过白名单规则注入"
+    return 0
+}
+
+block_cn_enable() {
+    local core_dir=${is_core_dir:-/etc/sing-box}
+    mkdir -p "$core_dir" || {
+        err "无法创建目录: $core_dir"
+        return 1
+    }
+    touch "$core_dir/.block-cn-enabled" || {
+        err "无法创建状态文件: $core_dir/.block-cn-enabled"
+        return 1
+    }
+    block_cn_sync_whitelist
+    block_cn_ensure_all_nodes_sniffing "${is_conf_dir:-$core_dir/conf}"
+    sync_runtime_node_outbound_modes || {
+        err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
+        return 1
+    }
+    manage restart
+}
+
+block_cn_disable() {
+    local core_dir=${is_core_dir:-/etc/sing-box}
+    rm -f "$core_dir/.block-cn-enabled"
+    sync_runtime_node_outbound_modes || {
+        err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
+        return 1
+    }
+    manage restart
+}
+
+block_cn_toggle() {
+    if block_cn_is_enabled; then
+        block_cn_disable
+    else
+        block_cn_enable
+    fi
+}
+
+block_cn_menu_toggle() {
+    if block_cn_is_enabled; then
+        block_cn_disable
+        msg "\n已禁用屏蔽回国流量。\n"
+    else
+        block_cn_enable
+        msg "\n已启用屏蔽回国流量。\n"
+    fi
+}
+
+block_cn_cli() {
+    local action=${1:-toggle}
+    case $action in
+    status) ;;
+    enable | on)
+        block_cn_enable
+        ;;
+    disable | off)
+        block_cn_disable
+        ;;
+    toggle)
+        block_cn_toggle
+        ;;
+    *)
+        err "无效参数: $action (支持: status, enable, disable, toggle)"
+        return 1
+        ;;
+    esac
+    msg "屏蔽回国流量: $(block_cn_status_text)"
+}
+
 render_runtime_node_outbound_modes() {
     local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
     local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
     local -A used_proxy_tags=()
+    local block_cn_enabled=false
+    local whitelist_rules="[]"
+    local cached_whitelist="[]"
+    local core_dir=${is_core_dir:-/etc/sing-box}
+    if [[ -f $core_dir/.cn-whitelist.json ]]; then
+        cached_whitelist=$(block_cn_load_whitelist_rules "$core_dir/.cn-whitelist.json")
+    fi
+    if block_cn_is_enabled; then
+        block_cn_enabled=true
+        whitelist_rules=$cached_whitelist
+    fi
     runtime_sync_error=
     [[ -f $source_config && $output ]] || {
         runtime_sync_error="公共配置文件不存在"
@@ -1027,18 +1221,53 @@ render_runtime_node_outbound_modes() {
         }
     done
 
-    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" '
+    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson whitelist_rules "$whitelist_rules" --argjson cached_whitelist "$cached_whitelist" '
         def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
-        def is_managed_tag($tag):
+        def is_managed_outbound_tag($tag):
+            $tag == "block"
+            or ((direct_managed_tags | index($tag)) != null)
+            or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
+        def is_managed_route_tag($tag):
             ((direct_managed_tags | index($tag)) != null)
             or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
         def is_broad_direct_rule:
             .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
+        def is_managed_whitelist_rule:
+            (is_broad_direct_rule | not) and .outbound == "direct" and (
+                . as $rule |
+                (($cached_whitelist // []) | any(. == $rule))
+                or (($whitelist_rules // []) | any(. == $rule))
+            );
         def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
             {tag:"direct_v4_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv4"}},
             {tag:"direct_v4_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv4_only"}},
             {tag:"direct_v6_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv6_only"}}
+        ];
+        def managed_rule_set_tags: ["geosite-cn", "geoip-cn"];
+        def is_managed_rule_set:
+            ((.tag // "") as $t | (managed_rule_set_tags | index($t)) != null);
+        def managed_cn_rule_sets: [
+            {
+                tag: "geosite-cn",
+                type: "remote",
+                format: "binary",
+                url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+                download_detour: "direct"
+            },
+            {
+                tag: "geoip-cn",
+                type: "remote",
+                format: "binary",
+                url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+                download_detour: "direct"
+            }
+        ];
+        def is_managed_block_rule:
+            .outbound == "block" and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
+        def managed_block_rules: [
+            {ip_is_private: true, outbound: "block"},
+            {rule_set: ["geosite-cn", "geoip-cn"], outbound: "block"}
         ];
         .dns = (.dns // {})
         | if (((($direct_rules | length) + ($proxy_rules | length)) > 0) and $resolver == "local") then
@@ -1047,6 +1276,7 @@ render_runtime_node_outbound_modes() {
           else . end
         | del(.dns.strategy)
         | .route = (.route // {})
+        | .route.final = (.route.final // "direct")
         | if (.route.default_domain_resolver | type) == "object" then
             if ((.route.default_domain_resolver.server // "") | length) > 0 then
                 .route.default_domain_resolver = .route.default_domain_resolver.server
@@ -1056,19 +1286,39 @@ render_runtime_node_outbound_modes() {
           elif (.route.default_domain_resolver | type) == "string" and ((.route.default_domain_resolver // "") | length) == 0 then
             del(.route.default_domain_resolver)
           else . end
-        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_tag($tag)) | not))))
+        | if (.route | has("rule_set")) then
+            .route.rule_set = ((.route.rule_set // []) | map(select(is_managed_rule_set | not)))
+          else . end
+        | if $block_cn_enabled then
+            .route.rule_set = ((.route.rule_set // []) + managed_cn_rule_sets)
+          else
+            if (.route | has("rule_set")) and ((.route.rule_set | length) == 0) then
+                del(.route.rule_set)
+            else . end
+          end
+        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule) | not)))) as $existing_rules
+        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
         | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
-        | (.route.rules // [] | map(select((((.outbound // "") as $tag | is_managed_tag($tag)) | not)))) as $existing_rules
+        | if ($block_cn_enabled or any($existing_rules[]; .outbound == "block")) then .outbounds += [{tag:"block",type:"block"}] else . end
         | .route.rules = (
-            if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
-            else
+            if $block_cn_enabled then
                 ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
                 | if $direct_fallback == null then
-                    $proxy_rules + $existing_rules + $direct_rules
+                    $existing_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules
                   else
-                    $proxy_rules + $existing_rules[:$direct_fallback] + $direct_rules + $existing_rules[$direct_fallback:]
+                    $existing_rules[:$direct_fallback] + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
                   end
+            else
+                if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
+                else
+                    ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
+                    | if $direct_fallback == null then
+                        $proxy_rules + $existing_rules + $direct_rules
+                      else
+                        $proxy_rules + $existing_rules[:$direct_fallback] + $direct_rules + $existing_rules[$direct_fallback:]
+                      end
+                end
             end
           )
     ' "$source_config" >"$output" || {
@@ -3057,6 +3307,9 @@ create() {
                     --argjson version 5 \
                     '{inbounds:[{tag:$tag,type:"snell",listen:"::",listen_port:$port,version:$version,psk:$psk,obfs_mode:$obfs_mode}]}')
             fi
+            if block_cn_is_enabled; then
+                is_new_json=$(block_cn_inject_inbounds_sniffing_json "$is_new_json")
+            fi
             is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || err "无法创建 Snell 临时配置文件."
             printf '%s\n' "$is_new_json" >"$is_snell_tmp_file"
             if ! "$is_core_bin" check -c "$is_snell_tmp_file" &>/dev/null; then
@@ -3065,6 +3318,9 @@ create() {
             fi
         else
             is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
+            if block_cn_is_enabled; then
+                is_new_json=$(block_cn_inject_inbounds_sniffing_json "$is_new_json")
+            fi
         fi
         [[ $is_test_json ]] && {
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
@@ -3316,7 +3572,7 @@ change() {
             [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
-        [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
+    [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
         if [[ $is_caddy && $host ]]; then
             net=$is_old_net
             is_https_port=$is_new_port
@@ -3332,7 +3588,7 @@ change() {
         # new host
         is_new_host=$3
         [[ ! $host ]] && err "($is_config_file) 不支持更改域名."
-        [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
+    [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
         old_host=$host # del old host
         add $net $is_new_host
         ;;
@@ -3341,7 +3597,7 @@ change() {
         is_new_path=$3
         [[ ! $path ]] && err "($is_config_file) 不支持更改路径."
         [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
-        [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
+    [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
         add $net auto auto $is_new_path
         ;;
     4)
@@ -3355,7 +3611,7 @@ change() {
         else
             err "($is_config_file) 不支持更改密码."
         fi
-        [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
+    [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
         password=$is_new_pass
         ss_password=$is_new_pass
         is_socks_pass=$is_new_pass
@@ -3366,7 +3622,7 @@ change() {
         is_new_uuid=$3
         [[ ! $uuid ]] && err "($is_config_file) 不支持更改 UUID."
         [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
-        [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
+    [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
         add $net auto $is_new_uuid
         ;;
     6)
@@ -3389,7 +3645,7 @@ change() {
         # new remote addr
         is_new_door_addr=$3
         [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标地址."
-        [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
+    [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
         door_addr=$is_new_door_addr
         add $net
         ;;
@@ -3398,7 +3654,7 @@ change() {
         is_new_door_port=$3
         [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标端口."
         [[ ! $is_new_door_port ]] && {
-            ask string door_port "请输入新的目标端口 (1-65535):"
+        ask string door_port "请输入新的目标端口 (1-65535):"
             is_new_door_port=$door_port
         }
         add $net auto auto $is_new_door_port
@@ -3468,13 +3724,13 @@ change() {
     12)
         # new socks user
         [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
-        ask string is_socks_user "请输入新用户名:"
+    ask string is_socks_user "请输入新用户名:"
         add $net
         ;;
     13)
         # update share link node name (does not rename json file)
         is_new_name=$3
-        [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
+    [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
         is_new_name=${is_new_name%.json}
         [[ ! $is_new_name ]] && err "节点名称不能为空."
         is_old_name=$(node_name_for_link "$is_config_file")
@@ -3501,7 +3757,7 @@ change() {
         [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell PSK."
         is_new_snell_psk=$3
         [[ $is_auto ]] && is_new_snell_psk=$(get_snell_psk)
-        [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
+    [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
         if [[ $snell_version == 6 ]]; then
             ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"
         fi
@@ -3514,7 +3770,7 @@ change() {
         is_new_snell_version=$3
         [[ $is_auto ]] && is_new_snell_version=6
         [[ ! $is_new_snell_version ]] && {
-            ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
+    ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
         }
         snell_version_valid "$is_new_snell_version" || err "Snell 版本只支持 5 或 6. $is_err_tips"
         if [[ $is_new_snell_version == 6 && $snell_version != 6 ]]; then
@@ -4138,7 +4394,7 @@ add() {
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
         echo -ne "输入节点名称 (回车自动生成 8 位名称):"
-        read is_custom_node_name
+        read -r is_custom_node_name
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
@@ -4488,20 +4744,22 @@ info() {
         is_insecure=1
         is_can_change=(0 1 4 13 14 15 16)
         is_info_show=(0 1 2 10 4 8 20)
-        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&allowInsecure=1#$is_node_name"
+        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$is_node_name"
         is_info_str=($is_protocol $is_addr $port $password tcp tls true)
         ;;
     hy*)
         is_can_change=(0 1 4 12 13 14 15)
         is_info_show=(0 1 2 10 8 9 20)
-        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $password tls h3 true)
+        # fix xray core for client use.
+        is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
+        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$is_node_name"
+        is_info_str=($is_protocol $is_addr $port $password tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5 13 14 15 16)
         is_info_show=(0 1 2 3 10 8 9 20 21)
-        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&allow_insecure=1&congestion_control=bbr#$is_node_name"
+        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$is_node_name"
         is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
         ;;
     reality)
@@ -4528,7 +4786,7 @@ info() {
             is_insecure=1
             is_info_show=(0 1 2 10 8 20)
             is_info_str=($is_protocol $is_addr $port $password tls true)
-            is_url="anytls://$password@$is_addr:$port?allowInsecure=1#$is_node_name"
+            is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#$is_node_name"
         fi
         ;;
     snell)
@@ -4743,7 +5001,6 @@ update() {
     [[ $is_update_name != 'sh' ]] && manage restart $is_update_name &
 }
 
-# Interactive menus are grouped by the task users want to complete.
 menu_pause() {
     printf '\n按回车返回菜单。\n'
     read -r
@@ -4863,7 +5120,7 @@ update_menu() {
 
 system_tools_menu() {
     while :; do
-        is_tmp_list=("启用 BBR" "DNS" "日志上限" "重装脚本" "返回")
+        is_tmp_list=("启用 BBR" "DNS" "日志上限" "屏蔽回国流量 ($(block_cn_status_text))" "重装脚本" "返回")
         ask list is_system_tool null "\n请选择系统设置:\n"
         case $REPLY in
         1)
@@ -4881,10 +5138,14 @@ system_tools_menu() {
             menu_pause
             ;;
         4)
+            block_cn_menu_toggle
+            menu_pause
+            ;;
+        5)
             get reinstall
             menu_pause
             ;;
-        5) return ;;
+        6) return ;;
         esac
     done
 }
@@ -4972,15 +5233,23 @@ relay_add() {
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
     tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建中转临时配置文件."
 
-    jq -n \
+    local relay_inbound
+    relay_inbound=$(jq -n \
         --arg tag "relay-${local_port}.json" \
         --arg addr "$remote_addr" \
         --argjson local_port "$local_port" \
         --argjson remote_port "$remote_port" \
-        '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}' > "$tmp_file" || {
+        '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
         rm -f "$tmp_file"
         err "生成中转配置 JSON 失败."
     }
+    if type -t block_cn_is_enabled >/dev/null 2>&1 && block_cn_is_enabled; then
+        relay_inbound=$(block_cn_inject_inbounds_sniffing_json "$relay_inbound") || {
+            rm -f "$tmp_file"
+            err "注入中转入站嗅探配置失败."
+        }
+    fi
+    printf '%s\n' "$relay_inbound" > "$tmp_file"
 
     if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
         rm -f "$tmp_file"
@@ -5177,6 +5446,9 @@ main() {
     bbr)
         load bbr.sh
         _try_enable_bbr
+        ;;
+    block-cn)
+        block_cn_cli "${@:2}"
         ;;
     c | config | change)
         change ${@:2}
