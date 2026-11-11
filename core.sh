@@ -933,9 +933,9 @@ block_cn_status_text() {
     fi
 }
 
-block_cn_inject_inbounds_sniffing_json() {
+block_cn_strip_legacy_inbound_fields_json() {
     local json_input=${1:-}
-    local filter='if .inbounds then .inbounds |= map(if type == "object" then .sniff = true | .sniff_override_destination = true else . end) else . end'
+    local filter='if .inbounds then .inbounds |= map(if type == "object" then del(.sniff, .sniff_override_destination, .sniff_timeout) else . end) else . end'
     if [[ -n $json_input ]]; then
         jq "$filter" <<<"$json_input"
     else
@@ -943,27 +943,30 @@ block_cn_inject_inbounds_sniffing_json() {
     fi
 }
 
-block_cn_ensure_inbounds_sniffing() {
+block_cn_clean_legacy_inbounds() {
     local target_file=$1
     [[ -f $target_file ]] || return 0
-    local tmp
-    tmp=$(mktemp "$target_file.tmp.XXXXXX") || return 1
-    if block_cn_inject_inbounds_sniffing_json <"$target_file" >"$tmp"; then
-        mv -f "$tmp" "$target_file"
-    else
-        rm -f "$tmp"
-        return 1
+    if jq -e '(.inbounds // []) | any(type == "object" and (.sniff != null or .sniff_override_destination != null or .sniff_timeout != null))' "$target_file" >/dev/null 2>&1; then
+        local tmp
+        tmp=$(mktemp "$target_file.tmp.XXXXXX") || return 1
+        if block_cn_strip_legacy_inbound_fields_json <"$target_file" >"$tmp"; then
+            mv -f "$tmp" "$target_file"
+        else
+            rm -f "$tmp"
+            return 1
+        fi
     fi
+    return 0
 }
 
-block_cn_ensure_all_nodes_sniffing() {
+block_cn_clean_all_legacy_inbounds() {
     local conf_dir=${1:-$is_conf_dir}
     [[ -d $conf_dir ]] || return 0
     local file
     for file in "$conf_dir"/*.json; do
         [[ -f $file ]] || continue
         [[ $file =~ dynamic-port-.*-link ]] && continue
-        block_cn_ensure_inbounds_sniffing "$file"
+        block_cn_clean_legacy_inbounds "$file"
     done
 }
 
@@ -1047,8 +1050,9 @@ block_cn_enable() {
         return 1
     }
     block_cn_sync_whitelist
-    block_cn_ensure_all_nodes_sniffing "${is_conf_dir:-$core_dir/conf}"
-    sync_runtime_node_outbound_modes || {
+    block_cn_clean_all_legacy_inbounds "${is_conf_dir:-$core_dir/conf}"
+    sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "${is_conf_dir:-$core_dir/conf}" 1 || {
+        rm -f "$core_dir/.block-cn-enabled"
         err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
         return 1
     }
@@ -1058,7 +1062,7 @@ block_cn_enable() {
 block_cn_disable() {
     local core_dir=${is_core_dir:-/etc/sing-box}
     rm -f "$core_dir/.block-cn-enabled"
-    sync_runtime_node_outbound_modes || {
+    sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "${is_conf_dir:-$core_dir/conf}" 1 || {
         err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
         return 1
     }
@@ -1269,6 +1273,11 @@ render_runtime_node_outbound_modes() {
             {ip_is_private: true, outbound: "block"},
             {rule_set: ["geosite-cn", "geoip-cn"], outbound: "block"}
         ];
+        def is_managed_sniff_rule:
+            .action == "sniff" and ((keys - ["action", "timeout"]) | length) == 0;
+        def managed_sniff_rules: [
+            {action: "sniff"}
+        ];
         .dns = (.dns // {})
         | if (((($direct_rules | length) + ($proxy_rules | length)) > 0) and $resolver == "local") then
             .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end)
@@ -1296,7 +1305,7 @@ render_runtime_node_outbound_modes() {
                 del(.route.rule_set)
             else . end
           end
-        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule) | not)))) as $existing_rules
+        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule or is_managed_sniff_rule) | not)))) as $existing_rules
         | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
         | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
@@ -1304,10 +1313,11 @@ render_runtime_node_outbound_modes() {
         | .route.rules = (
             if $block_cn_enabled then
                 ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
+                | (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
                 | if $direct_fallback == null then
-                    $existing_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules
+                    $sniff_rules + $existing_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules
                   else
-                    $existing_rules[:$direct_fallback] + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
+                    $sniff_rules + $existing_rules[:$direct_fallback] + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
                   end
             else
                 if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
@@ -3307,9 +3317,6 @@ create() {
                     --argjson version 5 \
                     '{inbounds:[{tag:$tag,type:"snell",listen:"::",listen_port:$port,version:$version,psk:$psk,obfs_mode:$obfs_mode}]}')
             fi
-            if block_cn_is_enabled; then
-                is_new_json=$(block_cn_inject_inbounds_sniffing_json "$is_new_json")
-            fi
             is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || err "无法创建 Snell 临时配置文件."
             printf '%s\n' "$is_new_json" >"$is_snell_tmp_file"
             if ! "$is_core_bin" check -c "$is_snell_tmp_file" &>/dev/null; then
@@ -3318,9 +3325,6 @@ create() {
             fi
         else
             is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
-            if block_cn_is_enabled; then
-                is_new_json=$(block_cn_inject_inbounds_sniffing_json "$is_new_json")
-            fi
         fi
         [[ $is_test_json ]] && {
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
@@ -3372,7 +3376,10 @@ create() {
         [[ $is_config_name ]] && is_config_file=$is_config_name
         [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
         if [[ ! $node_migration_applied ]]; then
-            sync_runtime_node_outbound_modes || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1 || {
+                [[ ! $is_change ]] && rm -f "$is_json_file"
+                err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            }
             if [[ $is_new_install ]]; then
                 # config.json
                 create config.json
@@ -4998,6 +5005,17 @@ update() {
     download $is_update_name $is_new_ver
     msg "更新成功, 当前 $is_show_name 版本: $(_green $is_new_ver)\n"
     msg "$(_green 请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver)\n"
+    if [[ $is_update_name == 'core' || $is_update_name == 'sh' ]]; then
+        block_cn_clean_all_legacy_inbounds "$is_conf_dir"
+        if [[ -f $is_config_json ]]; then
+            if ! sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1; then
+                if [[ $is_update_name == 'core' ]]; then
+                    err "内核更新后配置校验发现异常，已阻断内核重启以防服务故障。请检查配置或运行: sb fix-config.json"
+                    return 1
+                fi
+            fi
+        fi
+    fi
     [[ $is_update_name != 'sh' ]] && manage restart $is_update_name &
 }
 
@@ -5243,12 +5261,6 @@ relay_add() {
         rm -f "$tmp_file"
         err "生成中转配置 JSON 失败."
     }
-    if type -t block_cn_is_enabled >/dev/null 2>&1 && block_cn_is_enabled; then
-        relay_inbound=$(block_cn_inject_inbounds_sniffing_json "$relay_inbound") || {
-            rm -f "$tmp_file"
-            err "注入中转入站嗅探配置失败."
-        }
-    fi
     printf '%s\n' "$relay_inbound" > "$tmp_file"
 
     if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
@@ -5516,6 +5528,7 @@ main() {
         warn "如果需要复制; 请把 *uuid, *password, *host, *key 的值改写, 以避免泄露."
         ;;
     fix-config.json)
+        block_cn_clean_all_legacy_inbounds "$is_conf_dir"
         create config.json
         ;;
     fix-caddyfile)

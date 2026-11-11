@@ -20,7 +20,7 @@ Provide a toggleable protection feature in one-singbox terminal management to bl
    - Outbound: Adds `{ "tag": "block", "type": "block" }` outbound for silent drops.
    - Rule-sets: Remote binary rule-sets `geosite-cn` and `geoip-cn` (`download_detour: "direct"`).
    - SSRF Protection: Adds `{ "ip_is_private": true, "outbound": "block" }` together under the same toggle.
-   - Inbound Sniffing: Ensures `sniff: true` and `sniff_override_destination: true` for all inbounds. Retains sniff enabled even if feature is later disabled.
+   - Inbound Sniffing: Uses route action `{ "action": "sniff" }` for protocol sniffing in sing-box 1.13+. Automatically cleans and migrates legacy inbound sniffing fields (`sniff`, `sniff_override_destination`) from node configuration files.
 
 3. **Whitelist Bypassing:**
    - Source: Audited whitelist JSONC from `https://raw.githubusercontent.com/ouones/quan/refs/heads/main/sing-box/cn-whitelist.jsonc`.
@@ -28,12 +28,13 @@ Provide a toggleable protection feature in one-singbox terminal management to bl
    - Transformations: Strip comments, remove `inbound` constraint (applies globally), route to `direct`.
 
 4. **Rule Evaluation Order (First-Match):**
-   1. User-defined custom rules (`existing_rules`)
-   2. Whitelist bypass rules (`domain` / `domain_suffix` -> `direct`)
-   3. Private IP block (`ip_is_private: true` -> `block`)
-   4. CN traffic block (`rule_set: ["geosite-cn", "geoip-cn"]` -> `block`)
-   5. Managed node routes (`proxy_rules` + `direct_rules`)
-   6. Default final (`final: "direct"`)
+   1. Route action sniffing (`action: "sniff"`)
+   2. User-defined custom rules (`existing_rules`)
+   3. Whitelist bypass rules (`domain` / `domain_suffix` -> `direct`)
+   4. Private IP block (`ip_is_private: true` -> `block`)
+   5. CN traffic block (`rule_set: ["geosite-cn", "geoip-cn"]` -> `block`)
+   6. Managed node routes (`proxy_rules` + `direct_rules`)
+   7. Default final (`final: "direct"`)
 
 5. **State Persistence:**
    - Flag file: `/etc/sing-box/.block-cn-enabled`.

@@ -35,7 +35,11 @@ if [[ $1 == check ]]; then
     if [[ $conf_dir ]]; then
         shopt -s nullglob
         for file in "$conf_dir"/*.json; do
-            jq -e . "$file" >/dev/null 2>&1 || exit 5
+            jq -e 'type == "object" and ((.inbounds // []) | type == "array")' "$file" >/dev/null 2>&1 || exit 5
+            if jq -e '(.inbounds // []) | any(type == "object" and (.sniff != null or .sniff_override_destination != null or .sniff_timeout != null))' "$file" >/dev/null 2>&1; then
+                printf 'FATAL[0000] decode config at %s: inbounds[0]: legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0\n' "$file" >&2
+                exit 1
+            fi
         done
     fi
     exit 0
@@ -287,26 +291,28 @@ jq -e '.route.rule_set | any(.tag == "geoip-cn" and .type == "remote" and .forma
 
 # C. route.rules 注入与顺序
 # 预期顺序：
-# 0: resolve
-# 1: hijack-dns
-# 2: cn-whitelist bypass (domain/domain_suffix -> direct)
-# 3: private ip block (ip_is_private: true -> block)
-# 4: cn rule_set block (rule_set: ["geosite-cn", "geoip-cn"] -> block)
-# 5: proxy_rules (node-proxy.json -> managed_node_ss_node-proxy_json)
-# 6: direct_rules (node-one.json -> direct_v4_pref)
-# 7: broad direct fallback (outbound: direct)
+# 0: sniff (route action)
+# 1: resolve
+# 2: hijack-dns
+# 3: cn-whitelist bypass (domain/domain_suffix -> direct)
+# 4: private ip block (ip_is_private: true -> block)
+# 5: cn rule_set block (rule_set: ["geosite-cn", "geoip-cn"] -> block)
+# 6: proxy_rules (node-proxy.json -> managed_node_ss_node-proxy_json)
+# 7: direct_rules (node-one.json -> direct_v4_pref)
+# 8: broad direct fallback (outbound: direct)
 rules_count=$(jq '.route.rules | length' "$is_config_json")
-[[ $rules_count -ge 8 ]] || fail "rules count should be at least 8, got $rules_count: $(jq -c '.route.rules' "$is_config_json")"
+[[ $rules_count -ge 9 ]] || fail "rules count should be at least 9, got $rules_count: $(jq -c '.route.rules' "$is_config_json")"
 
-jq -e '.route.rules[0].action == "resolve"' "$is_config_json" >/dev/null || fail "rule 0 should be custom resolve"
-jq -e '.route.rules[1].action == "hijack-dns"' "$is_config_json" >/dev/null || fail "rule 1 should be custom hijack-dns"
-jq -e '.route.rules[2].action == "route" and .route.rules[2].outbound == "direct" and (.route.rules[2].domain | length > 0) and (.route.rules[2].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 2 should be cn-whitelist bypass"
-jq -e '.route.rules[2].inbound == null' "$is_config_json" >/dev/null || fail "whitelist rule must not contain inbound restriction"
-jq -e '.route.rules[3].ip_is_private == true and .route.rules[3].outbound == "block"' "$is_config_json" >/dev/null || fail "rule 3 should be private IP block"
-jq -e '.route.rules[4].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[4].outbound == "block"' "$is_config_json" >/dev/null || fail "rule 4 should be CN rule_set block"
-jq -e '.route.rules[5].inbound == ["node-proxy.json"] and .route.rules[5].outbound == "managed_node_ss_node-proxy_json"' "$is_config_json" >/dev/null || fail "rule 5 should be node proxy rule"
-jq -e '.route.rules[6].inbound == ["node-one.json"] and .route.rules[6].outbound == "direct_v4_pref"' "$is_config_json" >/dev/null || fail "rule 6 should be node direct rule"
-jq -e '.route.rules[7].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 7 should be fallback direct rule"
+jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "rule 0 should be route action sniff"
+jq -e '.route.rules[1].action == "resolve"' "$is_config_json" >/dev/null || fail "rule 1 should be custom resolve"
+jq -e '.route.rules[2].action == "hijack-dns"' "$is_config_json" >/dev/null || fail "rule 2 should be custom hijack-dns"
+jq -e '.route.rules[3].action == "route" and .route.rules[3].outbound == "direct" and (.route.rules[3].domain | length > 0) and (.route.rules[3].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 3 should be cn-whitelist bypass"
+jq -e '.route.rules[3].inbound == null' "$is_config_json" >/dev/null || fail "whitelist rule must not contain inbound restriction"
+jq -e '.route.rules[4].ip_is_private == true and .route.rules[4].outbound == "block"' "$is_config_json" >/dev/null || fail "rule 4 should be private IP block"
+jq -e '.route.rules[5].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[5].outbound == "block"' "$is_config_json" >/dev/null || fail "rule 5 should be CN rule_set block"
+jq -e '.route.rules[6].inbound == ["node-proxy.json"] and .route.rules[6].outbound == "managed_node_ss_node-proxy_json"' "$is_config_json" >/dev/null || fail "rule 6 should be node proxy rule"
+jq -e '.route.rules[7].inbound == ["node-one.json"] and .route.rules[7].outbound == "direct_v4_pref"' "$is_config_json" >/dev/null || fail "rule 7 should be node direct rule"
+jq -e '.route.rules[8].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 8 should be fallback direct rule"
 
 # D. 幂等性与防重复堆叠测试
 sync_runtime_node_outbound_modes || fail "re-syncing failed"
@@ -316,9 +322,15 @@ sync_runtime_node_outbound_modes || fail "re-syncing failed"
 [[ $(jq '[.route.rules[] | select(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0))] | length' "$is_config_json") == 1 ]] || fail "whitelist rule must not duplicate"
 
 # 6. 入站嗅探 (sniff) 检查
-# 现有节点在 enable 之后必须自动拥有 sniff: true 和 sniff_override_destination: true
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-one.json" >/dev/null || fail "node-one.json inbound sniffing should be enabled"
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-proxy.json" >/dev/null || fail "node-proxy.json inbound sniffing should be enabled"
+# 在 sing-box 1.13+ 中，嗅探通过路由规则 {"action":"sniff"} 实现，入站配置不应包含 legacy 嗅探字段
+jq -e '.route.rules | any(.action == "sniff")' "$is_config_json" >/dev/null || fail "route action sniff must be enabled"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-one.json" >/dev/null || fail "node-one.json must NOT contain legacy inbound sniff fields"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-proxy.json" >/dev/null || fail "node-proxy.json must NOT contain legacy inbound sniff fields"
+
+# 存量遗留字段自动清洗迁移测试
+jq '.inbounds[0].sniff = true | .inbounds[0].sniff_override_destination = true' "$is_conf_dir/node-one.json" >"$is_conf_dir/node-one.json.tmp" && mv -f "$is_conf_dir/node-one.json.tmp" "$is_conf_dir/node-one.json"
+block_cn_clean_all_legacy_inbounds "$is_conf_dir" || fail "block_cn_clean_all_legacy_inbounds failed"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-one.json" >/dev/null || fail "legacy inbound fields must be cleaned up by migration"
 
 # 7. CLI disable / off 测试
 reset_service_log
@@ -335,9 +347,10 @@ jq -e '.route.rules | any(.action == "route" and .outbound == "direct" and (.dom
 [[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist cache file should be preserved on disk after disable"
 jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null || fail "custom outbounds must be preserved after disable"
 
-# 禁用后不回滚嗅探设置
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-one.json" >/dev/null || fail "inbound sniffing must NOT be reverted on disable"
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-proxy.json" >/dev/null || fail "inbound sniffing must NOT be reverted on disable"
+# 禁用后移除受管嗅探规则，入站配置依然保持干净
+jq -e '(.route.rules // []) | any(.action == "sniff") | not' "$is_config_json" >/dev/null || fail "sniff rule should be removed after disable"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-one.json" >/dev/null || fail "node-one.json must remain clean without legacy fields"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-proxy.json" >/dev/null || fail "node-proxy.json must remain clean without legacy fields"
 
 # 8. CLI toggle 测试
 reset_service_log
@@ -365,9 +378,9 @@ cat >"$is_conf_dir/node-new.json" <<'EOF'
   ]
 }
 EOF
-# 验证 block_cn_ensure_inbounds_sniffing 作用于新节点
-block_cn_ensure_inbounds_sniffing "$is_conf_dir/node-new.json"
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-new.json" >/dev/null || fail "new node must have sniff enabled"
+# 验证 block_cn_clean_legacy_inbounds 作用于新节点（确保入站无 legacy sniff 字段）
+block_cn_clean_legacy_inbounds "$is_conf_dir/node-new.json"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-new.json" >/dev/null || fail "new node must NOT have legacy sniff fields"
 
 # 10. 保留自定义 rule_set 测试（用户自定义 remote/local 规则集不被受管逻辑破坏）
 jq '.route.rule_set += [{"tag":"custom-ads","type":"remote","format":"binary","url":"https://example.com/ads.srs","download_detour":"direct"}]' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
@@ -387,7 +400,8 @@ create config.json >/dev/null 2>&1
 jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "create config.json should retain block outbound when enabled"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "create config.json should retain geosite-cn when enabled"
 jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "create config.json should retain private IP block rule when enabled"
-jq -e '.route.rules[0].action == "route" and .route.rules[0].outbound == "direct" and (.route.rules[0].domain | length > 0)' "$is_config_json" >/dev/null || fail "create config.json should retain whitelist bypass when enabled"
+jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "create config.json should retain route action sniff when enabled"
+jq -e '.route.rules[1].action == "route" and .route.rules[1].outbound == "direct" and (.route.rules[1].domain | length > 0)' "$is_config_json" >/dev/null || fail "create config.json should retain whitelist bypass when enabled"
 
 # 12. 白名单独立解析、注释剥离与规范化持久化测试
 [[ $(type -t block_cn_sync_whitelist) == function ]] || fail "block_cn_sync_whitelist function must exist"
@@ -441,8 +455,9 @@ jq '.route.rules = [{action:"route",domain:["user-custom.direct.lan"],outbound:"
 # 重新拉取标准白名单并同步
 block_cn_sync_whitelist || fail "re-syncing whitelist failed"
 sync_runtime_node_outbound_modes || fail "sync with user custom direct rule failed"
-# 验证用户自定义直连规则仍然位于最前 (First-Match)
-jq -e '.route.rules[0].domain == ["user-custom.direct.lan"] and .route.rules[0].outbound == "direct"' "$is_config_json" >/dev/null || fail "user custom direct rule must remain first"
+# 验证用户自定义直连规则位于嗅探之后、白名单之前 (First-Match)
+jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "rule 0 should be action: sniff"
+jq -e '.route.rules[1].domain == ["user-custom.direct.lan"] and .route.rules[1].outbound == "direct"' "$is_config_json" >/dev/null || fail "user custom direct rule must remain first route rule"
 # 验证白名单规则紧随用户自定义规则之后且位于阻断规则之前
 jq -e '
   ([.route.rules[] | .domain // [] | any(. == "user-custom.direct.lan")] | index(true))
@@ -520,9 +535,9 @@ cat >"$is_conf_dir/node-lifecycle.json" <<'EOF'
 EOF
 # 为新节点注入元数据
 jq -n '{node_name:"lifecycle-node",outbound_mode:"V6优先"}' >"$is_conf_dir/.quan-meta/node-lifecycle.json.meta.json"
-# 确保入站嗅探配置
-block_cn_ensure_inbounds_sniffing "$is_conf_dir/node-lifecycle.json"
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-lifecycle.json" >/dev/null || fail "lifecycle node inbound must have sniffing"
+# 确保入站嗅探配置（1.13+ 入站不包含旧版 sniff 字段）
+block_cn_clean_legacy_inbounds "$is_conf_dir/node-lifecycle.json"
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-lifecycle.json" >/dev/null || fail "lifecycle node inbound must not have legacy sniff fields"
 
 # 触发同步
 sync_runtime_node_outbound_modes || fail "sync_runtime_node_outbound_modes failed after adding node"
@@ -547,8 +562,8 @@ jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.co
 # 17.3 节点替换/重命名生命周期联动 (apply_node_config_lifecycle replace)
 node_lifecycle_renamed_json=$(jq '.inbounds[0].tag = "node-lifecycle-renamed.json" | .inbounds[0].listen_port = 56789' "$is_conf_dir/node-lifecycle.json")
 apply_node_config_lifecycle replace "node-lifecycle.json" "node-lifecycle-renamed.json" "$node_lifecycle_renamed_json" || fail "apply_node_config_lifecycle replace failed"
-# 断言：重命名后新配置文件入站嗅探保留
-jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-lifecycle-renamed.json" >/dev/null || fail "renamed node must retain sniffing"
+# 断言：重命名后新配置文件入站不含 legacy 字段
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-lifecycle-renamed.json" >/dev/null || fail "renamed node must not have legacy sniffing fields"
 # 断言：运行时配置中 block-cn 规则无损
 jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after renaming node"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after renaming node"
@@ -583,23 +598,23 @@ jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json"
 main block-cn on 2>&1 >/dev/null
 jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must survive re-enabling"
 
-# 18.2 中转节点入站嗅探配置注入与扫描断言
-# 场景 A: 在 block-cn 启用状态下新增中转节点，入站应包含 sniff 配置
+# 18.2 中转节点入站嗅探配置与清理断言
+# 场景 A: 在 block-cn 启用状态下新增中转节点，入站不应包含 legacy sniff 配置
 main relay add 10088 198.51.100.1 20088 >/dev/null 2>&1 || fail "relay add 10088 failed"
 jq -e '
   .inbounds[0].tag == "relay-10088.json"
-  and .inbounds[0].sniff == true
-  and .inbounds[0].sniff_override_destination == true
-' "$is_conf_dir/relay-10088.json" >/dev/null || fail "new relay node inbound must have sniffing enabled when block-cn is on"
+  and .inbounds[0].sniff == null
+  and .inbounds[0].sniff_override_destination == null
+' "$is_conf_dir/relay-10088.json" >/dev/null || fail "new relay node inbound must not have legacy sniffing fields"
 
-# 场景 B: 模拟之前存在未配置嗅探的中转节点，启用时应被 block_cn_ensure_all_nodes_sniffing 自动修复
-jq -n '{inbounds:[{tag:"relay-10089.json",type:"direct",listen:"::",listen_port:10089,override_address:"198.51.100.2",override_port:20089}]}' >"$is_conf_dir/relay-10089.json"
-block_cn_ensure_all_nodes_sniffing "$is_conf_dir" || fail "block_cn_ensure_all_nodes_sniffing failed"
+# 场景 B: 模拟之前存在包含旧版嗅探字段的中转节点，启用时应被 block_cn_clean_all_legacy_inbounds 自动清理迁移
+jq -n '{inbounds:[{tag:"relay-10089.json",type:"direct",listen:"::",listen_port:10089,override_address:"198.51.100.2",override_port:20089,sniff:true,sniff_override_destination:true}]}' >"$is_conf_dir/relay-10089.json"
+block_cn_clean_all_legacy_inbounds "$is_conf_dir" || fail "block_cn_clean_all_legacy_inbounds failed"
 jq -e '
   .inbounds[0].tag == "relay-10089.json"
-  and .inbounds[0].sniff == true
-  and .inbounds[0].sniff_override_destination == true
-' "$is_conf_dir/relay-10089.json" >/dev/null || fail "existing relay node must be updated with sniffing"
+  and .inbounds[0].sniff == null
+  and .inbounds[0].sniff_override_destination == null
+' "$is_conf_dir/relay-10089.json" >/dev/null || fail "existing relay node legacy sniffing must be cleaned"
 rm -f "$is_conf_dir/relay-10088.json" "$is_conf_dir/relay-10089.json"
 
 # 18.3 默认 final 兜底路由断言
@@ -619,6 +634,47 @@ jq -e '.route.final == "direct"' "$is_config_json" >/dev/null || fail "route.fin
 if grep -E '(cached-marker|cached-suffix)' "$CORE_FILE" >/dev/null 2>&1; then
   fail "production file $CORE_FILE must not leak mock test domains"
 fi
+
+# 19. Spec 审查回归测试 (Issue #75)
+# 19.1 update core 校验失败必须阻断重启 (Seam 1)
+download() { :; }
+cat >"$is_conf_dir/invalid-broken.json" <<'EOF'
+{ "inbounds": "invalid_array_expected" }
+EOF
+reset_service_log
+restart_before=$(restart_count)
+update_fail_out=$(update core 1.15.0 2>&1 || true)
+restart_after=$(restart_count)
+rm -f "$is_conf_dir/invalid-broken.json"
+[[ $restart_after -eq $restart_before ]] || fail "update core must NOT restart service when config validation fails: $update_fail_out"
+
+# 19.2 全局自愈式一次性迁移 (Seam 2)
+cat >"$is_conf_dir/unmigrated-node.json" <<'EOF'
+{
+  "inbounds": [
+    {
+      "tag": "unmigrated-node.json",
+      "type": "shadowsocks",
+      "listen": "::",
+      "listen_port": 39999,
+      "method": "aes-128-gcm",
+      "password": "pass",
+      "sniff": true,
+      "sniff_override_destination": true
+    }
+  ]
+}
+EOF
+update sh 1.53 >/dev/null 2>&1 || true
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/unmigrated-node.json" >/dev/null || fail "update sh must auto-migrate legacy inbound sniff fields"
+rm -f "$is_conf_dir/unmigrated-node.json"
+
+# 20. Standards 审查回归测试：验证废弃旧别名退役
+for fn in block_cn_inject_inbounds_sniffing_json block_cn_ensure_inbounds_sniffing block_cn_ensure_all_nodes_sniffing; do
+  if declare -F "$fn" >/dev/null 2>&1; then
+    fail "deprecated legacy alias $fn must be retired"
+  fi
+done
 
 # 清理测试
 main block-cn off 2>&1 >/dev/null
