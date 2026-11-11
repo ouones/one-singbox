@@ -1107,7 +1107,7 @@ block_cn_cli() {
 
 render_runtime_node_outbound_modes() {
     local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
-    local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
+    local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server node_whitelist
     local -A used_proxy_tags=()
     local block_cn_enabled=false
     local whitelist_rules="[]"
@@ -1118,7 +1118,6 @@ render_runtime_node_outbound_modes() {
     fi
     if block_cn_is_enabled; then
         block_cn_enabled=true
-        whitelist_rules=$cached_whitelist
     fi
     runtime_sync_error=
     [[ -f $source_config && $output ]] || {
@@ -1170,6 +1169,24 @@ render_runtime_node_outbound_modes() {
                 continue
             fi
             managed_inbounds=$(jq -c --argjson tags "$tags" '. + $tags' <<<"$managed_inbounds")
+            if [[ $block_cn_enabled == true ]] && [[ $(jq -r 'length' <<<"$cached_whitelist") -gt 0 ]]; then
+                node_whitelist=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '
+                    map(
+                        if type == "object" then
+                            . + {inbound: $inbound, action: (.action // "route"), outbound: $outbound}
+                        else
+                            empty
+                        end
+                    )
+                ' <<<"$cached_whitelist") || {
+                    runtime_sync_error="生成直连白名单规则失败: $cfg"
+                    return 1
+                }
+                whitelist_rules=$(jq -c --argjson rules "$node_whitelist" '. + $rules' <<<"$whitelist_rules") || {
+                    runtime_sync_error="合并直连白名单规则失败: $cfg"
+                    return 1
+                }
+            fi
             direct_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$direct_rules") || {
                 runtime_sync_error="生成直连路由失败: $cfg"
                 return 1
@@ -1228,6 +1245,24 @@ render_runtime_node_outbound_modes() {
             runtime_sync_error="生成代理路由失败: $cfg"
             return 1
         }
+        if [[ $block_cn_enabled == true ]] && [[ $(jq -r 'length' <<<"$cached_whitelist") -gt 0 ]]; then
+            node_whitelist=$(jq -c --argjson inbound "$tags" --arg outbound "$tag" '
+                map(
+                    if type == "object" then
+                        . + {inbound: $inbound, action: (.action // "route"), outbound: $outbound}
+                    else
+                        empty
+                    end
+                )
+            ' <<<"$cached_whitelist") || {
+                runtime_sync_error="生成代理白名单规则失败: $cfg"
+                return 1
+            }
+            whitelist_rules=$(jq -c --argjson rules "$node_whitelist" '. + $rules' <<<"$whitelist_rules") || {
+                runtime_sync_error="合并代理白名单规则失败: $cfg"
+                return 1
+            }
+        fi
     done
     managed_inbounds=$(jq -c 'unique' <<<"$managed_inbounds")
 
@@ -1243,10 +1278,18 @@ render_runtime_node_outbound_modes() {
         def is_broad_direct_rule:
             .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
         def is_managed_whitelist_rule:
-            (is_broad_direct_rule | not) and .outbound == "direct" and (
+            (is_broad_direct_rule | not) and (
                 . as $rule |
-                (($cached_whitelist // []) | any(. == $rule))
-                or (($whitelist_rules // []) | any(. == $rule))
+                (
+                    (($cached_whitelist // []) | any(
+                        . as $cw |
+                        ($cw.domain != null and $rule.domain == $cw.domain)
+                        or ($cw.domain_suffix != null and $rule.domain_suffix == $cw.domain_suffix)
+                    ))
+                    or (
+                        ($rule.domain // []) | any(. == "connectivitycheck.gstatic.com" or . == "www.gstatic.com")
+                    )
+                )
             );
         def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
