@@ -1272,8 +1272,13 @@ EOF
 
     jq -e '.route.rules[1].domain_suffix == ["netflix.com"] and .route.rules[1].outbound == "netflix-proxy"' "$is_config_json" >/dev/null || fail "custom Netflix rule must be at position 1"
 
-    jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and ([.inbound[]] | sort == ["node-one.json","node-proxy.json"]))' "$is_config_json" >/dev/null || fail "private reject rule must be scoped to managed nodes: $(jq -c '.route.rules' "$is_config_json")"
-    jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject" and ([.inbound[]] | sort == ["node-one.json","node-proxy.json"]))' "$is_config_json" >/dev/null || fail "cn rule_set reject rule must be scoped to managed nodes: $(jq -c '.route.rules' "$is_config_json")"
+    # 验证每个受管节点独立自包含阻断规则块（Per-node Rule Block）
+    jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .inbound == ["node-one.json"])' "$is_config_json" >/dev/null || fail "node-one private reject rule must be scoped to node-one: $(jq -c '.route.rules' "$is_config_json")"
+    jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject" and .inbound == ["node-one.json"])' "$is_config_json" >/dev/null || fail "node-one cn reject rule must be scoped to node-one: $(jq -c '.route.rules' "$is_config_json")"
+    jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .inbound == ["node-proxy.json"])' "$is_config_json" >/dev/null || fail "node-proxy private reject rule must be scoped to node-proxy: $(jq -c '.route.rules' "$is_config_json")"
+    jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject" and .inbound == ["node-proxy.json"])' "$is_config_json" >/dev/null || fail "node-proxy cn reject rule must be scoped to node-proxy: $(jq -c '.route.rules' "$is_config_json")"
+    # 严禁生成无 inbound 限制的全局阻断规则
+    jq -e '.route.rules | any(.action == "reject" and ((.inbound // []) | length == 0)) | not' "$is_config_json" >/dev/null || fail "must never generate global block rules without inbound scope"
 
     jq -e '.route.rules | any(.inbound // [] | any(. == "relay-20001.json")) | not' "$is_config_json" >/dev/null || fail "relay inbound must not be scoped in any route rules"
 

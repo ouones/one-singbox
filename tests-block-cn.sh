@@ -19,7 +19,6 @@ if [[ $1 == version ]]; then
     exit 0
 fi
 if [[ $1 == check ]]; then
-    printf '%s\n' "$*" >> /tmp/fake_core_check.log
     config=
     conf_dir=
     while [[ $# -gt 0 ]]; do
@@ -29,34 +28,27 @@ if [[ $1 == check ]]; then
         *) shift ;;
         esac
     done
-    [[ $config && -f $config ]] || { echo "exit 2: config missing: config=$config" >> /tmp/fake_core_check.log; exit 2; }
-    [[ ! $conf_dir || -d $conf_dir ]] || { echo "exit 2: conf_dir missing: conf_dir=$conf_dir" >> /tmp/fake_core_check.log; exit 2; }
-    cat "$config" > /tmp/debug_failed_config.json 2>/dev/null || :
-    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.inbounds // []) | type == "array")' "$config" >/dev/null 2>&1 || {
-        echo "exit 4: invalid config shape" >> /tmp/fake_core_check.log
-        exit 4
-    }
+    [[ $config && -f $config ]] || exit 2
+    [[ ! $conf_dir || -d $conf_dir ]] || exit 2
+    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.inbounds // []) | type == "array")' "$config" >/dev/null 2>&1 || exit 4
     if jq -e '(.outbounds // []) | any(type == "object" and .tag == "block" and .type == "block")' "$config" >/dev/null 2>&1; then
-        echo "exit 1: outbound block found" >> /tmp/fake_core_check.log
-        printf 'FATAL[0000] decode config at %s: outbounds: outbound type block is deprecated in sing-box 1.14+\n' "$config" | tee -a /tmp/fake_core_check.log >&2
+        printf 'FATAL[0000] decode config at %s: outbounds: outbound type block is deprecated in sing-box 1.14+\n' "$config" >&2
         exit 1
     fi
     if jq -e '(.route.rule_set // []) | any(type == "object" and .download_detour != null)' "$config" >/dev/null 2>&1; then
-        echo "exit 1: download_detour found" >> /tmp/fake_core_check.log
-        printf 'FATAL[0000] decode config at %s: route.rule_set: download_detour is deprecated in sing-box 1.14+, use http_clients instead\n' "$config" | tee -a /tmp/fake_core_check.log >&2
+        printf 'FATAL[0000] decode config at %s: route.rule_set: download_detour is deprecated in sing-box 1.14+, use http_clients instead\n' "$config" >&2
         exit 1
     fi
     if [[ $conf_dir ]]; then
         shopt -s nullglob
         for file in "$conf_dir"/*.json; do
-            jq -e 'type == "object" and ((.inbounds // []) | type == "array")' "$file" >/dev/null 2>&1 || { echo "exit 5: invalid file $file" >> /tmp/fake_core_check.log; exit 5; }
+            jq -e 'type == "object" and ((.inbounds // []) | type == "array")' "$file" >/dev/null 2>&1 || exit 5
             if jq -e '(.inbounds // []) | any(type == "object" and (.sniff != null or .sniff_override_destination != null or .sniff_timeout != null))' "$file" >/dev/null 2>&1; then
-                printf 'FATAL[0000] decode config at %s: inbounds[0]: legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0\n' "$file" | tee -a /tmp/fake_core_check.log >&2
+                printf 'FATAL[0000] decode config at %s: inbounds[0]: legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0\n' "$file" >&2
                 exit 1
             fi
         done
     fi
-    echo "check passed" >> /tmp/fake_core_check.log
     exit 0
 fi
 FAKE_CORE
@@ -305,31 +297,47 @@ jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null
 jq -e '.route.rule_set | any(.tag == "geosite-cn" and .type == "remote" and .format == "binary" and .http_client == "direct-client" and .download_detour == null and .url == "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs")' "$is_config_json" >/dev/null || fail "geosite-cn remote rule_set missing or invalid"
 jq -e '.route.rule_set | any(.tag == "geoip-cn" and .type == "remote" and .format == "binary" and .http_client == "direct-client" and .download_detour == null and .url == "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs")' "$is_config_json" >/dev/null || fail "geoip-cn remote rule_set missing or invalid"
 
-# C. route.rules 注入与顺序
+# C. route.rules 注入与顺序 (Per-node Rule Block)
 # 预期顺序：
-# 0: sniff (route action)
-# 1: resolve
-# 2: hijack-dns
-# 3: direct node whitelist bypass (node-one.json -> direct_v4_pref)
-# 4: proxy node whitelist bypass (node-proxy.json -> managed_node_ss_node-proxy_json)
-# 5: private ip reject (ip_is_private: true -> action: reject)
-# 6: cn rule_set reject (rule_set: ["geosite-cn", "geoip-cn"] -> action: reject)
-# 7: proxy_rules (node-proxy.json -> managed_node_ss_node-proxy_json)
-# 8: direct_rules (node-one.json -> direct_v4_pref)
-# 9: broad direct fallback (outbound: direct)
+# 0: 受管节点嗅探 (action: sniff, inbound: ["node-one.json", "node-proxy.json"])
+# 1: 用户自定义规则 1 (resolve)
+# 2: 用户自定义规则 2 (hijack-dns)
+# --- node-one 自包含规则块 ---
+# 3: node-one 白名单 (inbound: ["node-one.json"], outbound: direct_v4_pref)
+# 4: node-one 私网阻断 (inbound: ["node-one.json"], ip_is_private: true, action: reject)
+# 5: node-one CN 阻断 (inbound: ["node-one.json"], rule_set: ["geosite-cn", "geoip-cn"], action: reject)
+# 6: node-one 默认出站 (inbound: ["node-one.json"], outbound: direct_v4_pref)
+# --- node-proxy 自包含规则块 ---
+# 7: node-proxy 白名单 (inbound: ["node-proxy.json"], outbound: managed_node_ss_node-proxy_json)
+# 8: node-proxy 私网阻断 (inbound: ["node-proxy.json"], ip_is_private: true, action: reject)
+# 9: node-proxy CN 阻断 (inbound: ["node-proxy.json"], rule_set: ["geosite-cn", "geoip-cn"], action: reject)
+# 10: node-proxy 默认出站 (inbound: ["node-proxy.json"], outbound: managed_node_ss_node-proxy_json)
+# --- 全局兜底直连 ---
+# 11: fallback direct rule (outbound: direct)
 rules_count=$(jq '.route.rules | length' "$is_config_json")
-[[ $rules_count -ge 10 ]] || fail "rules count should be at least 10, got $rules_count: $(jq -c '.route.rules' "$is_config_json")"
+[[ $rules_count -ge 12 ]] || fail "rules count should be at least 12, got $rules_count: $(jq -c '.route.rules' "$is_config_json")"
 
-jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "rule 0 should be route action sniff"
+jq -e '.route.rules[0].action == "sniff" and (([.route.rules[0].inbound[]] | sort) == ["node-one.json", "node-proxy.json"])' "$is_config_json" >/dev/null || fail "rule 0 should be scoped route action sniff"
 jq -e '.route.rules[1].action == "resolve"' "$is_config_json" >/dev/null || fail "rule 1 should be custom resolve"
 jq -e '.route.rules[2].action == "hijack-dns"' "$is_config_json" >/dev/null || fail "rule 2 should be custom hijack-dns"
+
+# 验证 node-one 规则块自包含与顺序
 jq -e '.route.rules[3].action == "route" and .route.rules[3].outbound == "direct_v4_pref" and .route.rules[3].inbound == ["node-one.json"] and (.route.rules[3].domain | length > 0) and (.route.rules[3].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 3 should be node-one whitelist bypass"
-jq -e '.route.rules[4].action == "route" and .route.rules[4].outbound == "managed_node_ss_node-proxy_json" and .route.rules[4].inbound == ["node-proxy.json"] and (.route.rules[4].domain | length > 0) and (.route.rules[4].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 4 should be node-proxy whitelist bypass"
-jq -e '.route.rules[5].ip_is_private == true and .route.rules[5].action == "reject" and .route.rules[5].outbound == null' "$is_config_json" >/dev/null || fail "rule 5 should be private IP reject action"
-jq -e '.route.rules[6].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[6].action == "reject" and .route.rules[6].outbound == null' "$is_config_json" >/dev/null || fail "rule 6 should be CN rule_set reject action"
-jq -e '.route.rules[7].inbound == ["node-proxy.json"] and .route.rules[7].outbound == "managed_node_ss_node-proxy_json"' "$is_config_json" >/dev/null || fail "rule 7 should be node proxy rule"
-jq -e '.route.rules[8].inbound == ["node-one.json"] and .route.rules[8].outbound == "direct_v4_pref"' "$is_config_json" >/dev/null || fail "rule 8 should be node direct rule"
-jq -e '.route.rules[9].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 9 should be fallback direct rule"
+jq -e '.route.rules[4].ip_is_private == true and .route.rules[4].action == "reject" and .route.rules[4].inbound == ["node-one.json"]' "$is_config_json" >/dev/null || fail "rule 4 should be node-one private IP reject action"
+jq -e '.route.rules[5].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[5].action == "reject" and .route.rules[5].inbound == ["node-one.json"]' "$is_config_json" >/dev/null || fail "rule 5 should be node-one CN rule_set reject action"
+jq -e '.route.rules[6].inbound == ["node-one.json"] and .route.rules[6].outbound == "direct_v4_pref" and .route.rules[6].action == "route"' "$is_config_json" >/dev/null || fail "rule 6 should be node-one default direct rule"
+
+# 验证 node-proxy 规则块自包含与顺序
+jq -e '.route.rules[7].action == "route" and .route.rules[7].outbound == "managed_node_ss_node-proxy_json" and .route.rules[7].inbound == ["node-proxy.json"] and (.route.rules[7].domain | length > 0) and (.route.rules[7].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 7 should be node-proxy whitelist bypass"
+jq -e '.route.rules[8].ip_is_private == true and .route.rules[8].action == "reject" and .route.rules[8].inbound == ["node-proxy.json"]' "$is_config_json" >/dev/null || fail "rule 8 should be node-proxy private IP reject action"
+jq -e '.route.rules[9].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[9].action == "reject" and .route.rules[9].inbound == ["node-proxy.json"]' "$is_config_json" >/dev/null || fail "rule 9 should be node-proxy CN rule_set reject action"
+jq -e '.route.rules[10].inbound == ["node-proxy.json"] and .route.rules[10].outbound == "managed_node_ss_node-proxy_json" and .route.rules[10].action == "route"' "$is_config_json" >/dev/null || fail "rule 10 should be node-proxy default proxy rule"
+
+# 全局兜底
+jq -e '.route.rules[11].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 11 should be fallback direct rule"
+
+# 严禁任何无 inbound 限制的全局阻断规则
+jq -e '.route.rules | any(.action == "reject" and ((.inbound // []) | length == 0)) | not' "$is_config_json" >/dev/null || fail "must never generate global block rules without inbound scope"
 
 # D. 幂等性与防重复堆叠测试
 sync_runtime_node_outbound_modes || fail "re-syncing failed"
@@ -657,7 +665,24 @@ jq 'del(.route.final)' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_co
 sync_runtime_node_outbound_modes || fail "sync failed after resetting route.final"
 jq -e '.route.final == "direct"' "$is_config_json" >/dev/null || fail "route.final must fall back to direct"
 
-# 18.4 生产代码无 mock 测试域名泄漏断言
+# 18.4 纯中转环境（无受管节点）且开启 block-cn 时，绝无受管私网/CN阻断规则，确保 100% 直连穿透
+(
+    empty_nodes_dir="$case_dir/empty_nodes"
+    mkdir -p "$empty_nodes_dir"
+    jq -n '{inbounds:[{tag:"relay-20000.json",type:"direct",listen:"::",listen_port:20000,override_address:"198.51.100.99",override_port:20000}]}' >"$empty_nodes_dir/relay-20000.json"
+    render_runtime_node_outbound_modes "$is_config_json" "$case_dir/test-empty-managed.json" "" "" "$empty_nodes_dir" || exit 1
+    # 纯中转/无受管节点时，绝无任何受管私网或 CN reject 规则
+    jq -e '.route.rules | any(.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]) | not' "$case_dir/test-empty-managed.json" >/dev/null || exit 2
+    # 纯中转/无受管节点时，绝无受管嗅探规则
+    jq -e '.route.rules | any(.action == "sniff") | not' "$case_dir/test-empty-managed.json" >/dev/null || exit 3
+    # 纯中转/无受管节点时，用户自定义规则正常保留
+    jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .action == "reject")' "$case_dir/test-empty-managed.json" >/dev/null || exit 4
+    # 纯中转/无受管节点时，兜底直连穿透
+    jq -e '.route.rules | any(.outbound == "direct")' "$case_dir/test-empty-managed.json" >/dev/null || exit 5
+    rm -rf "$empty_nodes_dir" "$case_dir/test-empty-managed.json"
+) || fail "pure relay environment must not generate any managed reject or sniff rules when block-cn enabled"
+
+# 18.5 生产代码无 mock 测试域名泄漏断言
 if grep -E '(cached-marker|cached-suffix)' "$CORE_FILE" >/dev/null 2>&1; then
   fail "production file $CORE_FILE must not leak mock test domains"
 fi
