@@ -19,7 +19,7 @@ if [[ $1 == version ]]; then
     exit 0
 fi
 if [[ $1 == check ]]; then
-    printf '%s\n' "$*" >>"$FAKE_CORE_LOG"
+    printf '%s\n' "$*" >> /tmp/fake_core_check.log
     config=
     conf_dir=
     while [[ $# -gt 0 ]]; do
@@ -29,19 +29,34 @@ if [[ $1 == check ]]; then
         *) shift ;;
         esac
     done
-    [[ $config && -f $config ]] || exit 2
-    [[ ! $conf_dir || -d $conf_dir ]] || exit 2
-    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.inbounds // []) | type == "array")' "$config" >/dev/null 2>&1 || exit 4
+    [[ $config && -f $config ]] || { echo "exit 2: config missing: config=$config" >> /tmp/fake_core_check.log; exit 2; }
+    [[ ! $conf_dir || -d $conf_dir ]] || { echo "exit 2: conf_dir missing: conf_dir=$conf_dir" >> /tmp/fake_core_check.log; exit 2; }
+    cat "$config" > /tmp/debug_failed_config.json 2>/dev/null || :
+    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.inbounds // []) | type == "array")' "$config" >/dev/null 2>&1 || {
+        echo "exit 4: invalid config shape" >> /tmp/fake_core_check.log
+        exit 4
+    }
+    if jq -e '(.outbounds // []) | any(type == "object" and .tag == "block" and .type == "block")' "$config" >/dev/null 2>&1; then
+        echo "exit 1: outbound block found" >> /tmp/fake_core_check.log
+        printf 'FATAL[0000] decode config at %s: outbounds: outbound type block is deprecated in sing-box 1.14+\n' "$config" | tee -a /tmp/fake_core_check.log >&2
+        exit 1
+    fi
+    if jq -e '(.route.rule_set // []) | any(type == "object" and .download_detour != null)' "$config" >/dev/null 2>&1; then
+        echo "exit 1: download_detour found" >> /tmp/fake_core_check.log
+        printf 'FATAL[0000] decode config at %s: route.rule_set: download_detour is deprecated in sing-box 1.14+, use http_clients instead\n' "$config" | tee -a /tmp/fake_core_check.log >&2
+        exit 1
+    fi
     if [[ $conf_dir ]]; then
         shopt -s nullglob
         for file in "$conf_dir"/*.json; do
-            jq -e 'type == "object" and ((.inbounds // []) | type == "array")' "$file" >/dev/null 2>&1 || exit 5
+            jq -e 'type == "object" and ((.inbounds // []) | type == "array")' "$file" >/dev/null 2>&1 || { echo "exit 5: invalid file $file" >> /tmp/fake_core_check.log; exit 5; }
             if jq -e '(.inbounds // []) | any(type == "object" and (.sniff != null or .sniff_override_destination != null or .sniff_timeout != null))' "$file" >/dev/null 2>&1; then
-                printf 'FATAL[0000] decode config at %s: inbounds[0]: legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0\n' "$file" >&2
+                printf 'FATAL[0000] decode config at %s: inbounds[0]: legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0\n' "$file" | tee -a /tmp/fake_core_check.log >&2
                 exit 1
             fi
         done
     fi
+    echo "check passed" >> /tmp/fake_core_check.log
     exit 0
 fi
 FAKE_CORE
@@ -281,13 +296,14 @@ enable_out=$(main block-cn enable 2>&1)
 [[ $(restart_count) -ge 1 ]] || fail "enable must restart service"
 
 # 5. 校验启用后的运行时配置注入
-# A. outbounds 注入
-jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound must be injected"
+# A. 现代受管分流与出站断言
+jq -e '.http_clients | any(.tag == "direct-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "managed http_clients direct-client must be injected"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "type: block outbound must NOT exist in modern config"
 jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null || fail "custom outbounds must be preserved"
 
-# B. rule_set 注入
-jq -e '.route.rule_set | any(.tag == "geosite-cn" and .type == "remote" and .format == "binary" and .download_detour == "direct" and .url == "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs")' "$is_config_json" >/dev/null || fail "geosite-cn remote rule_set missing or invalid"
-jq -e '.route.rule_set | any(.tag == "geoip-cn" and .type == "remote" and .format == "binary" and .download_detour == "direct" and .url == "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs")' "$is_config_json" >/dev/null || fail "geoip-cn remote rule_set missing or invalid"
+# B. rule_set 注入（使用 http_client 替代已弃用的 download_detour）
+jq -e '.route.rule_set | any(.tag == "geosite-cn" and .type == "remote" and .format == "binary" and .http_client == "direct-client" and .download_detour == null and .url == "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs")' "$is_config_json" >/dev/null || fail "geosite-cn remote rule_set missing or invalid"
+jq -e '.route.rule_set | any(.tag == "geoip-cn" and .type == "remote" and .format == "binary" and .http_client == "direct-client" and .download_detour == null and .url == "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs")' "$is_config_json" >/dev/null || fail "geoip-cn remote rule_set missing or invalid"
 
 # C. route.rules 注入与顺序
 # 预期顺序：
@@ -295,8 +311,8 @@ jq -e '.route.rule_set | any(.tag == "geoip-cn" and .type == "remote" and .forma
 # 1: resolve
 # 2: hijack-dns
 # 3: cn-whitelist bypass (domain/domain_suffix -> direct)
-# 4: private ip block (ip_is_private: true -> block)
-# 5: cn rule_set block (rule_set: ["geosite-cn", "geoip-cn"] -> block)
+# 4: private ip reject (ip_is_private: true -> action: reject)
+# 5: cn rule_set reject (rule_set: ["geosite-cn", "geoip-cn"] -> action: reject)
 # 6: proxy_rules (node-proxy.json -> managed_node_ss_node-proxy_json)
 # 7: direct_rules (node-one.json -> direct_v4_pref)
 # 8: broad direct fallback (outbound: direct)
@@ -308,8 +324,8 @@ jq -e '.route.rules[1].action == "resolve"' "$is_config_json" >/dev/null || fail
 jq -e '.route.rules[2].action == "hijack-dns"' "$is_config_json" >/dev/null || fail "rule 2 should be custom hijack-dns"
 jq -e '.route.rules[3].action == "route" and .route.rules[3].outbound == "direct" and (.route.rules[3].domain | length > 0) and (.route.rules[3].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 3 should be cn-whitelist bypass"
 jq -e '.route.rules[3].inbound == null' "$is_config_json" >/dev/null || fail "whitelist rule must not contain inbound restriction"
-jq -e '.route.rules[4].ip_is_private == true and .route.rules[4].outbound == "block"' "$is_config_json" >/dev/null || fail "rule 4 should be private IP block"
-jq -e '.route.rules[5].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[5].outbound == "block"' "$is_config_json" >/dev/null || fail "rule 5 should be CN rule_set block"
+jq -e '.route.rules[4].ip_is_private == true and .route.rules[4].action == "reject" and .route.rules[4].outbound == null' "$is_config_json" >/dev/null || fail "rule 4 should be private IP reject action"
+jq -e '.route.rules[5].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[5].action == "reject" and .route.rules[5].outbound == null' "$is_config_json" >/dev/null || fail "rule 5 should be CN rule_set reject action"
 jq -e '.route.rules[6].inbound == ["node-proxy.json"] and .route.rules[6].outbound == "managed_node_ss_node-proxy_json"' "$is_config_json" >/dev/null || fail "rule 6 should be node proxy rule"
 jq -e '.route.rules[7].inbound == ["node-one.json"] and .route.rules[7].outbound == "direct_v4_pref"' "$is_config_json" >/dev/null || fail "rule 7 should be node direct rule"
 jq -e '.route.rules[8].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 8 should be fallback direct rule"
@@ -317,7 +333,8 @@ jq -e '.route.rules[8].outbound == "direct"' "$is_config_json" >/dev/null || fai
 # D. 幂等性与防重复堆叠测试
 sync_runtime_node_outbound_modes || fail "re-syncing failed"
 [[ $(jq '.route.rules | length' "$is_config_json") == "$rules_count" ]] || fail "re-syncing must not duplicate rules"
-[[ $(jq '[.outbounds[] | select(.tag == "block")] | length' "$is_config_json") == 1 ]] || fail "block outbound must not duplicate"
+[[ $(jq '[.http_clients[]? | select(.tag == "direct-client")] | length' "$is_config_json") == 1 ]] || fail "direct-client http_client must not duplicate"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must NOT exist"
 [[ $(jq '[.route.rule_set[] | select(.tag == "geosite-cn")] | length' "$is_config_json") == 1 ]] || fail "geosite-cn must not duplicate"
 [[ $(jq '[.route.rules[] | select(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0))] | length' "$is_config_json") == 1 ]] || fail "whitelist rule must not duplicate"
 
@@ -340,9 +357,11 @@ disable_out=$(main block-cn disable 2>&1)
 [[ $(restart_count) -ge 1 ]] || fail "disable must restart service"
 
 # 校验禁用后的运行时配置恢复
+jq -e '(.http_clients // []) | any(.tag == "direct-client") | not' "$is_config_json" >/dev/null || fail "direct-client must be removed after disable"
 jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must be removed after disable"
 jq -e '(.route.rule_set // []) | any(.tag == "geosite-cn" or .tag == "geoip-cn") | not' "$is_config_json" >/dev/null || fail "CN rule_sets must be removed after disable"
 jq -e '.route.rules | any(.outbound == "block") | not' "$is_config_json" >/dev/null || fail "block rules must be removed after disable"
+jq -e '.route.rules | any(.action == "reject" and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"])) | not' "$is_config_json" >/dev/null || fail "managed reject rules must be removed after disable"
 jq -e '.route.rules | any(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0)) | not' "$is_config_json" >/dev/null || fail "whitelist rule must be removed after disable"
 [[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist cache file should be preserved on disk after disable"
 jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null || fail "custom outbounds must be preserved after disable"
@@ -383,7 +402,7 @@ block_cn_clean_legacy_inbounds "$is_conf_dir/node-new.json"
 jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-new.json" >/dev/null || fail "new node must NOT have legacy sniff fields"
 
 # 10. 保留自定义 rule_set 测试（用户自定义 remote/local 规则集不被受管逻辑破坏）
-jq '.route.rule_set += [{"tag":"custom-ads","type":"remote","format":"binary","url":"https://example.com/ads.srs","download_detour":"direct"}]' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+jq '.route.rule_set += [{"tag":"custom-ads","type":"remote","format":"binary","url":"https://example.com/ads.srs"}]' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
 sync_runtime_node_outbound_modes || fail "sync with custom rule_set failed"
 jq -e '.route.rule_set | any(.tag == "custom-ads")' "$is_config_json" >/dev/null || fail "custom rule_set must be preserved while block-cn enabled"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn must still exist alongside custom rule_set"
@@ -397,9 +416,10 @@ jq -e '(.route.rule_set // []) | any(.tag == "geosite-cn") | not' "$is_config_js
 # 11. 在启用状态下执行 create config.json 重建配置
 main block-cn on 2>&1 >/dev/null
 create config.json >/dev/null 2>&1
-jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "create config.json should retain block outbound when enabled"
-jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "create config.json should retain geosite-cn when enabled"
-jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "create config.json should retain private IP block rule when enabled"
+jq -e '.http_clients | any(.tag == "direct-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "create config.json should retain direct-client http_client when enabled"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "create config.json should NOT retain type: block outbound"
+jq -e '.route.rule_set | any(.tag == "geosite-cn" and .http_client == "direct-client" and .download_detour == null)' "$is_config_json" >/dev/null || fail "create config.json should retain geosite-cn when enabled"
+jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .outbound == null)' "$is_config_json" >/dev/null || fail "create config.json should retain private IP reject rule when enabled"
 jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "create config.json should retain route action sniff when enabled"
 jq -e '.route.rules[1].action == "route" and .route.rules[1].outbound == "direct" and (.route.rules[1].domain | length > 0)' "$is_config_json" >/dev/null || fail "create config.json should retain whitelist bypass when enabled"
 
@@ -444,8 +464,9 @@ warn_out2=$(block_cn_sync_whitelist 2>&1)
 [[ $warn_out2 == *"下载回国白名单失败且无本地缓存"* ]] || fail "should warn about no cache available: $warn_out2"
 # 确保虽然无白名单缓存，但配置同步不崩溃且阻断引擎正常运行
 sync_runtime_node_outbound_modes || fail "sync without whitelist cache must not fail"
-jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "private ip block must still exist"
-jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "cn rule_set block must still exist"
+jq -e '.route.rules | any(.ip_is_private == true and .action == "reject")' "$is_config_json" >/dev/null || fail "private ip reject must still exist"
+jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject")' "$is_config_json" >/dev/null || fail "cn rule_set reject must still exist"
+jq -e '.route.rules | any(.outbound == "block") | not' "$is_config_json" >/dev/null || fail "no outbound block rule should exist"
 jq -e '.route.rules | any(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0)) | not' "$is_config_json" >/dev/null || fail "no whitelist rule should be injected when cache is missing"
 export FAKE_CURL_FAIL=0
 
@@ -502,7 +523,8 @@ block_cn_is_enabled || fail "block-cn should be enabled after menu toggle"
 [[ -f "$is_core_dir/.block-cn-enabled" ]] || fail "flag file should exist after menu toggle to enable"
 [[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist file should exist after menu toggle to enable"
 [[ $(restart_count) -ge 1 ]] || fail "menu toggle to enable must restart service"
-jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound must exist after menu enable"
+jq -e '.http_clients | any(.tag == "direct-client")' "$is_config_json" >/dev/null || fail "direct-client must exist after menu enable"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must NOT exist after menu enable"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn must exist after menu enable"
 
 # 再次从已启用状态切换为未启用并退出菜单
@@ -511,6 +533,7 @@ printf '4\n\n6\n' | system_tools_menu 2>&1 >/dev/null
 block_cn_is_enabled && fail "block-cn should be disabled after second menu toggle"
 [[ ! -f "$is_core_dir/.block-cn-enabled" ]] || fail "flag file must be removed after menu toggle to disable"
 [[ $(restart_count) -ge 1 ]] || fail "menu toggle to disable must restart service"
+jq -e '(.http_clients // []) | any(.tag == "direct-client") | not' "$is_config_json" >/dev/null || fail "direct-client must be removed after menu disable"
 jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must be removed after menu disable"
 
 # 17. 节点全生命周期联动与无损保留测试 (Issue #73)
@@ -541,22 +564,24 @@ jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination
 
 # 触发同步
 sync_runtime_node_outbound_modes || fail "sync_runtime_node_outbound_modes failed after adding node"
-# 断言：运行时配置中保留了 block-cn 出站、规则集与白名单规则，且新增节点的直连路由正确生成
-jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after adding node"
+# 断言：运行时配置中保留了 block-cn http_clients、规则集与白名单规则，无 block 出站，且新增节点的直连路由正确生成
+jq -e '.http_clients | any(.tag == "direct-client")' "$is_config_json" >/dev/null || fail "direct-client http_client lost after adding node"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "type: block outbound must not exist after adding node"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after adding node"
 jq -e '.route.rule_set | any(.tag == "geoip-cn")' "$is_config_json" >/dev/null || fail "geoip-cn lost after adding node"
-jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "private ip block rule lost after adding node"
-jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "cn rule_set block rule lost after adding node"
+jq -e '.route.rules | any(.ip_is_private == true and .action == "reject")' "$is_config_json" >/dev/null || fail "private ip reject rule lost after adding node"
+jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject")' "$is_config_json" >/dev/null || fail "cn rule_set reject rule lost after adding node"
 jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist rule lost after adding node"
 jq -e '.route.rules | any(.inbound == ["node-lifecycle.json"] and .outbound == "direct_v6_pref")' "$is_config_json" >/dev/null || fail "new node route not found"
 
 # 17.2 更改节点出站方式生命周期联动 (apply_node_outbound_mode_unlocked)
 apply_node_outbound_mode_unlocked "node-lifecycle.json" "仅V4" || fail "apply_node_outbound_mode_unlocked failed"
-# 断言：出站方式已变更为 direct_v4_only，但 block 出站与规则依然完整无损
+# 断言：出站方式已变更为 direct_v4_only，但 http_clients、规则集与 reject 规则依然完整无损
 jq -e '.route.rules | any(.inbound == ["node-lifecycle.json"] and .outbound == "direct_v4_only")' "$is_config_json" >/dev/null || fail "node route not updated to direct_v4_only"
-jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after modifying outbound mode"
+jq -e '.http_clients | any(.tag == "direct-client")' "$is_config_json" >/dev/null || fail "direct-client lost after modifying outbound mode"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound appeared after modifying outbound mode"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after modifying outbound mode"
-jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "private block lost after modifying outbound mode"
+jq -e '.route.rules | any(.ip_is_private == true and .action == "reject")' "$is_config_json" >/dev/null || fail "private reject lost after modifying outbound mode"
 jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after modifying outbound mode"
 
 # 17.3 节点替换/重命名生命周期联动 (apply_node_config_lifecycle replace)
@@ -565,7 +590,8 @@ apply_node_config_lifecycle replace "node-lifecycle.json" "node-lifecycle-rename
 # 断言：重命名后新配置文件入站不含 legacy 字段
 jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-lifecycle-renamed.json" >/dev/null || fail "renamed node must not have legacy sniffing fields"
 # 断言：运行时配置中 block-cn 规则无损
-jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after renaming node"
+jq -e '.http_clients | any(.tag == "direct-client")' "$is_config_json" >/dev/null || fail "direct-client lost after renaming node"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound appeared after renaming node"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after renaming node"
 jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after renaming node"
 jq -e '.route.rules | any(.inbound == ["node-lifecycle-renamed.json"])' "$is_config_json" >/dev/null || fail "renamed node route not found"
@@ -574,29 +600,29 @@ jq -e '.route.rules | any(.inbound == ["node-lifecycle-renamed.json"])' "$is_con
 apply_node_config_lifecycle delete "node-lifecycle-renamed.json" || fail "apply_node_config_lifecycle delete failed"
 [[ ! -f "$is_conf_dir/node-lifecycle-renamed.json" ]] || fail "deleted node file should not exist"
 # 断言：删除节点后 block-cn 规则依然完整无损
-jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after deleting node"
+jq -e '.http_clients | any(.tag == "direct-client")' "$is_config_json" >/dev/null || fail "direct-client lost after deleting node"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound appeared after deleting node"
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after deleting node"
 jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after deleting node"
 jq -e '.route.rules | any(.inbound == ["node-lifecycle-renamed.json"]) | not' "$is_config_json" >/dev/null || fail "deleted node route must be removed"
 
-# 18.1 用户自定义 block 规则在多次同步与状态切换中保持隔离不被误删
-# 注入一条用户自定义 block 规则（例如广告拦截）
-jq '.route.rules = [{domain_suffix:["ad-analytics.custom.lan"],outbound:"block"}] + .route.rules' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+# 18.1 用户自定义 reject 规则在多次同步与状态切换中保持隔离不被误删，且受管逻辑不注入 block 出站
+# 注入一条用户自定义 reject 规则（例如广告拦截）
+jq '.route.rules = [{domain_suffix:["ad-analytics.custom.lan"],action:"reject"}] + .route.rules' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
 
 # 在 block-cn 启用状态下同步
-sync_runtime_node_outbound_modes || fail "sync failed with custom block rule while block-cn enabled"
-jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must be preserved when enabled"
-jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound must exist when block-cn enabled"
+sync_runtime_node_outbound_modes || fail "sync failed with custom reject rule while block-cn enabled"
+jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .action == "reject")' "$is_config_json" >/dev/null || fail "custom reject rule must be preserved when enabled"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must NOT exist when block-cn enabled"
 
 # 切换为关闭状态
 main block-cn off 2>&1 >/dev/null
-jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must be preserved when disabled"
-# 即使 block-cn 已禁用，由于存在用户自定义 block 规则，outbounds 中必须保留 block 出站避免校验失败
-jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound must be retained for custom block rule when disabled"
+jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .action == "reject")' "$is_config_json" >/dev/null || fail "custom reject rule must be preserved when disabled"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must NOT exist when disabled"
 
 # 重新启用并再次验证
 main block-cn on 2>&1 >/dev/null
-jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must survive re-enabling"
+jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .action == "reject")' "$is_config_json" >/dev/null || fail "custom reject rule must survive re-enabling"
 
 # 18.2 中转节点入站嗅探配置与清理断言
 # 场景 A: 在 block-cn 启用状态下新增中转节点，入站不应包含 legacy sniff 配置
@@ -637,6 +663,13 @@ fi
 
 # 19. Spec 审查回归测试 (Issue #75)
 # 19.1 update core 校验失败必须阻断重启 (Seam 1)
+load() {
+    if [[ $1 == download.sh ]]; then
+        download() { :; }
+        return 0
+    fi
+    . "$is_sh_dir/src/$1"
+}
 download() { :; }
 cat >"$is_conf_dir/invalid-broken.json" <<'EOF'
 { "inbounds": "invalid_array_expected" }
@@ -665,7 +698,8 @@ cat >"$is_conf_dir/unmigrated-node.json" <<'EOF'
   ]
 }
 EOF
-update sh 1.53 >/dev/null 2>&1 || true
+is_sh_ver=1.52
+(update sh 1.53 >/dev/null 2>&1) || true
 jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/unmigrated-node.json" >/dev/null || fail "update sh must auto-migrate legacy inbound sniff fields"
 rm -f "$is_conf_dir/unmigrated-node.json"
 
@@ -675,6 +709,39 @@ for fn in block_cn_inject_inbounds_sniffing_json block_cn_ensure_inbounds_sniffi
     fail "deprecated legacy alias $fn must be retired"
   fi
 done
+
+# 21. sing-box 1.14+ 现代内核语法专项测试 (Ticket #77)
+# 21.1 用户自定义 http_clients 隔离与保留测试
+main block-cn on 2>&1 >/dev/null
+jq '.http_clients += [{"tag":"custom-http-client","detour":"direct"}]' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+sync_runtime_node_outbound_modes || fail "sync with custom http_client failed"
+jq -e '.http_clients | any(.tag == "custom-http-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "custom http_client must be preserved when enabled"
+jq -e '.http_clients | any(.tag == "direct-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "managed direct-client must be present alongside custom http_client"
+
+# 禁用后自定义 http_clients 依然保留，仅受管 direct-client 被清除
+main block-cn off 2>&1 >/dev/null
+jq -e '.http_clients | any(.tag == "custom-http-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "custom http_client must be preserved after block-cn disabled"
+jq -e '(.http_clients // []) | any(.tag == "direct-client") | not' "$is_config_json" >/dev/null || fail "managed direct-client must be removed after disable"
+
+# 21.2 历史老配置升级自愈：清理废弃的 type: "block" 出站和旧版 block 路由规则
+main block-cn on 2>&1 >/dev/null
+# 模拟配置中残留了历史旧版的受管 block 出站与旧规则
+jq '.outbounds += [{"tag":"block","type":"block"}] | .route.rules += [{"rule_set":["geosite-cn","geoip-cn"],"outbound":"block"}]' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+sync_runtime_node_outbound_modes || fail "sync failed on legacy config cleanup"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "legacy block outbound must be cleaned up"
+jq -e '.route.rules | any(.outbound == "block") | not' "$is_config_json" >/dev/null || fail "legacy outbound: block rules must be migrated"
+jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject")' "$is_config_json" >/dev/null || fail "migrated rule must use action: reject"
+
+# 21.3 若系统安装了真实 sing-box 二进制，对最终运行时配置执行真实 sing-box check 验证
+"$FAKE_CORE" check -c "$is_config_json" -C "$is_conf_dir" || fail "mock sing-box check failed on final config"
+real_core=
+for b in /etc/sing-box/bin/sing-box /usr/local/bin/sing-box /usr/bin/sing-box; do
+    if [[ -x $b ]]; then real_core=$b; break; fi
+done
+if [[ $real_core ]]; then
+    real_check_out=$("$real_core" check -c "$is_config_json" -C "$is_conf_dir" 2>&1) || fail "real sing-box check failed ($real_core): $real_check_out"
+    [[ $real_check_out != *"deprecated"* && $real_check_out != *"WARN"* ]] || fail "real sing-box check output should not contain deprecation warnings: $real_check_out"
+fi
 
 # 清理测试
 main block-cn off 2>&1 >/dev/null
