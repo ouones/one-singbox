@@ -310,25 +310,26 @@ jq -e '.route.rule_set | any(.tag == "geoip-cn" and .type == "remote" and .forma
 # 0: sniff (route action)
 # 1: resolve
 # 2: hijack-dns
-# 3: cn-whitelist bypass (domain/domain_suffix -> direct)
-# 4: private ip reject (ip_is_private: true -> action: reject)
-# 5: cn rule_set reject (rule_set: ["geosite-cn", "geoip-cn"] -> action: reject)
-# 6: proxy_rules (node-proxy.json -> managed_node_ss_node-proxy_json)
-# 7: direct_rules (node-one.json -> direct_v4_pref)
-# 8: broad direct fallback (outbound: direct)
+# 3: direct node whitelist bypass (node-one.json -> direct_v4_pref)
+# 4: proxy node whitelist bypass (node-proxy.json -> managed_node_ss_node-proxy_json)
+# 5: private ip reject (ip_is_private: true -> action: reject)
+# 6: cn rule_set reject (rule_set: ["geosite-cn", "geoip-cn"] -> action: reject)
+# 7: proxy_rules (node-proxy.json -> managed_node_ss_node-proxy_json)
+# 8: direct_rules (node-one.json -> direct_v4_pref)
+# 9: broad direct fallback (outbound: direct)
 rules_count=$(jq '.route.rules | length' "$is_config_json")
-[[ $rules_count -ge 9 ]] || fail "rules count should be at least 9, got $rules_count: $(jq -c '.route.rules' "$is_config_json")"
+[[ $rules_count -ge 10 ]] || fail "rules count should be at least 10, got $rules_count: $(jq -c '.route.rules' "$is_config_json")"
 
 jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "rule 0 should be route action sniff"
 jq -e '.route.rules[1].action == "resolve"' "$is_config_json" >/dev/null || fail "rule 1 should be custom resolve"
 jq -e '.route.rules[2].action == "hijack-dns"' "$is_config_json" >/dev/null || fail "rule 2 should be custom hijack-dns"
-jq -e '.route.rules[3].action == "route" and .route.rules[3].outbound == "direct" and (.route.rules[3].domain | length > 0) and (.route.rules[3].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 3 should be cn-whitelist bypass"
-jq -e '.route.rules[3].inbound == null' "$is_config_json" >/dev/null || fail "whitelist rule must not contain inbound restriction"
-jq -e '.route.rules[4].ip_is_private == true and .route.rules[4].action == "reject" and .route.rules[4].outbound == null' "$is_config_json" >/dev/null || fail "rule 4 should be private IP reject action"
-jq -e '.route.rules[5].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[5].action == "reject" and .route.rules[5].outbound == null' "$is_config_json" >/dev/null || fail "rule 5 should be CN rule_set reject action"
-jq -e '.route.rules[6].inbound == ["node-proxy.json"] and .route.rules[6].outbound == "managed_node_ss_node-proxy_json"' "$is_config_json" >/dev/null || fail "rule 6 should be node proxy rule"
-jq -e '.route.rules[7].inbound == ["node-one.json"] and .route.rules[7].outbound == "direct_v4_pref"' "$is_config_json" >/dev/null || fail "rule 7 should be node direct rule"
-jq -e '.route.rules[8].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 8 should be fallback direct rule"
+jq -e '.route.rules[3].action == "route" and .route.rules[3].outbound == "direct_v4_pref" and .route.rules[3].inbound == ["node-one.json"] and (.route.rules[3].domain | length > 0) and (.route.rules[3].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 3 should be node-one whitelist bypass"
+jq -e '.route.rules[4].action == "route" and .route.rules[4].outbound == "managed_node_ss_node-proxy_json" and .route.rules[4].inbound == ["node-proxy.json"] and (.route.rules[4].domain | length > 0) and (.route.rules[4].domain_suffix | length > 0)' "$is_config_json" >/dev/null || fail "rule 4 should be node-proxy whitelist bypass"
+jq -e '.route.rules[5].ip_is_private == true and .route.rules[5].action == "reject" and .route.rules[5].outbound == null' "$is_config_json" >/dev/null || fail "rule 5 should be private IP reject action"
+jq -e '.route.rules[6].rule_set == ["geosite-cn", "geoip-cn"] and .route.rules[6].action == "reject" and .route.rules[6].outbound == null' "$is_config_json" >/dev/null || fail "rule 6 should be CN rule_set reject action"
+jq -e '.route.rules[7].inbound == ["node-proxy.json"] and .route.rules[7].outbound == "managed_node_ss_node-proxy_json"' "$is_config_json" >/dev/null || fail "rule 7 should be node proxy rule"
+jq -e '.route.rules[8].inbound == ["node-one.json"] and .route.rules[8].outbound == "direct_v4_pref"' "$is_config_json" >/dev/null || fail "rule 8 should be node direct rule"
+jq -e '.route.rules[9].outbound == "direct"' "$is_config_json" >/dev/null || fail "rule 9 should be fallback direct rule"
 
 # D. 幂等性与防重复堆叠测试
 sync_runtime_node_outbound_modes || fail "re-syncing failed"
@@ -336,7 +337,7 @@ sync_runtime_node_outbound_modes || fail "re-syncing failed"
 [[ $(jq '[.http_clients[]? | select(.tag == "direct-client")] | length' "$is_config_json") == 1 ]] || fail "direct-client http_client must not duplicate"
 jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must NOT exist"
 [[ $(jq '[.route.rule_set[] | select(.tag == "geosite-cn")] | length' "$is_config_json") == 1 ]] || fail "geosite-cn must not duplicate"
-[[ $(jq '[.route.rules[] | select(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0))] | length' "$is_config_json") == 1 ]] || fail "whitelist rule must not duplicate"
+[[ $(jq '[.route.rules[] | select(.domain // [] | any(. == "connectivitycheck.gstatic.com"))] | length' "$is_config_json") == 2 ]] || fail "whitelist rule must not duplicate"
 
 # 6. 入站嗅探 (sniff) 检查
 # 在 sing-box 1.13+ 中，嗅探通过路由规则 {"action":"sniff"} 实现，入站配置不应包含 legacy 嗅探字段
@@ -362,7 +363,7 @@ jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || 
 jq -e '(.route.rule_set // []) | any(.tag == "geosite-cn" or .tag == "geoip-cn") | not' "$is_config_json" >/dev/null || fail "CN rule_sets must be removed after disable"
 jq -e '.route.rules | any(.outbound == "block") | not' "$is_config_json" >/dev/null || fail "block rules must be removed after disable"
 jq -e '.route.rules | any(.action == "reject" and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"])) | not' "$is_config_json" >/dev/null || fail "managed reject rules must be removed after disable"
-jq -e '.route.rules | any(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0)) | not' "$is_config_json" >/dev/null || fail "whitelist rule must be removed after disable"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com")) | not' "$is_config_json" >/dev/null || fail "whitelist rule must be removed after disable"
 [[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist cache file should be preserved on disk after disable"
 jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null || fail "custom outbounds must be preserved after disable"
 
@@ -421,7 +422,7 @@ jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || 
 jq -e '.route.rule_set | any(.tag == "geosite-cn" and .http_client == "direct-client" and .download_detour == null)' "$is_config_json" >/dev/null || fail "create config.json should retain geosite-cn when enabled"
 jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .outbound == null)' "$is_config_json" >/dev/null || fail "create config.json should retain private IP reject rule when enabled"
 jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "create config.json should retain route action sniff when enabled"
-jq -e '.route.rules[1].action == "route" and .route.rules[1].outbound == "direct" and (.route.rules[1].domain | length > 0)' "$is_config_json" >/dev/null || fail "create config.json should retain whitelist bypass when enabled"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "create config.json should retain whitelist bypass when enabled"
 
 # 12. 白名单独立解析、注释剥离与规范化持久化测试
 [[ $(type -t block_cn_sync_whitelist) == function ]] || fail "block_cn_sync_whitelist function must exist"
@@ -467,7 +468,7 @@ sync_runtime_node_outbound_modes || fail "sync without whitelist cache must not 
 jq -e '.route.rules | any(.ip_is_private == true and .action == "reject")' "$is_config_json" >/dev/null || fail "private ip reject must still exist"
 jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject")' "$is_config_json" >/dev/null || fail "cn rule_set reject must still exist"
 jq -e '.route.rules | any(.outbound == "block") | not' "$is_config_json" >/dev/null || fail "no outbound block rule should exist"
-jq -e '.route.rules | any(.action == "route" and .outbound == "direct" and (.domain // [] | length > 0)) | not' "$is_config_json" >/dev/null || fail "no whitelist rule should be injected when cache is missing"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com")) | not' "$is_config_json" >/dev/null || fail "no whitelist rule should be injected when cache is missing"
 export FAKE_CURL_FAIL=0
 
 # 15. 用户自定义直连规则在 block-cn 切换中的隔离与保护
