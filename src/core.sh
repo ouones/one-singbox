@@ -933,12 +933,22 @@ block_cn_status_text() {
     fi
 }
 
+block_cn_inject_inbounds_sniffing_json() {
+    local json_input=${1:-}
+    local filter='if .inbounds then .inbounds |= map(if type == "object" then .sniff = true | .sniff_override_destination = true else . end) else . end'
+    if [[ -n $json_input ]]; then
+        jq "$filter" <<<"$json_input"
+    else
+        jq "$filter"
+    fi
+}
+
 block_cn_ensure_inbounds_sniffing() {
     local target_file=$1
     [[ -f $target_file ]] || return 0
     local tmp
     tmp=$(mktemp "$target_file.tmp.XXXXXX") || return 1
-    if jq 'if .inbounds then .inbounds |= map(if type == "object" then .sniff = true | .sniff_override_destination = true else . end) else . end' "$target_file" >"$tmp"; then
+    if block_cn_inject_inbounds_sniffing_json <"$target_file" >"$tmp"; then
         mv -f "$tmp" "$target_file"
     else
         rm -f "$tmp"
@@ -1076,25 +1086,22 @@ block_cn_menu_toggle() {
 block_cn_cli() {
     local action=${1:-toggle}
     case $action in
-    status)
-        msg "屏蔽回国流量: $(block_cn_status_text)"
-        ;;
+    status) ;;
     enable | on)
         block_cn_enable
-        msg "屏蔽回国流量: $(block_cn_status_text)"
         ;;
     disable | off)
         block_cn_disable
-        msg "屏蔽回国流量: $(block_cn_status_text)"
         ;;
     toggle)
         block_cn_toggle
-        msg "屏蔽回国流量: $(block_cn_status_text)"
         ;;
     *)
         err "无效参数: $action (支持: status, enable, disable, toggle)"
+        return 1
         ;;
     esac
+    msg "屏蔽回国流量: $(block_cn_status_text)"
 }
 
 render_runtime_node_outbound_modes() {
@@ -1216,21 +1223,20 @@ render_runtime_node_outbound_modes() {
 
     jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson whitelist_rules "$whitelist_rules" --argjson cached_whitelist "$cached_whitelist" '
         def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
-        def is_managed_tag($tag):
+        def is_managed_outbound_tag($tag):
             $tag == "block"
             or ((direct_managed_tags | index($tag)) != null)
+            or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
+        def is_managed_route_tag($tag):
+            ((direct_managed_tags | index($tag)) != null)
             or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
         def is_broad_direct_rule:
             .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
         def is_managed_whitelist_rule:
             (is_broad_direct_rule | not) and .outbound == "direct" and (
                 . as $rule |
-                ($cached_whitelist | any(. == $rule))
-                or ($whitelist_rules | any(. == $rule))
-                or (((.domain // []) | index("connectivitycheck.gstatic.com")) != null)
-                or (((.domain // []) | index("cached-marker.infra.example")) != null)
-                or (((.domain_suffix // []) | index("download.windowsupdate.com")) != null)
-                or (((.domain_suffix // []) | index("cached-suffix.infra.example")) != null)
+                (($cached_whitelist // []) | any(. == $rule))
+                or (($whitelist_rules // []) | any(. == $rule))
             );
         def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
@@ -1270,6 +1276,7 @@ render_runtime_node_outbound_modes() {
           else . end
         | del(.dns.strategy)
         | .route = (.route // {})
+        | .route.final = (.route.final // "direct")
         | if (.route.default_domain_resolver | type) == "object" then
             if ((.route.default_domain_resolver.server // "") | length) > 0 then
                 .route.default_domain_resolver = .route.default_domain_resolver.server
@@ -1289,11 +1296,11 @@ render_runtime_node_outbound_modes() {
                 del(.route.rule_set)
             else . end
           end
-        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_tag($tag)) | not))))
+        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule) | not)))) as $existing_rules
+        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
         | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
-        | if $block_cn_enabled then .outbounds += [{tag:"block",type:"block"}] else . end
-        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule) | not)))) as $existing_rules
+        | if ($block_cn_enabled or any($existing_rules[]; .outbound == "block")) then .outbounds += [{tag:"block",type:"block"}] else . end
         | .route.rules = (
             if $block_cn_enabled then
                 ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
@@ -3301,7 +3308,7 @@ create() {
                     '{inbounds:[{tag:$tag,type:"snell",listen:"::",listen_port:$port,version:$version,psk:$psk,obfs_mode:$obfs_mode}]}')
             fi
             if block_cn_is_enabled; then
-                is_new_json=$(jq 'if .inbounds then .inbounds |= map(if type == "object" then .sniff = true | .sniff_override_destination = true else . end) else . end' <<<"$is_new_json")
+                is_new_json=$(block_cn_inject_inbounds_sniffing_json "$is_new_json")
             fi
             is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || err "无法创建 Snell 临时配置文件."
             printf '%s\n' "$is_new_json" >"$is_snell_tmp_file"
@@ -3312,7 +3319,7 @@ create() {
         else
             is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
             if block_cn_is_enabled; then
-                is_new_json=$(jq 'if .inbounds then .inbounds |= map(if type == "object" then .sniff = true | .sniff_override_destination = true else . end) else . end' <<<"$is_new_json")
+                is_new_json=$(block_cn_inject_inbounds_sniffing_json "$is_new_json")
             fi
         fi
         [[ $is_test_json ]] && {
@@ -5226,15 +5233,23 @@ relay_add() {
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
     tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建中转临时配置文件."
 
-    jq -n \
+    local relay_inbound
+    relay_inbound=$(jq -n \
         --arg tag "relay-${local_port}.json" \
         --arg addr "$remote_addr" \
         --argjson local_port "$local_port" \
         --argjson remote_port "$remote_port" \
-        '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}' > "$tmp_file" || {
+        '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
         rm -f "$tmp_file"
         err "生成中转配置 JSON 失败."
     }
+    if type -t block_cn_is_enabled >/dev/null 2>&1 && block_cn_is_enabled; then
+        relay_inbound=$(block_cn_inject_inbounds_sniffing_json "$relay_inbound") || {
+            rm -f "$tmp_file"
+            err "注入中转入站嗅探配置失败."
+        }
+    fi
+    printf '%s\n' "$relay_inbound" > "$tmp_file"
 
     if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
         rm -f "$tmp_file"

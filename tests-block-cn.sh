@@ -424,6 +424,7 @@ jq -e '
 
 # 14. 网络失败且无本地缓存时的容错断言
 rm -f "$is_core_dir/.cn-whitelist.json"
+create config.json >/dev/null 2>&1
 export FAKE_CURL_FAIL=1
 warn_out2=$(block_cn_sync_whitelist 2>&1)
 [[ $warn_out2 == *"下载回国白名单失败且无本地缓存"* ]] || fail "should warn about no cache available: $warn_out2"
@@ -562,6 +563,62 @@ jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "
 jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after deleting node"
 jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after deleting node"
 jq -e '.route.rules | any(.inbound == ["node-lifecycle-renamed.json"]) | not' "$is_config_json" >/dev/null || fail "deleted node route must be removed"
+
+# 18.1 用户自定义 block 规则在多次同步与状态切换中保持隔离不被误删
+# 注入一条用户自定义 block 规则（例如广告拦截）
+jq '.route.rules = [{domain_suffix:["ad-analytics.custom.lan"],outbound:"block"}] + .route.rules' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+
+# 在 block-cn 启用状态下同步
+sync_runtime_node_outbound_modes || fail "sync failed with custom block rule while block-cn enabled"
+jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must be preserved when enabled"
+jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound must exist when block-cn enabled"
+
+# 切换为关闭状态
+main block-cn off 2>&1 >/dev/null
+jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must be preserved when disabled"
+# 即使 block-cn 已禁用，由于存在用户自定义 block 规则，outbounds 中必须保留 block 出站避免校验失败
+jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound must be retained for custom block rule when disabled"
+
+# 重新启用并再次验证
+main block-cn on 2>&1 >/dev/null
+jq -e '.route.rules | any(.domain_suffix == ["ad-analytics.custom.lan"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "custom block rule must survive re-enabling"
+
+# 18.2 中转节点入站嗅探配置注入与扫描断言
+# 场景 A: 在 block-cn 启用状态下新增中转节点，入站应包含 sniff 配置
+main relay add 10088 198.51.100.1 20088 >/dev/null 2>&1 || fail "relay add 10088 failed"
+jq -e '
+  .inbounds[0].tag == "relay-10088.json"
+  and .inbounds[0].sniff == true
+  and .inbounds[0].sniff_override_destination == true
+' "$is_conf_dir/relay-10088.json" >/dev/null || fail "new relay node inbound must have sniffing enabled when block-cn is on"
+
+# 场景 B: 模拟之前存在未配置嗅探的中转节点，启用时应被 block_cn_ensure_all_nodes_sniffing 自动修复
+jq -n '{inbounds:[{tag:"relay-10089.json",type:"direct",listen:"::",listen_port:10089,override_address:"198.51.100.2",override_port:20089}]}' >"$is_conf_dir/relay-10089.json"
+block_cn_ensure_all_nodes_sniffing "$is_conf_dir" || fail "block_cn_ensure_all_nodes_sniffing failed"
+jq -e '
+  .inbounds[0].tag == "relay-10089.json"
+  and .inbounds[0].sniff == true
+  and .inbounds[0].sniff_override_destination == true
+' "$is_conf_dir/relay-10089.json" >/dev/null || fail "existing relay node must be updated with sniffing"
+rm -f "$is_conf_dir/relay-10088.json" "$is_conf_dir/relay-10089.json"
+
+# 18.3 默认 final 兜底路由断言
+sync_runtime_node_outbound_modes || fail "sync failed for default final assertion"
+jq -e '.route.final == "direct"' "$is_config_json" >/dev/null || fail "route.final must default to direct"
+
+# 如果用户已有自定义 final，应保留用户配置
+jq '.route.final = "custom-final"' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+sync_runtime_node_outbound_modes || fail "sync failed with custom route.final"
+jq -e '.route.final == "custom-final"' "$is_config_json" >/dev/null || fail "custom route.final must be preserved"
+# 恢复为默认
+jq 'del(.route.final)' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
+sync_runtime_node_outbound_modes || fail "sync failed after resetting route.final"
+jq -e '.route.final == "direct"' "$is_config_json" >/dev/null || fail "route.final must fall back to direct"
+
+# 18.4 生产代码无 mock 测试域名泄漏断言
+if grep -E '(cached-marker|cached-suffix)' "$CORE_FILE" >/dev/null 2>&1; then
+  fail "production file $CORE_FILE must not leak mock test domains"
+fi
 
 # 清理测试
 main block-cn off 2>&1 >/dev/null
