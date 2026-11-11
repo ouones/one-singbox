@@ -1257,26 +1257,31 @@ render_runtime_node_outbound_modes() {
                 type: "remote",
                 format: "binary",
                 url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
-                download_detour: "direct"
+                http_client: "direct-client"
             },
             {
                 tag: "geoip-cn",
                 type: "remote",
                 format: "binary",
                 url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-                download_detour: "direct"
+                http_client: "direct-client"
             }
         ];
         def is_managed_block_rule:
-            .outbound == "block" and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
+            (.action == "reject" or .outbound == "block") and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
         def managed_block_rules: [
-            {ip_is_private: true, outbound: "block"},
-            {rule_set: ["geosite-cn", "geoip-cn"], outbound: "block"}
+            {ip_is_private: true, action: "reject"},
+            {rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
         ];
         def is_managed_sniff_rule:
             .action == "sniff" and ((keys - ["action", "timeout"]) | length) == 0;
         def managed_sniff_rules: [
             {action: "sniff"}
+        ];
+        def is_managed_http_client:
+            ((.tag // "") == "direct-client");
+        def managed_http_clients: [
+            {tag: "direct-client", detour: "direct"}
         ];
         .dns = (.dns // {})
         | if (((($direct_rules | length) + ($proxy_rules | length)) > 0) and $resolver == "local") then
@@ -1295,6 +1300,16 @@ render_runtime_node_outbound_modes() {
           elif (.route.default_domain_resolver | type) == "string" and ((.route.default_domain_resolver // "") | length) == 0 then
             del(.route.default_domain_resolver)
           else . end
+        | if has("http_clients") then
+            .http_clients = ((.http_clients // []) | map(select(is_managed_http_client | not)))
+          else . end
+        | if $block_cn_enabled then
+            .http_clients = ((.http_clients // []) + managed_http_clients)
+          else
+            if has("http_clients") and ((.http_clients | length) == 0) then
+                del(.http_clients)
+            else . end
+          end
         | if (.route | has("rule_set")) then
             .route.rule_set = ((.route.rule_set // []) | map(select(is_managed_rule_set | not)))
           else . end
@@ -1309,7 +1324,6 @@ render_runtime_node_outbound_modes() {
         | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
         | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
-        | if ($block_cn_enabled or any($existing_rules[]; .outbound == "block")) then .outbounds += [{tag:"block",type:"block"}] else . end
         | .route.rules = (
             if $block_cn_enabled then
                 ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
