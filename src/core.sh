@@ -854,10 +854,7 @@ current_outbound_mode_display() {
         return
     }
     mode=$(meta_get "$cfg" '.outbound_mode')
-    [[ $mode ]] || {
-        printf '%s\n' 未设置
-        return
-    }
+    [[ $mode ]] || mode="V4优先"
     mode_label=$(outbound_mode_display_name "$mode")
     if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
         if [[ $mode == 'VLESS 出站' ]]; then
@@ -1143,29 +1140,34 @@ render_runtime_node_outbound_modes() {
     for file in "$config_dir"/*.json; do
         [[ -f $file ]] || continue
         cfg=${file##*/}
-        [[ $cfg =~ dynamic-port-.*-link ]] && continue
+        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
         meta_path="$config_dir/.quan-meta/$cfg.meta.json"
         [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
-        [[ -f $meta_path ]] || continue
-        jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
-            runtime_sync_error="节点元数据格式无效: $cfg"
-            return 1
-        }
-        mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
-            runtime_sync_error="无法读取节点出站方式: $cfg"
-            return 1
-        }
-        [[ $mode ]] || continue
+        mode=
+        if [[ -f $meta_path ]]; then
+            jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
+                runtime_sync_error="节点元数据格式无效: $cfg"
+                return 1
+            }
+            mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
+                runtime_sync_error="无法读取节点出站方式: $cfg"
+                return 1
+            }
+        fi
+        [[ $mode ]] || mode="V4优先"
         outbound=$(outbound_mode_to_direct_tag "$mode")
         if [[ $outbound ]]; then
             tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
                 runtime_sync_error="无法读取节点入站 tag: $cfg"
                 return 1
             }
-            [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
-                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
-                return 1
-            }
+            if [[ $(jq -r 'length' <<<"$tags") -eq 0 ]]; then
+                if [[ -f $meta_path ]] && jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
+                    runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+                    return 1
+                fi
+                continue
+            fi
             direct_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$direct_rules") || {
                 runtime_sync_error="生成直连路由失败: $cfg"
                 return 1
@@ -1353,6 +1355,37 @@ render_runtime_node_outbound_modes() {
     return 0
 }
 
+upgrade_legacy_node_outbound_metadata() {
+    local config_dir=${1:-$is_conf_dir} file cfg meta_path tmp_meta
+    [[ -d $config_dir ]] || return 0
+    shopt -s nullglob
+    for file in "$config_dir"/*.json; do
+        [[ -f $file ]] || continue
+        cfg=${file##*/}
+        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
+        jq -e 'type == "object" and ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | length > 0)' "$file" >/dev/null 2>&1 || continue
+        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
+        if [[ ! -f $meta_path ]]; then
+            mkdir -p "$config_dir/.quan-meta" || continue
+            tmp_meta=$(mktemp "$config_dir/.quan-meta/$cfg.meta.tmp.XXXXXX") || continue
+            if jq -n '{outbound_mode: "V4优先"}' >"$tmp_meta" && chmod 600 "$tmp_meta" && mv -f "$tmp_meta" "$meta_path"; then
+                :
+            else
+                rm -f "$tmp_meta"
+            fi
+        elif ! jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
+            tmp_meta=$(mktemp "$meta_path.tmp.XXXXXX") || continue
+            if jq '.outbound_mode = "V4优先"' "$meta_path" >"$tmp_meta" && chmod 600 "$tmp_meta" && mv -f "$tmp_meta" "$meta_path"; then
+                :
+            else
+                rm -f "$tmp_meta"
+            fi
+        fi
+    done
+    shopt -u nullglob
+    return 0
+}
+
 sync_runtime_node_outbound_modes_unlocked() {
     local source_config=${1:-$is_config_json} target_config=${2:-$is_config_json} config_dir=${3:-$is_conf_dir} validate=${4:-0} tmp
     runtime_sync_error=
@@ -1375,6 +1408,7 @@ sync_runtime_node_outbound_modes_unlocked() {
         runtime_sync_error="无法保存运行时配置: $target_config"
         return 1
     fi
+    upgrade_legacy_node_outbound_metadata "$config_dir"
     return 0
 }
 
@@ -3389,9 +3423,12 @@ create() {
         fi
         [[ $is_config_name ]] && is_config_file=$is_config_name
         [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
+        if [[ ! $is_change ]]; then
+            meta_set "$is_config_name" outbound_mode "V4优先"
+        fi
         if [[ ! $node_migration_applied ]]; then
             sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1 || {
-                [[ ! $is_change ]] && rm -f "$is_json_file"
+                [[ ! $is_change ]] && rm -f "$is_json_file" "$is_conf_dir/.quan-meta/$is_config_name.meta.json"
                 err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
             }
             if [[ $is_new_install ]]; then

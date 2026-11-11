@@ -1170,6 +1170,46 @@ lifecycle-protocol-migration)
     jq -e --arg cfg "$new_cfg" --arg tag "$outbound_tag" '.route.rules | any(.inbound == [$cfg] and .outbound == $tag)' "$is_config_json" >/dev/null || fail "protocol migration must use the new actual inbound tag"
     exit 0
     ;;
+new-node-default-outbound)
+    add ss 41601 'test-password' aes-128-gcm >/dev/null 2>&1 || fail "add ss should succeed"
+    new_cfg="Shadowsocks-41601.json"
+    new_meta="$is_conf_dir/.quan-meta/$new_cfg.meta.json"
+    [[ -f "$is_conf_dir/$new_cfg" ]] || fail "new node config file should exist: $new_cfg"
+    [[ -f "$new_meta" ]] || fail "new node metadata file should exist: $new_meta"
+    jq -e '.outbound_mode == "V4优先"' "$new_meta" >/dev/null || fail "new node should have outbound_mode V4优先 in metadata"
+    display=$(current_outbound_mode_display "$new_cfg")
+    [[ "$display" == "IPv4 优先" ]] || fail "new node display should be IPv4 优先, got: $display"
+    jq -e '.outbounds | any(.tag == "direct_v4_pref" and .domain_resolver.strategy == "prefer_ipv4")' "$is_config_json" >/dev/null || fail "runtime config must include direct_v4_pref outbound"
+    jq -e --arg cfg "$new_cfg" '.route.rules | any(.inbound == [$cfg] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "runtime config must route new node to direct_v4_pref"
+    exit 0
+    ;;
+legacy-node-upgrade-default-outbound)
+    cat >"$is_conf_dir/legacy-one.json" <<'EOF'
+{"inbounds":[{"tag":"legacy-one.json","type":"shadowsocks","listen":"::","listen_port":41602,"method":"aes-128-gcm","password":"legacy-one-secret"}]}
+EOF
+    cat >"$is_conf_dir/legacy-two.json" <<'EOF'
+{"inbounds":[{"tag":"legacy-two.json","type":"shadowsocks","listen":"::","listen_port":41603,"method":"aes-128-gcm","password":"legacy-two-secret"}]}
+EOF
+    jq -n '{node_name:"LegacyTwo",entry_addr:"legacy2.example.com",custom:"preserve"}' >"$is_conf_dir/.quan-meta/legacy-two.json.meta.json"
+
+    display_one=$(current_outbound_mode_display "legacy-one.json")
+    [[ "$display_one" == "IPv4 优先" ]] || fail "legacy-one display without metadata should be IPv4 优先, got: $display_one"
+    display_two=$(current_outbound_mode_display "legacy-two.json")
+    [[ "$display_two" == "IPv4 优先" ]] || fail "legacy-two display without outbound_mode should be IPv4 优先, got: $display_two"
+
+    sync_runtime_node_outbound_modes || fail "synchronizing runtime node outbound modes for legacy nodes should succeed"
+
+    meta_one="$is_conf_dir/.quan-meta/legacy-one.json.meta.json"
+    meta_two="$is_conf_dir/.quan-meta/legacy-two.json.meta.json"
+    [[ -f "$meta_one" ]] || fail "legacy-one metadata should be generated on sync"
+    jq -e '.outbound_mode == "V4优先"' "$meta_one" >/dev/null || fail "legacy-one should have outbound_mode V4优先"
+    jq -e '.outbound_mode == "V4优先" and .node_name == "LegacyTwo" and .entry_addr == "legacy2.example.com" and .custom == "preserve"' "$meta_two" >/dev/null || fail "legacy-two should preserve metadata and have outbound_mode V4优先"
+
+    jq -e '.outbounds | any(.tag == "direct_v4_pref" and .domain_resolver.strategy == "prefer_ipv4")' "$is_config_json" >/dev/null || fail "runtime config must include direct_v4_pref outbound"
+    jq -e '.route.rules | any(.inbound == ["legacy-one.json"] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "legacy-one should route to direct_v4_pref"
+    jq -e '.route.rules | any(.inbound == ["legacy-two.json"] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "legacy-two should route to direct_v4_pref"
+    exit 0
+    ;;
 *)
     fail "unknown test scenario: $TEST_SCENARIO"
     ;;
@@ -1218,11 +1258,18 @@ grep -q -- '-C ' "$FAKE_CORE_LOG" || fail "complete check should include the nod
 CASE
 }
 
+if [[ ${1:-} ]]; then
+    run_core_case "$repo_root/core.sh" "$1" || exit 1
+    run_core_case "$repo_root/src/core.sh" "$1" || exit 1
+    echo "PASS: $1"
+    exit 0
+fi
+
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound; do
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound; do
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"
