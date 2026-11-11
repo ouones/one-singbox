@@ -1063,6 +1063,16 @@ block_cn_toggle() {
     fi
 }
 
+block_cn_menu_toggle() {
+    if block_cn_is_enabled; then
+        block_cn_disable
+        msg "\n已禁用屏蔽回国流量。\n"
+    else
+        block_cn_enable
+        msg "\n已启用屏蔽回国流量。\n"
+    fi
+}
+
 block_cn_cli() {
     local action=${1:-toggle}
     case $action in
@@ -5103,7 +5113,7 @@ update_menu() {
 
 system_tools_menu() {
     while :; do
-        is_tmp_list=("启用 BBR" "DNS" "日志上限" "重装脚本" "返回")
+        is_tmp_list=("启用 BBR" "DNS" "日志上限" "屏蔽回国流量 ($(block_cn_status_text))" "重装脚本" "返回")
         ask list is_system_tool null "\n请选择系统设置:\n"
         case $REPLY in
         1)
@@ -5121,10 +5131,14 @@ system_tools_menu() {
             menu_pause
             ;;
         4)
+            block_cn_menu_toggle
+            menu_pause
+            ;;
+        5)
             get reinstall
             menu_pause
             ;;
-        5) return ;;
+        6) return ;;
         esac
     done
 }

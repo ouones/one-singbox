@@ -408,6 +408,7 @@ core_status_read() { is_core_ver=1.46; is_core_status=运行中; }
 log_limit_read() { printf '100'; }
 log_usage_read() { printf '0'; }
 load() { :; }
+block_cn_status_text() { printf '未启用'; }
 
 is_script_name=one-singbox
 is_sh_ver=1.46
@@ -421,7 +422,7 @@ case $MENU_CHOICE in
 2) input=$'2\n5\n\n' ;;
 3) input=$'3\n6\n\n' ;;
 4) input=$'4\n3\n\n' ;;
-5) input=$'5\n5\n\n' ;;
+5) input=$'5\n6\n\n' ;;
 6) input=$'1\n\n5\n\n' ;;
 esac
 output=$(printf '%s' "$input" | is_main_menu)
@@ -460,20 +461,22 @@ load() { action_calls+=("load:$1"); }
 _try_enable_bbr() { action_calls+=(bbr); }
 dns_set() { action_calls+=(dns); }
 log_limit_set() { action_calls+=(log-limit); }
+block_cn_menu_toggle() { action_calls+=(block-cn); }
+block_cn_status_text() { printf '未启用'; }
 get() { action_calls+=("get:$1"); }
 
 action_calls=()
 input_file=$(mktemp)
 output_file=$(mktemp)
 trap 'rm -f "$input_file" "$output_file"' EXIT
-printf '1\n\n2\n\n3\n\n4\n\n5\n' >"$input_file"
+printf '1\n\n2\n\n3\n\n4\n\n5\n\n6\n' >"$input_file"
 system_tools_menu <"$input_file" >"$output_file"
 output=$(cat "$output_file")
-for label in '启用 BBR' 'DNS' '日志上限' '重装脚本' '返回'; do
+for label in '启用 BBR' 'DNS' '日志上限' '屏蔽回国流量' '重装脚本' '返回'; do
     [[ $output == *"$label"* ]] || fail "system settings show '$label': $output"
 done
 [[ $output == *'请选择系统设置'* ]] || fail "system settings prompt uses its menu name: $output"
-[[ ${action_calls[*]} == 'load:bbr.sh bbr load:dns.sh dns log-limit get:reinstall' ]] || fail "system setting choices keep their actions: ${action_calls[*]}"
+[[ ${action_calls[*]} == 'load:bbr.sh bbr load:dns.sh dns log-limit block-cn get:reinstall' ]] || fail "system setting choices keep their actions: ${action_calls[*]}"
 CASE
 }
 
@@ -674,11 +677,12 @@ update() { update_calls=$((update_calls + 1)); }
 
 main_calls=0
 update_calls=0
+block_cn_status_text() { printf '未启用'; }
 update_menu <<<"3" >/dev/null
 [[ $main_calls == 0 ]] || fail 'update menu back must return to its caller'
 [[ $update_calls == 0 ]] || fail 'returning from update menu must not update anything'
 
-system_tools_menu <<<"5" >/dev/null
+system_tools_menu <<<"6" >/dev/null
 [[ $main_calls == 0 ]] || fail 'system tools back must return to its caller'
 CASE
 }

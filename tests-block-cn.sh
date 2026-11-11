@@ -175,6 +175,15 @@ export FAKE_CURL_LOG="$case_dir/curl.log"
 : >"$FAKE_CORE_LOG"
 : >"$FAKE_CURL_LOG"
 
+# 防止菜单测试误触发重装卸载流程
+get() {
+    if [[ $1 == reinstall ]]; then
+        msg "mock reinstall"
+        return 0
+    fi
+    builtin command get "$@" 2>/dev/null || :
+}
+
 restart_count() {
     grep -c '^restart ' "$SERVICE_LOG" 2>/dev/null || true
 }
@@ -445,6 +454,114 @@ jq -e '
 main block-cn off 2>&1 >/dev/null
 jq -e '.route.rules | any(.domain == ["user-custom.direct.lan"] and .outbound == "direct")' "$is_config_json" >/dev/null || fail "user custom direct rule must be preserved after block-cn disabled"
 jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com")) | not' "$is_config_json" >/dev/null || fail "whitelist rule must be removed after disable"
+
+# 16. system_tools_menu 交互仿真测试 (Issue #73)
+# 确保初始为未启用状态
+main block-cn off 2>&1 >/dev/null
+[[ ! -f "$is_core_dir/.block-cn-enabled" ]] || fail "ensure block-cn disabled initially"
+
+# 仿真执行: 选中 4 (切换为启用) -> 回车确认 -> 选中 4 (切换为未启用) -> 回车确认 -> 选中 6 (返回)
+menu_in=$'4\n\n4\n\n6\n'
+menu_out=$(printf '%s' "$menu_in" | system_tools_menu 2>&1)
+
+# 断言 1: 初始菜单展示包含 "屏蔽回国流量 (未启用)"
+[[ $menu_out == *"屏蔽回国流量 (未启用)"* ]] || fail "menu should show '屏蔽回国流量 (未启用)': $menu_out"
+
+# 断言 2: 首次选中后显示反馈信息 "已启用屏蔽回国流量"
+[[ $menu_out == *"已启用屏蔽回国流量"* ]] || fail "menu output should contain '已启用屏蔽回国流量': $menu_out"
+
+# 断言 3: 再次展示菜单时动态展示 "屏蔽回国流量 (已启用)"
+[[ $menu_out == *"屏蔽回国流量 (已启用)"* ]] || fail "menu should dynamically show '屏蔽回国流量 (已启用)': $menu_out"
+
+# 断言 4: 第二次选中后显示反馈信息 "已禁用屏蔽回国流量"
+[[ $menu_out == *"已禁用屏蔽回国流量"* ]] || fail "menu output should contain '已禁用屏蔽回国流量': $menu_out"
+
+# 断言 5: 返回后状态依然为未启用，标志文件不存在
+block_cn_is_enabled && fail "block-cn should be disabled after toggling back"
+
+# 仿真仅切换为启用并退出菜单
+reset_service_log
+printf '4\n\n6\n' | system_tools_menu 2>&1 >/dev/null
+block_cn_is_enabled || fail "block-cn should be enabled after menu toggle"
+[[ -f "$is_core_dir/.block-cn-enabled" ]] || fail "flag file should exist after menu toggle to enable"
+[[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist file should exist after menu toggle to enable"
+[[ $(restart_count) -ge 1 ]] || fail "menu toggle to enable must restart service"
+jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound must exist after menu enable"
+jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn must exist after menu enable"
+
+# 再次从已启用状态切换为未启用并退出菜单
+reset_service_log
+printf '4\n\n6\n' | system_tools_menu 2>&1 >/dev/null
+block_cn_is_enabled && fail "block-cn should be disabled after second menu toggle"
+[[ ! -f "$is_core_dir/.block-cn-enabled" ]] || fail "flag file must be removed after menu toggle to disable"
+[[ $(restart_count) -ge 1 ]] || fail "menu toggle to disable must restart service"
+jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "block outbound must be removed after menu disable"
+
+# 17. 节点全生命周期联动与无损保留测试 (Issue #73)
+# 开启 block-cn
+main block-cn on 2>&1 >/dev/null
+block_cn_is_enabled || fail "block-cn must be enabled for lifecycle test"
+
+# 17.1 新增节点生命周期联动：测试入站 sniff 注入与运行时配置中 block-cn 规则保留
+cat >"$is_conf_dir/node-lifecycle.json" <<'EOF'
+{
+  "inbounds": [
+    {
+      "tag": "node-lifecycle.json",
+      "type": "shadowsocks",
+      "listen": "::",
+      "listen_port": 45678,
+      "method": "aes-128-gcm",
+      "password": "pass-lifecycle"
+    }
+  ]
+}
+EOF
+# 为新节点注入元数据
+jq -n '{node_name:"lifecycle-node",outbound_mode:"V6优先"}' >"$is_conf_dir/.quan-meta/node-lifecycle.json.meta.json"
+# 确保入站嗅探配置
+block_cn_ensure_inbounds_sniffing "$is_conf_dir/node-lifecycle.json"
+jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-lifecycle.json" >/dev/null || fail "lifecycle node inbound must have sniffing"
+
+# 触发同步
+sync_runtime_node_outbound_modes || fail "sync_runtime_node_outbound_modes failed after adding node"
+# 断言：运行时配置中保留了 block-cn 出站、规则集与白名单规则，且新增节点的直连路由正确生成
+jq -e '.outbounds | any(.tag == "block" and .type == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after adding node"
+jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after adding node"
+jq -e '.route.rule_set | any(.tag == "geoip-cn")' "$is_config_json" >/dev/null || fail "geoip-cn lost after adding node"
+jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "private ip block rule lost after adding node"
+jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .outbound == "block")' "$is_config_json" >/dev/null || fail "cn rule_set block rule lost after adding node"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist rule lost after adding node"
+jq -e '.route.rules | any(.inbound == ["node-lifecycle.json"] and .outbound == "direct_v6_pref")' "$is_config_json" >/dev/null || fail "new node route not found"
+
+# 17.2 更改节点出站方式生命周期联动 (apply_node_outbound_mode_unlocked)
+apply_node_outbound_mode_unlocked "node-lifecycle.json" "仅V4" || fail "apply_node_outbound_mode_unlocked failed"
+# 断言：出站方式已变更为 direct_v4_only，但 block 出站与规则依然完整无损
+jq -e '.route.rules | any(.inbound == ["node-lifecycle.json"] and .outbound == "direct_v4_only")' "$is_config_json" >/dev/null || fail "node route not updated to direct_v4_only"
+jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after modifying outbound mode"
+jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after modifying outbound mode"
+jq -e '.route.rules | any(.ip_is_private == true and .outbound == "block")' "$is_config_json" >/dev/null || fail "private block lost after modifying outbound mode"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after modifying outbound mode"
+
+# 17.3 节点替换/重命名生命周期联动 (apply_node_config_lifecycle replace)
+node_lifecycle_renamed_json=$(jq '.inbounds[0].tag = "node-lifecycle-renamed.json" | .inbounds[0].listen_port = 56789' "$is_conf_dir/node-lifecycle.json")
+apply_node_config_lifecycle replace "node-lifecycle.json" "node-lifecycle-renamed.json" "$node_lifecycle_renamed_json" || fail "apply_node_config_lifecycle replace failed"
+# 断言：重命名后新配置文件入站嗅探保留
+jq -e '.inbounds[0].sniff == true and .inbounds[0].sniff_override_destination == true' "$is_conf_dir/node-lifecycle-renamed.json" >/dev/null || fail "renamed node must retain sniffing"
+# 断言：运行时配置中 block-cn 规则无损
+jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after renaming node"
+jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after renaming node"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after renaming node"
+jq -e '.route.rules | any(.inbound == ["node-lifecycle-renamed.json"])' "$is_config_json" >/dev/null || fail "renamed node route not found"
+
+# 17.4 节点删除生命周期联动 (apply_node_config_lifecycle delete)
+apply_node_config_lifecycle delete "node-lifecycle-renamed.json" || fail "apply_node_config_lifecycle delete failed"
+[[ ! -f "$is_conf_dir/node-lifecycle-renamed.json" ]] || fail "deleted node file should not exist"
+# 断言：删除节点后 block-cn 规则依然完整无损
+jq -e '.outbounds | any(.tag == "block")' "$is_config_json" >/dev/null || fail "block outbound lost after deleting node"
+jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null || fail "geosite-cn lost after deleting node"
+jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.com"))' "$is_config_json" >/dev/null || fail "whitelist lost after deleting node"
+jq -e '.route.rules | any(.inbound == ["node-lifecycle-renamed.json"]) | not' "$is_config_json" >/dev/null || fail "deleted node route must be removed"
 
 # 清理测试
 main block-cn off 2>&1 >/dev/null
