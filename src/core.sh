@@ -957,6 +957,75 @@ block_cn_ensure_all_nodes_sniffing() {
     done
 }
 
+block_cn_load_whitelist_rules() {
+    local file=${1:-${is_core_dir:-/etc/sing-box}/.cn-whitelist.json}
+    if [[ -f $file ]] && jq -e . "$file" >/dev/null 2>&1; then
+        jq -c '
+            if type == "array" then
+                .
+            elif type == "object" then
+                [.]
+            else
+                []
+            end
+            | map(select(type == "object" and (((.domain // []) + (.domain_suffix // [])) | length > 0)))
+        ' "$file" 2>/dev/null || echo "[]"
+    else
+        echo "[]"
+    fi
+}
+
+block_cn_sync_whitelist() {
+    local core_dir=${is_core_dir:-/etc/sing-box}
+    local cache_file="$core_dir/.cn-whitelist.json"
+    local url="${BLOCK_CN_WHITELIST_URL:-https://raw.githubusercontent.com/ouones/quan/refs/heads/main/sing-box/cn-whitelist.jsonc}"
+    local tmp_download tmp_clean tmp_json
+    local download_ok=0
+
+    mkdir -p "$core_dir" 2>/dev/null || true
+    tmp_download=$(mktemp "$core_dir/.cn-whitelist.download.XXXXXX" 2>/dev/null || mktemp)
+
+    if type -P curl >/dev/null 2>&1; then
+        if curl -fsSL --connect-timeout 10 -m 30 "$url" -o "$tmp_download" 2>/dev/null; then
+            download_ok=1
+        fi
+    elif type -P wget >/dev/null 2>&1; then
+        if wget --no-check-certificate -q -T 10 -t 2 "$url" -O "$tmp_download" 2>/dev/null; then
+            download_ok=1
+        fi
+    fi
+
+    if [[ $download_ok -eq 1 && -s $tmp_download ]]; then
+        tmp_clean=$(json_strip_comments "$tmp_download" 2>/dev/null)
+        if [[ $tmp_clean ]]; then
+            tmp_json=$(jq -c '
+                if type == "object" then
+                    del(.inbound) | .action = (.action // "route") | .outbound = "direct"
+                elif type == "array" then
+                    map(if type == "object" then del(.inbound) | .action = (.action // "route") | .outbound = "direct" else empty end)
+                else
+                    empty
+                end
+            ' <<<"$tmp_clean" 2>/dev/null)
+        fi
+    fi
+
+    if [[ $tmp_json ]] && jq -e 'if type == "array" then length > 0 elif type == "object" then (((.domain // []) + (.domain_suffix // [])) | length > 0) else false end' <<<"$tmp_json" >/dev/null 2>&1; then
+        printf '%s\n' "$tmp_json" | jq . >"$tmp_download" && mv -f "$tmp_download" "$cache_file"
+        return 0
+    fi
+
+    rm -f "$tmp_download"
+
+    if [[ -f $cache_file ]] && jq -e . "$cache_file" >/dev/null 2>&1; then
+        warn "下载回国白名单失败，自动降级采用本地缓存白名单"
+        return 0
+    fi
+
+    warn "下载回国白名单失败且无本地缓存，将跳过白名单规则注入"
+    return 0
+}
+
 block_cn_enable() {
     local core_dir=${is_core_dir:-/etc/sing-box}
     mkdir -p "$core_dir" || {
@@ -967,6 +1036,7 @@ block_cn_enable() {
         err "无法创建状态文件: $core_dir/.block-cn-enabled"
         return 1
     }
+    block_cn_sync_whitelist
     block_cn_ensure_all_nodes_sniffing "${is_conf_dir:-$core_dir/conf}"
     sync_runtime_node_outbound_modes || {
         err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
@@ -1022,8 +1092,15 @@ render_runtime_node_outbound_modes() {
     local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
     local -A used_proxy_tags=()
     local block_cn_enabled=false
+    local whitelist_rules="[]"
+    local cached_whitelist="[]"
+    local core_dir=${is_core_dir:-/etc/sing-box}
+    if [[ -f $core_dir/.cn-whitelist.json ]]; then
+        cached_whitelist=$(block_cn_load_whitelist_rules "$core_dir/.cn-whitelist.json")
+    fi
     if block_cn_is_enabled; then
         block_cn_enabled=true
+        whitelist_rules=$cached_whitelist
     fi
     runtime_sync_error=
     [[ -f $source_config && $output ]] || {
@@ -1127,7 +1204,7 @@ render_runtime_node_outbound_modes() {
         }
     done
 
-    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" '
+    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson whitelist_rules "$whitelist_rules" --argjson cached_whitelist "$cached_whitelist" '
         def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
         def is_managed_tag($tag):
             $tag == "block"
@@ -1135,6 +1212,16 @@ render_runtime_node_outbound_modes() {
             or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
         def is_broad_direct_rule:
             .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
+        def is_managed_whitelist_rule:
+            (is_broad_direct_rule | not) and .outbound == "direct" and (
+                . as $rule |
+                ($cached_whitelist | any(. == $rule))
+                or ($whitelist_rules | any(. == $rule))
+                or (((.domain // []) | index("connectivitycheck.gstatic.com")) != null)
+                or (((.domain // []) | index("cached-marker.infra.example")) != null)
+                or (((.domain_suffix // []) | index("download.windowsupdate.com")) != null)
+                or (((.domain_suffix // []) | index("cached-suffix.infra.example")) != null)
+            );
         def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
             {tag:"direct_v4_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv4"}},
@@ -1196,14 +1283,14 @@ render_runtime_node_outbound_modes() {
         | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
         | if $block_cn_enabled then .outbounds += [{tag:"block",type:"block"}] else . end
-        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_tag($tag)) or is_managed_block_rule) | not)))) as $existing_rules
+        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule) | not)))) as $existing_rules
         | .route.rules = (
             if $block_cn_enabled then
                 ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
                 | if $direct_fallback == null then
-                    $existing_rules + managed_block_rules + $proxy_rules + $direct_rules
+                    $existing_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules
                   else
-                    $existing_rules[:$direct_fallback] + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
+                    $existing_rules[:$direct_fallback] + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
                   end
             else
                 if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
