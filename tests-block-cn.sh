@@ -366,8 +366,8 @@ jq -e '.route.rules | any(.action == "route" and .outbound == "direct" and (.dom
 [[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist cache file should be preserved on disk after disable"
 jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null || fail "custom outbounds must be preserved after disable"
 
-# 禁用后移除受管嗅探规则，入站配置依然保持干净
-jq -e '(.route.rules // []) | any(.action == "sniff") | not' "$is_config_json" >/dev/null || fail "sniff rule should be removed after disable"
+# 禁用屏蔽回国后，受管节点常态化路由嗅探依然保留，入站配置依然保持干净
+jq -e '(.route.rules // []) | any(.action == "sniff" and (.inbound // [] | length > 0))' "$is_config_json" >/dev/null || fail "sniff rule should remain active and scoped after disable"
 jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-one.json" >/dev/null || fail "node-one.json must remain clean without legacy fields"
 jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/node-proxy.json" >/dev/null || fail "node-proxy.json must remain clean without legacy fields"
 

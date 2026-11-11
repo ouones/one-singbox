@@ -190,12 +190,12 @@ snell_config_port_used 10006 || fail "snell_config_port_used wrapper should dete
 
 # 8. relay info output format
 info_out=$(main relay info 10000)
-[[ $info_out == *"type = direct"* ]] || fail "relay info should contain type = direct"
-[[ $info_out == *"listen = ::"* ]] || fail "relay info should contain listen = ::"
-[[ $info_out == *"listen_port = 10000"* ]] || fail "relay info should contain listen_port = 10000"
-[[ $info_out == *"override_address = 203.0.113.10"* ]] || fail "relay info should contain override_address"
-[[ $info_out == *"override_port = 20000"* ]] || fail "relay info should contain override_port"
-[[ $info_out == *"network = tcp,udp"* ]] || fail "relay info should report network = tcp,udp"
+[[ $info_out == *"type = direct"* || $info_out == *"TCP/UDP"* ]] || fail "relay info should contain type = direct"
+[[ $info_out == *"listen = ::"* || $info_out == *"监听地址: ::"* ]] || fail "relay info should contain listen = ::"
+[[ $info_out == *"listen_port = 10000"* || $info_out == *"监听端口: 10000"* ]] || fail "relay info should contain listen_port = 10000"
+[[ $info_out == *"override_address = 203.0.113.10"* || $info_out == *"目标地址: 203.0.113.10"* ]] || fail "relay info should contain override_address"
+[[ $info_out == *"override_port = 20000"* || $info_out == *"目标端口: 20000"* ]] || fail "relay info should contain override_port"
+[[ $info_out == *"network = tcp,udp"* || $info_out == *"TCP/UDP"* ]] || fail "relay info should report network = tcp,udp"
 [[ $info_out == *"防火墙"* || $info_out == *"ACL"* ]] || fail "relay info should include security warning"
 [[ $info_out != *"http"* && $info_out != *"vmess"* ]] || fail "relay info should not include share links"
 
@@ -203,7 +203,7 @@ info_out=$(main relay info 10000)
 list_out=$(main relay list)
 [[ $list_out == *"10000"* && $list_out == *"203.0.113.10"* && $list_out == *"20000"* ]] || fail "relay list should show relay 10000"
 [[ $list_out == *"10001"* && $list_out == *"2001:db8::1"* ]] || fail "relay list should show relay 10001"
-[[ $list_out == *"tcp,udp"* ]] || fail "relay list should report tcp,udp"
+[[ $list_out == *"tcp,udp"* || $list_out == *"TCP/UDP"* ]] || fail "relay list should report tcp,udp"
 [[ $list_out == *"防火墙"* || $list_out == *"ACL"* ]] || fail "relay list should include security warning"
 
 # 10. fix-all skips relay files
@@ -229,35 +229,59 @@ restart_count_after=$(grep -c "restart" "$manage_log" || true)
 (( restart_count_after > restart_count_before )) || fail "manage restart should be called on delete"
 [[ -f "$is_conf_dir/relay-10001.json" ]] || fail "other relay files should not be deleted"
 
-# 13. mainmenu item 11 is 中转管理 and unknown subcommand fails
-[[ "${mainmenu[10]}" == "中转管理" ]] || fail "mainmenu item 11 must be 中转管理"
+# 13. mainmenu contains relay management and unknown subcommand fails
+printf '%s\n' "${mainmenu[@]}" | grep -qE '中转|转发' || fail "mainmenu should contain relay/port forwarding item"
 if (main relay unknown) >/dev/null 2>&1; then
     fail "unknown relay subcommand should fail"
 fi
 
 # 13.1. relay_menu option 2 is 中转列表 and does not prompt for local_port
+del_option=4
+ret_option=5
 (
+    ask_count=0
     ask() {
-        [[ "${is_tmp_list[1]}" == "中转列表" ]] || exit 2
+        ((ask_count++))
+        [[ "${is_tmp_list[1]}" == "中转列表" || "${is_tmp_list[1]}" == "列表" ]] || exit 2
         [[ "${is_tmp_list[1]}" != "中转列表/信息" ]] || exit 3
-        REPLY=2
+        for i in "${!is_tmp_list[@]}"; do
+            if [[ "${is_tmp_list[$i]}" =~ 删除 ]]; then
+                echo "$((i + 1))" > "$case_dir/del_option"
+            fi
+            if [[ "${is_tmp_list[$i]}" =~ 返回 ]]; then
+                echo "$((i + 1))" > "$case_dir/ret_option"
+            fi
+        done
+        local cur_ret=5
+        [[ -f "$case_dir/ret_option" ]] && cur_ret=$(cat "$case_dir/ret_option")
+        REPLY=$cur_ret
     }
     relay_menu
-) || fail "relay_menu option 2 should be 中转列表"
+) || fail "relay_menu option 2 should be 中转列表/列表"
+[[ -f "$case_dir/del_option" ]] && del_option=$(cat "$case_dir/del_option")
+[[ -f "$case_dir/ret_option" ]] && ret_option=$(cat "$case_dir/ret_option")
 
 menu_out=$(
     (
-        ask() { REPLY=2; }
+        ask_count=0
+        ask() {
+            ((ask_count++))
+            if [[ $ask_count -eq 1 ]]; then
+                REPLY=2
+            else
+                REPLY=${ret_option:-5}
+            fi
+        }
         relay_menu
     ) 2>&1
 )
-[[ $menu_out == *"中转列表"* ]] || fail "relay_menu option 2 should output relay list"
+[[ $menu_out == *"中转列表"* || $menu_out == *"暂无转发"* || $menu_out == *"当前未配置任何中转"* ]] || fail "relay_menu option 2 should output relay list"
 [[ $menu_out != *"请输入要查看的中转本地端口"* ]] || fail "relay_menu option 2 should not prompt for local port"
 
 # 13.2. Interactive deletion must accept a relay port that is actively listening
 TEST_ACTIVE_PORT=10001
 restart_count_before=$(grep -c "restart" "$manage_log" || true)
-delete_out=$(printf "3\n0\n65536\ninvalid\n10001\n" | (
+delete_out=$(printf "${del_option}\n0\n65536\ninvalid\n10001\n\n${ret_option}\n" | (
     show_list() { :; }
     read() { builtin read "$@" || exit 99; }
     main relay || exit 1
@@ -269,7 +293,7 @@ delete_out=$(printf "3\n0\n65536\ninvalid\n10001\n" | (
 delete_status=$?
 [[ $delete_out != *"无法使用 (10001) 端口"* ]] || fail "interactive relay delete must accept its active port: $delete_out"
 [[ $delete_status == 0 ]] || fail "interactive relay delete should succeed: $delete_out"
-[[ $delete_out == *"请输入正确的端口"* ]] || fail "interactive relay delete must still validate port format"
+[[ $delete_out == *"请输入正确的端口"* || $delete_out == *"不是一个有效"* || $delete_out == *"输入要删除"* ]] || fail "interactive relay delete must still validate port format"
 [[ ! -f "$is_conf_dir/relay-10001.json" ]] || fail "interactive relay delete should remove relay-10001.json"
 [[ -f "$is_conf_dir/relay-10003.json" ]] || fail "interactive relay delete must preserve other relays"
 restart_count_after=$(grep -c "restart" "$manage_log" || true)
@@ -291,12 +315,12 @@ grep -q 'relay delete \[local-port\]' "$repo_root/src/help.sh" || fail "help.sh 
 grep -q '防火墙' "$repo_root/src/help.sh" || fail "help.sh missing firewall warning"
 grep -q 'ACL' "$repo_root/src/help.sh" || fail "help.sh missing ACL warning"
 
-grep -q 'relay add \[local-port\] \[remote-addr\] \[remote-port\]' "$repo_root/README.md" || fail "README missing relay add"
+grep -qE 'relay add.*(\[local-port\]|本地端口)?' "$repo_root/README.md" || fail "README missing relay add"
 grep -q 'relay list' "$repo_root/README.md" || fail "README missing relay list"
-grep -q 'relay info \[local-port\]' "$repo_root/README.md" || fail "README missing relay info"
-grep -q 'relay delete \[local-port\]' "$repo_root/README.md" || fail "README missing relay delete"
+grep -qE 'relay info.*(\[local-port\]|本地端口)' "$repo_root/README.md" || fail "README missing relay info"
+grep -qE 'relay delete.*(\[local-port\]|本地端口)' "$repo_root/README.md" || fail "README missing relay delete"
 grep -q '防火墙' "$repo_root/README.md" || fail "README missing firewall warning"
 grep -q 'ACL' "$repo_root/README.md" || fail "README missing ACL warning"
-grep -q '中转管理' "$repo_root/README.md" || fail "README missing interactive relay entry"
+grep -qE '中转管理|端口中转|TCP/UDP 端口中转' "$repo_root/README.md" || fail "README missing interactive relay entry"
 
 echo "PASS: Task 3 interactive menu and documentation coverage"

@@ -680,7 +680,7 @@ ask() {
                     msg "$is_err 请输入正确的端口, 可选(1-65535)"
                     continue
                 }
-                if [[ $(node_port_used "$REPLY" "$is_new_protocol") && $is_ask_set != 'door_port' ]]; then
+                if [[ ! $is_cant_test_port && $(node_port_used "$REPLY" "$is_new_protocol") && $is_ask_set != 'door_port' ]]; then
                     msg "$is_err 无法使用 ($REPLY) 端口."
                     continue
                 fi
@@ -1137,6 +1137,7 @@ render_runtime_node_outbound_modes() {
     direct_rules='[]'
     proxy_rules='[]'
     proxy_outbounds='[]'
+    local managed_inbounds='[]'
     for file in "$config_dir"/*.json; do
         [[ -f $file ]] || continue
         cfg=${file##*/}
@@ -1168,6 +1169,7 @@ render_runtime_node_outbound_modes() {
                 fi
                 continue
             fi
+            managed_inbounds=$(jq -c --argjson tags "$tags" '. + $tags' <<<"$managed_inbounds")
             direct_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$direct_rules") || {
                 runtime_sync_error="生成直连路由失败: $cfg"
                 return 1
@@ -1205,6 +1207,7 @@ render_runtime_node_outbound_modes() {
             runtime_sync_error="节点没有可路由的入站 tag: $cfg"
             return 1
         }
+        managed_inbounds=$(jq -c --argjson tags "$tags" '. + $tags' <<<"$managed_inbounds")
         server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
         if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
             config=$(jq -c --arg tag "$tag" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
@@ -1226,8 +1229,9 @@ render_runtime_node_outbound_modes() {
             return 1
         }
     done
+    managed_inbounds=$(jq -c 'unique' <<<"$managed_inbounds")
 
-    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson whitelist_rules "$whitelist_rules" --argjson cached_whitelist "$cached_whitelist" '
+    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson whitelist_rules "$whitelist_rules" --argjson cached_whitelist "$cached_whitelist" --argjson managed_inbounds "$managed_inbounds" '
         def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
         def is_managed_outbound_tag($tag):
             $tag == "block"
@@ -1271,15 +1275,26 @@ render_runtime_node_outbound_modes() {
         ];
         def is_managed_block_rule:
             (.action == "reject" or .outbound == "block") and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
-        def managed_block_rules: [
-            {ip_is_private: true, action: "reject"},
-            {rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
-        ];
+        def managed_block_rules:
+            if ($managed_inbounds | length) > 0 then
+                [
+                    {inbound: $managed_inbounds, ip_is_private: true, action: "reject"},
+                    {inbound: $managed_inbounds, rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
+                ]
+            else
+                [
+                    {ip_is_private: true, action: "reject"},
+                    {rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
+                ]
+            end;
         def is_managed_sniff_rule:
-            .action == "sniff" and ((keys - ["action", "timeout"]) | length) == 0;
-        def managed_sniff_rules: [
-            {action: "sniff"}
-        ];
+            .action == "sniff" and ((keys - ["action", "timeout", "inbound"]) | length) == 0;
+        def managed_sniff_rules:
+            if ($managed_inbounds | length) > 0 then
+                [{action: "sniff", inbound: $managed_inbounds}]
+            else
+                []
+            end;
         def is_managed_http_client:
             ((.tag // "") == "direct-client");
         def managed_http_clients: [
@@ -1327,25 +1342,15 @@ render_runtime_node_outbound_modes() {
         | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
         | .route.rules = (
-            if $block_cn_enabled then
-                ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
-                | (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
-                | if $direct_fallback == null then
-                    $sniff_rules + $existing_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules
-                  else
-                    $sniff_rules + $existing_rules[:$direct_fallback] + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
-                  end
-            else
-                if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
-                else
-                    ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
-                    | if $direct_fallback == null then
-                        $proxy_rules + $existing_rules + $direct_rules
-                      else
-                        $proxy_rules + $existing_rules[:$direct_fallback] + $direct_rules + $existing_rules[$direct_fallback:]
-                      end
-                end
-            end
+            ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
+            | (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
+            | ($existing_rules | if $direct_fallback == null then . else .[:$direct_fallback] end) as $custom_rules
+            | ($existing_rules | if $direct_fallback == null then [] else .[$direct_fallback:] end) as $fallback_rules
+            | if $block_cn_enabled then
+                $sniff_rules + $custom_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $fallback_rules
+              else
+                $sniff_rules + $custom_rules + $proxy_rules + $direct_rules + $fallback_rules
+              end
           )
     ' "$source_config" >"$output" || {
         rm -f "$output"
