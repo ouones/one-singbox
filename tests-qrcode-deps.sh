@@ -399,7 +399,9 @@ RUNNER
   chmod +x "$update_runner"
 
   printf 'new script release\n' >"$update_package_dir/update.marker"
-  tar czf "$update_archive" -C "$update_package_dir" update.marker || fail "could not create update fixture archive"
+  mkdir -p "$update_package_dir/src"
+  printf '1\n' >"$update_package_dir/src/post-update-capable"
+  tar czf "$update_archive" -C "$update_package_dir" update.marker src || fail "could not create update fixture archive"
 }
 
 run_active_update() {

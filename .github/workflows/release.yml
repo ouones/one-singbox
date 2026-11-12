@@ -38,6 +38,8 @@ jobs:
           sudo -n bash tests-node-external-frontend.sh
           sudo -n bash tests-node-name-label.sh
           sudo -n bash tests-node-proxy-outbound.sh
+          bash tests-update-script-reload.sh
+          bash tests-block-cn.sh
           bash tests-skill-inventory.sh
       - name: bump version
         run: |
