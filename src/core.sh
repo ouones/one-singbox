@@ -1314,7 +1314,7 @@ render_runtime_node_outbound_modes() {
         def is_managed_http_client:
             ((.tag // "") == "direct-client");
         def managed_http_clients: [
-            {tag: "direct-client", detour: "direct"}
+            {tag: "direct-client"}
         ];
         .dns = (.dns // {})
         | if (($has_direct or (($proxy_outbounds | length) > 0)) and $resolver == "local") then
