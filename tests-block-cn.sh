@@ -39,6 +39,20 @@ if [[ $1 == check ]]; then
         printf 'FATAL[0000] decode config at %s: route.rule_set: download_detour is deprecated in sing-box 1.14+, use http_clients instead\n' "$config" >&2
         exit 1
     fi
+    if jq -e '
+        ((.outbounds // []) | any(.tag == "direct" and .type == "direct" and ((keys - ["tag", "type"]) | length) == 0))
+        and (
+            ((.route.rule_set // []) as $rs
+            | (.http_clients // []) as $hc
+            | $rs | any(type == "object" and .type == "remote" and (
+                .http_client as $client_tag
+                | ($hc | any(.tag == $client_tag and .detour == "direct"))
+            )))
+        )
+    ' "$config" >/dev/null 2>&1; then
+        printf 'FATAL[0000] start router: initialize rule-set: detour to an empty direct outbound makes no sense\n' >&2
+        exit 1
+    fi
     if [[ $conf_dir ]]; then
         shopt -s nullglob
         for file in "$conf_dir"/*.json; do
@@ -289,7 +303,7 @@ enable_out=$(main block-cn enable 2>&1)
 
 # 5. 校验启用后的运行时配置注入
 # A. 现代受管分流与出站断言
-jq -e '.http_clients | any(.tag == "direct-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "managed http_clients direct-client must be injected"
+jq -e '.http_clients | any(.tag == "direct-client" and .detour == null)' "$is_config_json" >/dev/null || fail "managed http_clients direct-client must be injected"
 jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "type: block outbound must NOT exist in modern config"
 jq -e '.outbounds | any(.tag == "custom-preserve")' "$is_config_json" >/dev/null || fail "custom outbounds must be preserved"
 
@@ -425,7 +439,7 @@ jq -e '(.route.rule_set // []) | any(.tag == "geosite-cn") | not' "$is_config_js
 # 11. 在启用状态下执行 create config.json 重建配置
 main block-cn on 2>&1 >/dev/null
 create config.json >/dev/null 2>&1
-jq -e '.http_clients | any(.tag == "direct-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "create config.json should retain direct-client http_client when enabled"
+jq -e '.http_clients | any(.tag == "direct-client" and .detour == null)' "$is_config_json" >/dev/null || fail "create config.json should retain direct-client http_client when enabled"
 jq -e '.outbounds | any(.tag == "block") | not' "$is_config_json" >/dev/null || fail "create config.json should NOT retain type: block outbound"
 jq -e '.route.rule_set | any(.tag == "geosite-cn" and .http_client == "direct-client" and .download_detour == null)' "$is_config_json" >/dev/null || fail "create config.json should retain geosite-cn when enabled"
 jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .outbound == null)' "$is_config_json" >/dev/null || fail "create config.json should retain private IP reject rule when enabled"
@@ -742,7 +756,7 @@ main block-cn on 2>&1 >/dev/null
 jq '.http_clients += [{"tag":"custom-http-client","detour":"direct"}]' "$is_config_json" >"$is_config_json.tmp" && mv -f "$is_config_json.tmp" "$is_config_json"
 sync_runtime_node_outbound_modes || fail "sync with custom http_client failed"
 jq -e '.http_clients | any(.tag == "custom-http-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "custom http_client must be preserved when enabled"
-jq -e '.http_clients | any(.tag == "direct-client" and .detour == "direct")' "$is_config_json" >/dev/null || fail "managed direct-client must be present alongside custom http_client"
+jq -e '.http_clients | any(.tag == "direct-client" and .detour == null)' "$is_config_json" >/dev/null || fail "managed direct-client must be present alongside custom http_client"
 
 # 禁用后自定义 http_clients 依然保留，仅受管 direct-client 被清除
 main block-cn off 2>&1 >/dev/null
@@ -767,6 +781,32 @@ done
 if [[ $real_core ]]; then
     real_check_out=$("$real_core" check -c "$is_config_json" -C "$is_conf_dir" 2>&1) || fail "real sing-box check failed ($real_core): $real_check_out"
     [[ $real_check_out != *"deprecated"* && $real_check_out != *"WARN"* ]] || fail "real sing-box check output should not contain deprecation warnings: $real_check_out"
+fi
+
+# 21.4 detour 校验与真实启动守护 (Issue #82)
+invalid_detour_conf="$case_dir/invalid-detour.json"
+cat >"$invalid_detour_conf" <<'EOF'
+{
+  "outbounds": [{"tag": "direct", "type": "direct"}],
+  "route": {
+    "rule_set": [{
+      "tag": "geosite-cn",
+      "type": "remote",
+      "format": "binary",
+      "http_client": "direct-client",
+      "url": "https://example.com/geosite.srs"
+    }]
+  },
+  "http_clients": [{"tag": "direct-client", "detour": "direct"}]
+}
+EOF
+invalid_check_out=$("$FAKE_CORE" check -c "$invalid_detour_conf" 2>&1 || true)
+[[ $invalid_check_out == *"detour to an empty direct outbound makes no sense"* ]] || fail "mock sing-box must reject empty direct detour, got: $invalid_check_out"
+
+# 若宿主机安装了真实 sing-box，验证开启 block-cn 后服务启动不发生 detour 崩溃
+if [[ $real_core ]]; then
+    startup_out=$(timeout 3s "$real_core" run -c "$is_config_json" 2>&1 || true)
+    [[ $startup_out != *"detour to an empty direct outbound makes no sense"* ]] || fail "real sing-box startup failed with invalid detour: $startup_out"
 fi
 
 # 清理测试
