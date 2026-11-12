@@ -39,7 +39,17 @@ if [[ $1 == check ]]; then
         printf 'FATAL[0000] decode config at %s: route.rule_set: download_detour is deprecated in sing-box 1.14+, use http_clients instead\n' "$config" >&2
         exit 1
     fi
-    if jq -e '(.http_clients // []) | any(type == "object" and .detour == "direct") and ((.outbounds // []) | any(.tag == "direct" and .type == "direct" and ((keys - ["tag", "type"]) | length) == 0))' "$config" >/dev/null 2>&1; then
+    if jq -e '
+        ((.outbounds // []) | any(.tag == "direct" and .type == "direct" and ((keys - ["tag", "type"]) | length) == 0))
+        and (
+            ((.route.rule_set // []) as $rs
+            | (.http_clients // []) as $hc
+            | $rs | any(type == "object" and .type == "remote" and (
+                .http_client as $client_tag
+                | ($hc | any(.tag == $client_tag and .detour == "direct"))
+            )))
+        )
+    ' "$config" >/dev/null 2>&1; then
         printf 'FATAL[0000] start router: initialize rule-set: detour to an empty direct outbound makes no sense\n' >&2
         exit 1
     fi
@@ -771,6 +781,32 @@ done
 if [[ $real_core ]]; then
     real_check_out=$("$real_core" check -c "$is_config_json" -C "$is_conf_dir" 2>&1) || fail "real sing-box check failed ($real_core): $real_check_out"
     [[ $real_check_out != *"deprecated"* && $real_check_out != *"WARN"* ]] || fail "real sing-box check output should not contain deprecation warnings: $real_check_out"
+fi
+
+# 21.4 detour 校验与真实启动守护 (Issue #82)
+invalid_detour_conf="$case_dir/invalid-detour.json"
+cat >"$invalid_detour_conf" <<'EOF'
+{
+  "outbounds": [{"tag": "direct", "type": "direct"}],
+  "route": {
+    "rule_set": [{
+      "tag": "geosite-cn",
+      "type": "remote",
+      "format": "binary",
+      "http_client": "direct-client",
+      "url": "https://example.com/geosite.srs"
+    }]
+  },
+  "http_clients": [{"tag": "direct-client", "detour": "direct"}]
+}
+EOF
+invalid_check_out=$("$FAKE_CORE" check -c "$invalid_detour_conf" 2>&1 || true)
+[[ $invalid_check_out == *"detour to an empty direct outbound makes no sense"* ]] || fail "mock sing-box must reject empty direct detour, got: $invalid_check_out"
+
+# 若宿主机安装了真实 sing-box，验证开启 block-cn 后服务启动不发生 detour 崩溃
+if [[ $real_core ]]; then
+    startup_out=$(timeout 3s "$real_core" run -c "$is_config_json" 2>&1 || true)
+    [[ $startup_out != *"detour to an empty direct outbound makes no sense"* ]] || fail "real sing-box startup failed with invalid detour: $startup_out"
 fi
 
 # 清理测试
