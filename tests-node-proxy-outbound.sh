@@ -731,21 +731,21 @@ vless-http-quic)
     [[ $change_output == *"配置已应用"* && $change_output == *"HTTP+Menu"* ]] || fail "HTTP/h2 menu success should display its name: $change_output"
     jq -e '.outbound_mode == "VLESS 出站" and .outbound_proxy.config.transport == {type:"http",path:"/menu",host:["front.example.com"]}' "$meta_file" >/dev/null || fail "HTTP/h2 normalized config should be cached"
     jq -e '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .transport == {type:"http",path:"/menu",host:["front.example.com"]}' "$is_config_json" >/dev/null || fail "HTTP/h2 transport should reach the runtime outbound"
-    jq -e '.route.rules[0].outbound == "managed_node_vless_node-one_json"' "$is_config_json" >/dev/null || fail "HTTP/h2 should retain the node proxy route"
+    jq -e '.route.rules[0].action == "sniff" and (.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_vless_node-one_json"))' "$is_config_json" >/dev/null || fail "HTTP/h2 should retain the node proxy route"
 
     upgrade_menu_uri="vless://$vless_uuid@upgrade.example.com:443?type=httpupgrade&security=tls&allowInsecure=1&path=%2Fmenu&host=upgrade.example.com#HTTPUpgrade"
     change_output=$(printf '6\n%s\n' "$upgrade_menu_uri" | change node-one.json outbound 2>&1) || fail "HTTPUpgrade menu import should apply: $change_output"
     [[ $change_output == *"配置已应用"* && $change_output == *"HTTPUpgrade"* ]] || fail "HTTPUpgrade menu success should display its name: $change_output"
     jq -e '.outbound_proxy.config.transport == {type:"httpupgrade",path:"/menu",host:"upgrade.example.com"}' "$meta_file" >/dev/null || fail "HTTPUpgrade transport and single host should be cached"
     jq -e '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .transport == {type:"httpupgrade",path:"/menu",host:"upgrade.example.com"}' "$is_config_json" >/dev/null || fail "HTTPUpgrade transport should reach the runtime outbound"
-    jq -e '.route.rules[0].outbound == "managed_node_vless_node-one_json"' "$is_config_json" >/dev/null || fail "HTTPUpgrade should retain the node proxy route"
+    jq -e '.route.rules[0].action == "sniff" and (.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_vless_node-one_json"))' "$is_config_json" >/dev/null || fail "HTTPUpgrade should retain the node proxy route"
 
     quic_menu_uri="vless://$vless_uuid@quic.example.com:443?type=quic&security=tls&allowInsecure=1&quicSecurity=none#QUIC"
     change_output=$(printf '6\n%s\n' "$quic_menu_uri" | change node-one.json outbound 2>&1) || fail "QUIC TLS menu import should apply: $change_output"
     [[ $change_output == *"配置已应用"* && $change_output == *"QUIC"* ]] || fail "QUIC menu success should display its name: $change_output"
     jq -e '.outbound_proxy.config.transport == {type:"quic"} and .outbound_proxy.config.tls.enabled == true' "$meta_file" >/dev/null || fail "QUIC TLS transport should be cached"
     jq -e '.outbounds[] | select(.tag == "managed_node_vless_node-one_json") | .transport == {type:"quic"} and .tls.enabled == true' "$is_config_json" >/dev/null || fail "QUIC TLS transport should reach the runtime outbound"
-    jq -e '.route.rules[0].outbound == "managed_node_vless_node-one_json"' "$is_config_json" >/dev/null || fail "QUIC should retain the node proxy route"
+    jq -e '.route.rules[0].action == "sniff" and (.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_vless_node-one_json"))' "$is_config_json" >/dev/null || fail "QUIC should retain the node proxy route"
     [[ $(restart_count) == 3 ]] || fail "each valid transport import should restart the service exactly once"
 
     cp "$meta_file" "$case_dir/meta.before"
@@ -988,7 +988,7 @@ direct-switches)
         change_output=$(printf '%s\n' "$choice" | change node-one.json outbound 2>&1)
         [[ $change_output == *"配置已应用"* ]] || fail "direct mode $mode failed: $change_output"
         jq -e --arg mode "$mode" --arg tag "$tag" '.outbound_mode == $mode and .outbound_proxy.config.password == "secret"' "$meta_file" >/dev/null || fail "direct mode $mode should retain the latest proxy cache"
-        jq -e --arg inbound "node-one.json" --arg outbound "$tag" '.route.rules[0].action == "resolve" and .route.rules[1].action == "hijack-dns" and .route.rules[2].inbound == [$inbound] and .route.rules[2].outbound == $outbound and .route.rules[3].outbound == "direct"' "$is_config_json" >/dev/null || fail "direct mode $mode should follow DNS rules, precede the broad direct rule, and preserve the original DNS behavior"
+        jq -e --arg inbound "node-one.json" --arg outbound "$tag" '.route.rules[0].action == "sniff" and .route.rules[0].inbound == [$inbound] and .route.rules[1].action == "resolve" and .route.rules[2].action == "hijack-dns" and .route.rules[3].inbound == [$inbound] and .route.rules[3].outbound == $outbound and .route.rules[4].outbound == "direct"' "$is_config_json" >/dev/null || fail "direct mode $mode should follow DNS rules, precede the broad direct rule, and preserve the original DNS behavior"
     done
     change_output=$(printf '5\n\n' | change node-one.json outbound 2>&1)
     [[ $change_output == *"配置已应用"* ]] || fail "cached SS should be reusable after direct mode switches: $change_output"
@@ -1170,6 +1170,294 @@ lifecycle-protocol-migration)
     jq -e --arg cfg "$new_cfg" --arg tag "$outbound_tag" '.route.rules | any(.inbound == [$cfg] and .outbound == $tag)' "$is_config_json" >/dev/null || fail "protocol migration must use the new actual inbound tag"
     exit 0
     ;;
+new-node-default-outbound)
+    add ss 41601 'test-password' aes-128-gcm >/dev/null 2>&1 || fail "add ss should succeed"
+    new_cfg="Shadowsocks-41601.json"
+    new_meta="$is_conf_dir/.quan-meta/$new_cfg.meta.json"
+    [[ -f "$is_conf_dir/$new_cfg" ]] || fail "new node config file should exist: $new_cfg"
+    [[ -f "$new_meta" ]] || fail "new node metadata file should exist: $new_meta"
+    jq -e '.outbound_mode == "V4优先"' "$new_meta" >/dev/null || fail "new node should have outbound_mode V4优先 in metadata"
+    display=$(current_outbound_mode_display "$new_cfg")
+    [[ "$display" == "IPv4 优先" ]] || fail "new node display should be IPv4 优先, got: $display"
+    jq -e '.outbounds | any(.tag == "direct_v4_pref" and .domain_resolver.strategy == "prefer_ipv4")' "$is_config_json" >/dev/null || fail "runtime config must include direct_v4_pref outbound"
+    jq -e --arg cfg "$new_cfg" '.route.rules | any(.inbound == [$cfg] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "runtime config must route new node to direct_v4_pref"
+    exit 0
+    ;;
+legacy-node-upgrade-default-outbound)
+    cat >"$is_conf_dir/legacy-one.json" <<'EOF'
+{"inbounds":[{"tag":"legacy-one.json","type":"shadowsocks","listen":"::","listen_port":41602,"method":"aes-128-gcm","password":"legacy-one-secret"}]}
+EOF
+    cat >"$is_conf_dir/legacy-two.json" <<'EOF'
+{"inbounds":[{"tag":"legacy-two.json","type":"shadowsocks","listen":"::","listen_port":41603,"method":"aes-128-gcm","password":"legacy-two-secret"}]}
+EOF
+    jq -n '{node_name:"LegacyTwo",entry_addr:"legacy2.example.com",custom:"preserve"}' >"$is_conf_dir/.quan-meta/legacy-two.json.meta.json"
+
+    display_one=$(current_outbound_mode_display "legacy-one.json")
+    [[ "$display_one" == "IPv4 优先" ]] || fail "legacy-one display without metadata should be IPv4 优先, got: $display_one"
+    display_two=$(current_outbound_mode_display "legacy-two.json")
+    [[ "$display_two" == "IPv4 优先" ]] || fail "legacy-two display without outbound_mode should be IPv4 优先, got: $display_two"
+
+    sync_runtime_node_outbound_modes || fail "synchronizing runtime node outbound modes for legacy nodes should succeed"
+
+    meta_one="$is_conf_dir/.quan-meta/legacy-one.json.meta.json"
+    meta_two="$is_conf_dir/.quan-meta/legacy-two.json.meta.json"
+    [[ -f "$meta_one" ]] || fail "legacy-one metadata should be generated on sync"
+    jq -e '.outbound_mode == "V4优先"' "$meta_one" >/dev/null || fail "legacy-one should have outbound_mode V4优先"
+    jq -e '.outbound_mode == "V4优先" and .node_name == "LegacyTwo" and .entry_addr == "legacy2.example.com" and .custom == "preserve"' "$meta_two" >/dev/null || fail "legacy-two should preserve metadata and have outbound_mode V4优先"
+
+    jq -e '.outbounds | any(.tag == "direct_v4_pref" and .domain_resolver.strategy == "prefer_ipv4")' "$is_config_json" >/dev/null || fail "runtime config must include direct_v4_pref outbound"
+    jq -e '.route.rules | any(.inbound == ["legacy-one.json"] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "legacy-one should route to direct_v4_pref"
+    jq -e '.route.rules | any(.inbound == ["legacy-two.json"] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "legacy-two should route to direct_v4_pref"
+    exit 0
+    ;;
+sniff-and-custom-rule-priority-block-cn-off)
+    cat >"$is_conf_dir/node-proxy.json" <<'EOF'
+{"inbounds":[{"tag":"node-proxy.json","type":"shadowsocks","listen":"::","listen_port":41701,"method":"aes-128-gcm","password":"proxy-secret"}]}
+EOF
+    jq -n --arg uri "$ss_uri" '{outbound_mode:"SS 出站",outbound_proxy:{name:"Upstream",config:{type:"shadowsocks",server:"127.0.0.1",server_port:8388,method:"aes-128-gcm",password:"secret"}}}' >"$is_conf_dir/.quan-meta/node-proxy.json.meta.json"
+
+    cat >"$is_conf_dir/relay-20000.json" <<'EOF'
+{"inbounds":[{"tag":"relay-20000.json","type":"direct","listen":"::","listen_port":20000,"override_address":"203.0.113.88","override_port":30000}]}
+EOF
+
+    cat >"$is_config_json" <<'EOF'
+{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"domain_suffix":["youtube.com"],"action":"route","outbound":"special-outbound"},{"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"},{"tag":"special-outbound","type":"direct"}]}
+EOF
+
+    sync_runtime_node_outbound_modes || fail "sync_runtime_node_outbound_modes failed"
+
+    jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "rule 0 must be sniff"
+    jq -e '([.route.rules[0].inbound[]] | sort) == ["node-one.json","node-proxy.json"]' "$is_config_json" >/dev/null || fail "sniff rule must include all managed nodes and exclude relay: $(jq -c '.route.rules[0]' "$is_config_json")"
+
+    jq -e '.route.rules[1].domain_suffix == ["youtube.com"] and .route.rules[1].outbound == "special-outbound"' "$is_config_json" >/dev/null || fail "custom YouTube rule must precede node default outbounds"
+
+    jq -e '.route.rules | any(.inbound == ["node-proxy.json"] and .outbound == "managed_node_ss_node-proxy_json")' "$is_config_json" >/dev/null || fail "node-proxy route missing"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref")' "$is_config_json" >/dev/null || fail "node-one route missing"
+
+    jq -e '
+        ([.route.rules[] | .action == "sniff"] | index(true))
+        < ([.route.rules[] | .outbound == "special-outbound"] | index(true))
+        and
+        ([.route.rules[] | .outbound == "special-outbound"] | index(true))
+        < ([.route.rules[] | .outbound == "managed_node_ss_node-proxy_json"] | index(true))
+        and
+        ([.route.rules[] | .outbound == "managed_node_ss_node-proxy_json"] | index(true))
+        < ([.route.rules[] | .outbound == "direct"] | index(true))
+    ' "$is_config_json" >/dev/null || fail "rule ordering violation when block-cn is off"
+
+    jq -e '.route.rules | any(.inbound // [] | any(. == "relay-20000.json")) | not' "$is_config_json" >/dev/null || fail "relay inbound must not be scoped in proxy or sniff rules"
+    exit 0
+    ;;
+sniff-and-relay-isolation-block-cn-on)
+    mkdir -p "$is_core_dir"
+    : >"$is_core_dir/.block-cn-enabled"
+
+    cat >"$is_conf_dir/node-proxy.json" <<'EOF'
+{"inbounds":[{"tag":"node-proxy.json","type":"shadowsocks","listen":"::","listen_port":41702,"method":"aes-128-gcm","password":"proxy-secret-2"}]}
+EOF
+    jq -n --arg uri "$ss_uri" '{outbound_mode:"SS 出站",outbound_proxy:{name:"Upstream",config:{type:"shadowsocks",server:"127.0.0.1",server_port:8388,method:"aes-128-gcm",password:"secret"}}}' >"$is_conf_dir/.quan-meta/node-proxy.json.meta.json"
+
+    cat >"$is_conf_dir/relay-20001.json" <<'EOF'
+{"inbounds":[{"tag":"relay-20001.json","type":"direct","listen":"::","listen_port":20001,"override_address":"223.5.5.5","override_port":53}]}
+EOF
+
+    cat >"$is_config_json" <<'EOF'
+{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"domain_suffix":["netflix.com"],"action":"route","outbound":"netflix-proxy"},{"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"},{"tag":"netflix-proxy","type":"direct"}]}
+EOF
+
+    sync_runtime_node_outbound_modes || fail "sync_runtime_node_outbound_modes failed"
+
+    jq -e '.route.rules[0].action == "sniff"' "$is_config_json" >/dev/null || fail "rule 0 must be sniff"
+    jq -e '([.route.rules[0].inbound[]] | sort) == ["node-one.json","node-proxy.json"]' "$is_config_json" >/dev/null || fail "sniff rule must include all managed nodes and exclude relay: $(jq -c '.route.rules[0]' "$is_config_json")"
+
+    jq -e '.route.rules[1].domain_suffix == ["netflix.com"] and .route.rules[1].outbound == "netflix-proxy"' "$is_config_json" >/dev/null || fail "custom Netflix rule must be at position 1"
+
+    # 验证每个受管节点独立自包含阻断规则块（Per-node Rule Block）
+    jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .inbound == ["node-one.json"])' "$is_config_json" >/dev/null || fail "node-one private reject rule must be scoped to node-one: $(jq -c '.route.rules' "$is_config_json")"
+    jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject" and .inbound == ["node-one.json"])' "$is_config_json" >/dev/null || fail "node-one cn reject rule must be scoped to node-one: $(jq -c '.route.rules' "$is_config_json")"
+    jq -e '.route.rules | any(.ip_is_private == true and .action == "reject" and .inbound == ["node-proxy.json"])' "$is_config_json" >/dev/null || fail "node-proxy private reject rule must be scoped to node-proxy: $(jq -c '.route.rules' "$is_config_json")"
+    jq -e '.route.rules | any(.rule_set == ["geosite-cn", "geoip-cn"] and .action == "reject" and .inbound == ["node-proxy.json"])' "$is_config_json" >/dev/null || fail "node-proxy cn reject rule must be scoped to node-proxy: $(jq -c '.route.rules' "$is_config_json")"
+    # 严禁生成无 inbound 限制的全局阻断规则
+    jq -e '.route.rules | any(.action == "reject" and ((.inbound // []) | length == 0)) | not' "$is_config_json" >/dev/null || fail "must never generate global block rules without inbound scope"
+
+    jq -e '.route.rules | any(.inbound // [] | any(. == "relay-20001.json")) | not' "$is_config_json" >/dev/null || fail "relay inbound must not be scoped in any route rules"
+
+    rm -f "$is_core_dir/.block-cn-enabled"
+    exit 0
+    ;;
+empty-nodes-sniff-handling)
+    rm -f "$is_conf_dir"/node-*.json "$is_conf_dir/.quan-meta"/node-*.meta.json
+    cat >"$is_conf_dir/relay-30000.json" <<'EOF'
+{"inbounds":[{"tag":"relay-30000.json","type":"direct","listen":"::","listen_port":30000,"override_address":"1.1.1.1","override_port":53}]}
+EOF
+    cat >"$is_config_json" <<'EOF'
+{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"}]}
+EOF
+
+    sync_runtime_node_outbound_modes || fail "sync with zero nodes should succeed"
+    jq -e '.route.rules | any(.action == "sniff") | not' "$is_config_json" >/dev/null || fail "no managed sniff rule should be injected when 0 managed nodes exist"
+    exit 0
+    ;;
+block-cn-whitelist-binding-and-atomic-switch)
+    mkdir -p "$is_core_dir"
+    : >"$is_core_dir/.block-cn-enabled"
+
+    cat >"$is_core_dir/.cn-whitelist.json" <<'EOF'
+{
+  "action": "route",
+  "outbound": "direct",
+  "domain": ["connectivitycheck.gstatic.com"],
+  "domain_suffix": ["download.windowsupdate.com"]
+}
+EOF
+
+    cat >"$is_config_json" <<'EOF'
+{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"domain_suffix":["netflix.com"],"action":"route","outbound":"netflix-proxy"},{"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"},{"tag":"netflix-proxy","type":"direct"}]}
+EOF
+
+    sync_runtime_node_outbound_modes || fail "initial sync failed"
+
+    # 断言 1：直连节点的白名单规则绑定该节点的直连出站（direct_v4_pref），绝非 bare direct
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node-one whitelist rule must route to direct_v4_pref"
+    jq -e '.route.rules | any((.domain // [] | any(. == "connectivitycheck.gstatic.com")) and .outbound == "direct") | not' "$is_config_json" >/dev/null || fail "whitelist rule must NOT route to bare direct"
+
+    # 断言 2：屏蔽回国开启下，直接将 node-one 从直连切换至 SS 出站
+    change_out=$(printf '5\n%s\n' "$ss_uri" | (change node-one.json outbound) 2>&1)
+    [[ $change_out == *"配置已应用"* ]] || fail "change outbound to SS failed while block-cn enabled: $change_out"
+
+    # 断言 3：旧直连规则被清除，白名单规则精准绑定到该节点的 SS 出站
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node-one whitelist rule must now route to managed_node_ss_node-one_json"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref") | not' "$is_config_json" >/dev/null || fail "old direct route and direct whitelist must be removed"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and .domain == null and .ip_is_private == null and .rule_set == null)' "$is_config_json" >/dev/null || fail "node-one default route must route to managed_node_ss_node-one_json"
+    jq -e '.outbounds | any(.tag == "managed_node_ss_node-one_json")' "$is_config_json" >/dev/null || fail "SS outbound object must be present in outbounds"
+
+    # 断言 4：规则顺序：嗅探 -> 用户自定义 Netflix -> 白名单(SS) -> 私网拦截 -> 中国路由拦截 -> 默认路由(SS) -> 全局 fallback
+    jq -e '
+        ([.route.rules[] | .action == "sniff"] | index(true))
+        < ([.route.rules[] | .outbound == "netflix-proxy"] | index(true))
+        and
+        ([.route.rules[] | .outbound == "netflix-proxy"] | index(true))
+        < ([.route.rules[] | (.domain // [] | any(. == "connectivitycheck.gstatic.com")) and .outbound == "managed_node_ss_node-one_json"] | index(true))
+        and
+        ([.route.rules[] | (.domain // [] | any(. == "connectivitycheck.gstatic.com")) and .outbound == "managed_node_ss_node-one_json"] | index(true))
+        < ([.route.rules[] | .ip_is_private == true] | index(true))
+        and
+        ([.route.rules[] | .ip_is_private == true] | index(true))
+        < ([.route.rules[] | .rule_set == ["geosite-cn", "geoip-cn"]] | index(true))
+        and
+        ([.route.rules[] | .rule_set == ["geosite-cn", "geoip-cn"]] | index(true))
+        < ([.route.rules[] | .inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and .domain == null] | index(true))
+        and
+        ([.route.rules[] | .inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and .domain == null] | index(true))
+        < ([.route.rules[] | .outbound == "direct"] | index(true))
+    ' "$is_config_json" >/dev/null || fail "rule ordering violation when block-cn enabled and SS outbound applied: $(jq -c '.route.rules' "$is_config_json")"
+
+    # 断言 5：在屏蔽回国开启下，直接将 node-one 从 SS 切换至 VLESS 出站
+    vless_uri="vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.1:443?security=none#VLESS-Upstream"
+    change_vless_out=$(printf '6\n%s\n' "$vless_uri" | (change node-one.json outbound) 2>&1)
+    [[ $change_vless_out == *"配置已应用"* ]] || fail "change outbound to VLESS failed while block-cn enabled: $change_vless_out"
+
+    # 旧 SS 出站对象被清除，新 VLESS 出站对象注入
+    jq -e '.outbounds | any(.tag == "managed_node_ss_node-one_json") | not' "$is_config_json" >/dev/null || fail "old SS outbound object must be completely removed"
+    jq -e '.outbounds | any(.tag == "managed_node_vless_node-one_json")' "$is_config_json" >/dev/null || fail "new VLESS outbound object must be injected"
+
+    # 白名单规则与默认路由更新为 VLESS 出站
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_vless_node-one_json" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "whitelist rule must now route to VLESS"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_vless_node-one_json" and .domain == null)' "$is_config_json" >/dev/null || fail "node-one default route must now route to VLESS"
+    jq -e '.route.rules | any(.outbound == "managed_node_ss_node-one_json") | not' "$is_config_json" >/dev/null || fail "all old SS rules must be completely removed"
+
+    # 断言 6：在屏蔽回国开启下，直接将 node-one 从 VLESS 切回直连（V4优先）
+    change_direct_out=$(printf '2\n' | (change node-one.json outbound) 2>&1)
+    [[ $change_direct_out == *"配置已应用"* ]] || fail "change outbound back to direct failed while block-cn enabled: $change_direct_out"
+
+    # 旧 VLESS 出站对象被清除
+    jq -e '.outbounds | any(.tag == "managed_node_vless_node-one_json") | not' "$is_config_json" >/dev/null || fail "old VLESS outbound object must be completely removed"
+    # 白名单规则与默认路由切回 direct_v4_pref
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "whitelist rule must route to direct_v4_pref"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref" and .domain == null)' "$is_config_json" >/dev/null || fail "default route must route to direct_v4_pref"
+
+    rm -f "$is_core_dir/.block-cn-enabled" "$is_core_dir/.cn-whitelist.json"
+    exit 0
+    ;;
+block-cn-multi-node-isolation-and-delete)
+    mkdir -p "$is_core_dir"
+    : >"$is_core_dir/.block-cn-enabled"
+
+    cat >"$is_core_dir/.cn-whitelist.json" <<'EOF'
+{
+  "action": "route",
+  "outbound": "direct",
+  "domain": ["connectivitycheck.gstatic.com"]
+}
+EOF
+
+    # 节点 A (node-one.json)：直连 V4 优先
+    # 节点 B (node-two.json)：SS 出站
+    cat >"$is_conf_dir/node-two.json" <<'EOF'
+{"inbounds":[{"tag":"node-two.json","type":"shadowsocks","listen":"::","listen_port":23456,"method":"aes-128-gcm","password":"pwd"}]}
+EOF
+    jq -n '{node_name:"node-b",outbound_mode:"SS 出站",outbound_proxy:{name:"UpstreamB",config:{type:"shadowsocks",server:"198.51.100.1",server_port:8388,method:"aes-128-gcm",password:"pwdB"}}}' >"$is_conf_dir/.quan-meta/node-two.json.meta.json"
+
+    sync_runtime_node_outbound_modes || fail "sync failed"
+
+    # 验证初始状态：节点 A 走 direct_v4_pref，节点 B 走 SS
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node A whitelist must route to direct_v4_pref"
+    jq -e '.route.rules | any(.inbound == ["node-two.json"] and .outbound == "managed_node_ss_node-two_json" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node B whitelist must route to SS"
+
+    # 修改节点 A 的出站为 SS（指向不同上游）
+    ss_uri_a="ss://$(printf '%s' 'aes-128-gcm:secretA' | base64 | tr -d '\n')@192.0.2.1:8388#UpstreamA"
+    change_out=$(printf '5\n%s\n' "$ss_uri_a" | (change node-one.json outbound) 2>&1)
+    [[ $change_out == *"配置已应用"* ]] || fail "change node A outbound failed: $change_out"
+
+    # 断言：节点 A 的白名单与默认路由更新为 SS A；节点 B 保持 SS B，绝不受影响！
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node A whitelist must update to SS A"
+    jq -e '.route.rules | any(.inbound == ["node-two.json"] and .outbound == "managed_node_ss_node-two_json" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node B whitelist must remain SS B"
+    jq -e '.route.rules | any(.inbound == ["node-two.json"] and .outbound == "managed_node_ss_node-two_json" and .domain == null)' "$is_config_json" >/dev/null || fail "node B default route must remain SS B"
+
+    # 删除节点 B (node-two.json)
+    rm -f "$is_conf_dir/node-two.json" "$is_conf_dir/.quan-meta/node-two.json.meta.json"
+    sync_runtime_node_outbound_modes || fail "sync after delete node B failed"
+
+    # 断言：节点 B 的专属出站对象、白名单规则、默认路由被完全清理，不留孤儿配置
+    jq -e '.outbounds | any(.tag == "managed_node_ss_node-two_json") | not' "$is_config_json" >/dev/null || fail "node B outbound object must be deleted"
+    jq -e '.route.rules | any(.inbound // [] | any(. == "node-two.json")) | not' "$is_config_json" >/dev/null || fail "all node B route rules must be deleted"
+    # 节点 A 依然完好
+    jq -e '.outbounds | any(.tag == "managed_node_ss_node-one_json")' "$is_config_json" >/dev/null || fail "node A outbound object must remain"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "node A whitelist must remain"
+
+    rm -f "$is_core_dir/.block-cn-enabled" "$is_core_dir/.cn-whitelist.json"
+    exit 0
+    ;;
+block-cn-atomic-switch-rollback)
+    mkdir -p "$is_core_dir"
+    : >"$is_core_dir/.block-cn-enabled"
+
+    cat >"$is_core_dir/.cn-whitelist.json" <<'EOF'
+{
+  "action": "route",
+  "outbound": "direct",
+  "domain": ["connectivitycheck.gstatic.com"]
+}
+EOF
+
+    # 初始状态为 node-one 直连
+    sync_runtime_node_outbound_modes || fail "initial sync failed"
+
+    # 设置 TEST_REJECT_CHECK=1 模拟 sing-box check 失败
+    export TEST_REJECT_CHECK=1
+    change_fail=$(printf '5\n%s\n' "$ss_uri" | (change node-one.json outbound) 2>&1)
+    [[ $? != 0 ]] || fail "change outbound should fail when core check fails"
+    [[ $change_fail == *"原配置未改变"* ]] || fail "error message should report unchanged configuration: $change_fail"
+
+    # 校验回滚：原直连元数据和运行配置完好无损
+    jq -e '.outbound_mode == "V4优先"' "$meta_file" >/dev/null || fail "metadata should rollback to V4优先"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref" and (.domain // [] | any(. == "connectivitycheck.gstatic.com")))' "$is_config_json" >/dev/null || fail "whitelist rule should rollback to direct_v4_pref"
+    jq -e '.outbounds | any(.tag == "managed_node_ss_node-one_json") | not' "$is_config_json" >/dev/null || fail "SS outbound should not exist in config after rollback"
+
+    export TEST_REJECT_CHECK=0
+    rm -f "$is_core_dir/.block-cn-enabled" "$is_core_dir/.cn-whitelist.json"
+    exit 0
+    ;;
 *)
     fail "unknown test scenario: $TEST_SCENARIO"
     ;;
@@ -1205,12 +1493,14 @@ jq -e '
     fail "runtime should contain the selected SS outbound"
 }
 jq -e '
-    .route.rules[0].inbound == ["node-one.json"]
-    and .route.rules[0].outbound == "managed_node_ss_node-one_json"
+    .route.rules[0].action == "sniff"
+    and .route.rules[0].inbound == ["node-one.json"]
     and .route.rules[1].action == "resolve"
     and .route.rules[2].action == "hijack-dns"
-    and .route.rules[3].outbound == "direct"
-' "$is_config_json" >/dev/null || fail "proxy route should precede existing broad routes"
+    and .route.rules[3].inbound == ["node-one.json"]
+    and .route.rules[3].outbound == "managed_node_ss_node-one_json"
+    and .route.rules[4].outbound == "direct"
+' "$is_config_json" >/dev/null || fail "proxy route should follow DNS rules and precede existing broad routes"
 [[ $(grep -c '^restart ' "$SERVICE_LOG") == 1 ]] || fail "successful application should restart exactly once"
 grep -q -- '-c ' "$FAKE_CORE_LOG" || fail "candidate should be completely checked by sing-box"
 grep -q -- '-C ' "$FAKE_CORE_LOG" || fail "complete check should include the node config directory"
@@ -1218,11 +1508,20 @@ grep -q -- '-C ' "$FAKE_CORE_LOG" || fail "complete check should include the nod
 CASE
 }
 
+if [[ ${1:-} ]]; then
+    run_core_case "$repo_root/core.sh" "$1" || exit 1
+    run_core_case "$repo_root/src/core.sh" "$1" || exit 1
+    echo "PASS: $1"
+    exit 0
+fi
+
 run_core_case "$repo_root/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback; do
+    echo "[core.sh: $scenario]"
     run_core_case "$repo_root/core.sh" "$scenario" || exit 1
 done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration; do
+for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback; do
+    echo "[src/core.sh: $scenario]"
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
 echo "PASS: node proxy outbound application"

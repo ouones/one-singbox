@@ -680,7 +680,7 @@ ask() {
                     msg "$is_err 请输入正确的端口, 可选(1-65535)"
                     continue
                 }
-                if [[ $(node_port_used "$REPLY" "$is_new_protocol") && $is_ask_set != 'door_port' ]]; then
+                if [[ $(is_test port_used "$REPLY") && $is_ask_set != 'door_port' ]]; then
                     msg "$is_err 无法使用 ($REPLY) 端口."
                     continue
                 fi
@@ -854,10 +854,7 @@ current_outbound_mode_display() {
         return
     }
     mode=$(meta_get "$cfg" '.outbound_mode')
-    [[ $mode ]] || {
-        printf '%s\n' 未设置
-        return
-    }
+    [[ $mode ]] || mode="V4优先"
     mode_label=$(outbound_mode_display_name "$mode")
     if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
         if [[ $mode == 'VLESS 出站' ]]; then
@@ -1110,10 +1107,9 @@ block_cn_cli() {
 
 render_runtime_node_outbound_modes() {
     local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
-    local resolver direct_rules proxy_rules proxy_outbounds file cfg mode outbound meta_path tags config_type tag config server
+    local resolver file cfg mode outbound meta_path tags config_type tag config server
     local -A used_proxy_tags=()
     local block_cn_enabled=false
-    local whitelist_rules="[]"
     local cached_whitelist="[]"
     local core_dir=${is_core_dir:-/etc/sing-box}
     if [[ -f $core_dir/.cn-whitelist.json ]]; then
@@ -1121,7 +1117,6 @@ render_runtime_node_outbound_modes() {
     fi
     if block_cn_is_enabled; then
         block_cn_enabled=true
-        whitelist_rules=$cached_whitelist
     fi
     runtime_sync_error=
     [[ -f $source_config && $output ]] || {
@@ -1137,95 +1132,126 @@ render_runtime_node_outbound_modes() {
         return 1
     }
     [[ $resolver ]] || resolver=local
-    direct_rules='[]'
-    proxy_rules='[]'
-    proxy_outbounds='[]'
+    local has_direct_nodes=false
+    local proxy_outbounds='[]'
+    local managed_inbounds='[]'
+    local managed_node_rules='[]'
+    local node_rules
+
     for file in "$config_dir"/*.json; do
         [[ -f $file ]] || continue
         cfg=${file##*/}
-        [[ $cfg =~ dynamic-port-.*-link ]] && continue
+        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
         meta_path="$config_dir/.quan-meta/$cfg.meta.json"
         [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
-        [[ -f $meta_path ]] || continue
-        jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
-            runtime_sync_error="节点元数据格式无效: $cfg"
-            return 1
-        }
-        mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
-            runtime_sync_error="无法读取节点出站方式: $cfg"
-            return 1
-        }
-        [[ $mode ]] || continue
-        outbound=$(outbound_mode_to_direct_tag "$mode")
-        if [[ $outbound ]]; then
-            tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
-                runtime_sync_error="无法读取节点入站 tag: $cfg"
+        mode=
+        if [[ -f $meta_path ]]; then
+            jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
+                runtime_sync_error="节点元数据格式无效: $cfg"
                 return 1
             }
-            [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
-                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+            mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
+                runtime_sync_error="无法读取节点出站方式: $cfg"
                 return 1
             }
-            direct_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$outbound" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$direct_rules") || {
-                runtime_sync_error="生成直连路由失败: $cfg"
-                return 1
-            }
-            continue
         fi
-        [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] || continue
-        outbound_proxy_from_metadata "$cfg" "$meta_path" || {
-            runtime_sync_error="节点代理配置无效: $cfg"
-            return 1
-        }
-        [[ $outbound_proxy_json ]] || {
-            runtime_sync_error="节点代理配置缺失: $cfg"
-            return 1
-        }
-        config_type=$(jq -r '.config.type' <<<"$outbound_proxy_json")
-        if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
-            tag=$(runtime_node_ss_outbound_tag "$cfg")
-        elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
-            tag=$(runtime_node_vless_outbound_tag "$cfg")
-        else
-            runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
-            return 1
-        fi
-        [[ ! ${used_proxy_tags[$tag]+exists} ]] || {
-            runtime_sync_error="受管出站 tag 冲突: $tag"
-            return 1
-        }
-        used_proxy_tags[$tag]=$cfg
+        [[ $mode ]] || mode="V4优先"
         tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
             runtime_sync_error="无法读取节点入站 tag: $cfg"
             return 1
         }
-        [[ $(jq -r 'length' <<<"$tags") -gt 0 ]] || {
-            runtime_sync_error="节点没有可路由的入站 tag: $cfg"
-            return 1
-        }
-        server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
-        if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
-            config=$(jq -c --arg tag "$tag" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
-                runtime_sync_error="生成代理出站失败: $cfg"
+        if [[ $(jq -r 'length' <<<"$tags") -eq 0 ]]; then
+            if [[ -f $meta_path ]] && jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
+                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+                return 1
+            fi
+            continue
+        fi
+
+        outbound=$(outbound_mode_to_direct_tag "$mode")
+        if [[ $outbound ]]; then
+            has_direct_nodes=true
+        elif [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
+            outbound_proxy_from_metadata "$cfg" "$meta_path" || {
+                runtime_sync_error="节点代理配置无效: $cfg"
+                return 1
+            }
+            [[ $outbound_proxy_json ]] || {
+                runtime_sync_error="节点代理配置缺失: $cfg"
+                return 1
+            }
+            config_type=$(jq -r '.config.type' <<<"$outbound_proxy_json")
+            if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
+                outbound=$(runtime_node_ss_outbound_tag "$cfg")
+            elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
+                outbound=$(runtime_node_vless_outbound_tag "$cfg")
+            else
+                runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
+                return 1
+            fi
+            [[ ! ${used_proxy_tags[$outbound]+exists} ]] || {
+                runtime_sync_error="受管出站 tag 冲突: $outbound"
+                return 1
+            }
+            used_proxy_tags[$outbound]=$cfg
+            server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
+            if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
+                config=$(jq -c --arg tag "$outbound" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
+                    runtime_sync_error="生成代理出站失败: $cfg"
+                    return 1
+                }
+            else
+                config=$(jq -c --arg tag "$outbound" '.config + {tag:$tag}' <<<"$outbound_proxy_json") || {
+                    runtime_sync_error="生成代理出站失败: $cfg"
+                    return 1
+                }
+            fi
+            proxy_outbounds=$(jq -c --argjson config "$config" '. + [$config]' <<<"$proxy_outbounds") || {
+                runtime_sync_error="生成代理出站列表失败"
                 return 1
             }
         else
-            config=$(jq -c --arg tag "$tag" '.config + {tag:$tag}' <<<"$outbound_proxy_json") || {
-                runtime_sync_error="生成代理出站失败: $cfg"
-                return 1
-            }
+            continue
         fi
-        proxy_outbounds=$(jq -c --argjson config "$config" '. + [$config]' <<<"$proxy_outbounds") || {
-            runtime_sync_error="生成代理出站列表失败"
-            return 1
-        }
-        proxy_rules=$(jq -c --argjson inbound "$tags" --arg outbound "$tag" '. + [{inbound:$inbound,action:"route",outbound:$outbound}]' <<<"$proxy_rules") || {
-            runtime_sync_error="生成代理路由失败: $cfg"
-            return 1
-        }
-    done
 
-    jq --arg resolver "$resolver" --argjson direct_rules "$direct_rules" --argjson proxy_rules "$proxy_rules" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson whitelist_rules "$whitelist_rules" --argjson cached_whitelist "$cached_whitelist" '
+        node_rules=$(jq -n -c --argjson inbound "$tags" --arg outbound "$outbound" --argjson block_cn "$block_cn_enabled" --argjson whitelist "$cached_whitelist" '
+            (if $block_cn and ($whitelist | length > 0) then
+                $whitelist | map(
+                    if type == "object" then
+                        . + {inbound: $inbound, action: (.action // "route"), outbound: $outbound}
+                    else
+                        empty
+                    end
+                )
+            else
+                []
+            end) as $wl
+            | (if $block_cn then
+                [
+                    {inbound: $inbound, ip_is_private: true, action: "reject"},
+                    {inbound: $inbound, rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
+                ]
+            else
+                []
+            end) as $blk
+            | (
+                [{inbound: $inbound, action: "route", outbound: $outbound}]
+            ) as $rt
+            | $wl + $blk + $rt
+        ') || {
+            runtime_sync_error="生成节点规则块失败: $cfg"
+            return 1
+        }
+
+        managed_node_rules=$(jq -c --argjson rules "$node_rules" '. + $rules' <<<"$managed_node_rules") || {
+            runtime_sync_error="合并节点规则块失败: $cfg"
+            return 1
+        }
+        managed_inbounds=$(jq -c --argjson tags "$tags" '. + $tags' <<<"$managed_inbounds")
+    done
+    managed_inbounds=$(jq -c 'unique' <<<"$managed_inbounds")
+
+    jq --arg resolver "$resolver" --argjson has_direct "$has_direct_nodes" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson managed_inbounds "$managed_inbounds" --argjson managed_node_rules "$managed_node_rules" --argjson cached_whitelist "$cached_whitelist" '
         def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
         def is_managed_outbound_tag($tag):
             $tag == "block"
@@ -1237,11 +1263,21 @@ render_runtime_node_outbound_modes() {
         def is_broad_direct_rule:
             .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
         def is_managed_whitelist_rule:
-            (is_broad_direct_rule | not) and .outbound == "direct" and (
+            (is_broad_direct_rule | not) and (
                 . as $rule |
-                (($cached_whitelist // []) | any(. == $rule))
-                or (($whitelist_rules // []) | any(. == $rule))
+                (
+                    (($cached_whitelist // []) | any(
+                        . as $cw |
+                        ($cw.domain != null and $rule.domain == $cw.domain)
+                        or ($cw.domain_suffix != null and $rule.domain_suffix == $cw.domain_suffix)
+                    ))
+                    or (
+                        ($rule.domain // []) | any(. == "connectivitycheck.gstatic.com" or . == "www.gstatic.com")
+                    )
+                )
             );
+        def is_managed_block_rule:
+            (.action == "reject" or .outbound == "block") and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
         def managed_direct_outbounds($r): [
             {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
             {tag:"direct_v4_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv4"}},
@@ -1257,29 +1293,31 @@ render_runtime_node_outbound_modes() {
                 type: "remote",
                 format: "binary",
                 url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
-                download_detour: "direct"
+                http_client: "direct-client"
             },
             {
                 tag: "geoip-cn",
                 type: "remote",
                 format: "binary",
                 url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-                download_detour: "direct"
+                http_client: "direct-client"
             }
         ];
-        def is_managed_block_rule:
-            .outbound == "block" and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
-        def managed_block_rules: [
-            {ip_is_private: true, outbound: "block"},
-            {rule_set: ["geosite-cn", "geoip-cn"], outbound: "block"}
-        ];
         def is_managed_sniff_rule:
-            .action == "sniff" and ((keys - ["action", "timeout"]) | length) == 0;
-        def managed_sniff_rules: [
-            {action: "sniff"}
+            .action == "sniff" and ((keys - ["action", "timeout", "inbound"]) | length) == 0;
+        def managed_sniff_rules:
+            if ($managed_inbounds | length) > 0 then
+                [{action: "sniff", inbound: $managed_inbounds}]
+            else
+                []
+            end;
+        def is_managed_http_client:
+            ((.tag // "") == "direct-client");
+        def managed_http_clients: [
+            {tag: "direct-client", detour: "direct"}
         ];
         .dns = (.dns // {})
-        | if (((($direct_rules | length) + ($proxy_rules | length)) > 0) and $resolver == "local") then
+        | if (($has_direct or (($proxy_outbounds | length) > 0)) and $resolver == "local") then
             .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end)
             | if any(.dns.servers[]?; .tag == "local") then . else .dns.servers += [{tag:"local",type:"local"}] end
           else . end
@@ -1295,6 +1333,16 @@ render_runtime_node_outbound_modes() {
           elif (.route.default_domain_resolver | type) == "string" and ((.route.default_domain_resolver // "") | length) == 0 then
             del(.route.default_domain_resolver)
           else . end
+        | if has("http_clients") then
+            .http_clients = ((.http_clients // []) | map(select(is_managed_http_client | not)))
+          else . end
+        | if $block_cn_enabled then
+            .http_clients = ((.http_clients // []) + managed_http_clients)
+          else
+            if has("http_clients") and ((.http_clients | length) == 0) then
+                del(.http_clients)
+            else . end
+          end
         | if (.route | has("rule_set")) then
             .route.rule_set = ((.route.rule_set // []) | map(select(is_managed_rule_set | not)))
           else . end
@@ -1307,35 +1355,38 @@ render_runtime_node_outbound_modes() {
           end
         | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule or is_managed_sniff_rule) | not)))) as $existing_rules
         | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
-        | if ($direct_rules | length) > 0 then .outbounds += managed_direct_outbounds($resolver) else . end
+        | if $has_direct then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
-        | if ($block_cn_enabled or any($existing_rules[]; .outbound == "block")) then .outbounds += [{tag:"block",type:"block"}] else . end
         | .route.rules = (
-            if $block_cn_enabled then
-                ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
-                | (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
-                | if $direct_fallback == null then
-                    $sniff_rules + $existing_rules + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules
-                  else
-                    $sniff_rules + $existing_rules[:$direct_fallback] + $whitelist_rules + managed_block_rules + $proxy_rules + $direct_rules + $existing_rules[$direct_fallback:]
-                  end
-            else
-                if ($direct_rules | length) == 0 then $proxy_rules + $existing_rules
-                else
-                    ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
-                    | if $direct_fallback == null then
-                        $proxy_rules + $existing_rules + $direct_rules
-                      else
-                        $proxy_rules + $existing_rules[:$direct_fallback] + $direct_rules + $existing_rules[$direct_fallback:]
-                      end
-                end
-            end
+            ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
+            | (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
+            | ($existing_rules | if $direct_fallback == null then . else .[:$direct_fallback] end) as $custom_rules
+            | ($existing_rules | if $direct_fallback == null then [] else .[$direct_fallback:] end) as $fallback_rules
+            | $sniff_rules + $custom_rules + $managed_node_rules + $fallback_rules
           )
     ' "$source_config" >"$output" || {
         rm -f "$output"
         runtime_sync_error="运行时出站配置生成失败"
         return 1
     }
+    return 0
+}
+
+upgrade_legacy_node_outbound_metadata() {
+    local config_dir=${1:-$is_conf_dir} file cfg meta_path
+    [[ -d $config_dir ]] || return 0
+    shopt -s nullglob
+    for file in "$config_dir"/*.json; do
+        [[ -f $file ]] || continue
+        cfg=${file##*/}
+        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
+        jq -e 'type == "object" and ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | length > 0)' "$file" >/dev/null 2>&1 || continue
+        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
+        if [[ ! -f $meta_path ]] || ! jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
+            is_conf_dir=$config_dir meta_set_unlocked "$cfg" outbound_mode "V4优先"
+        fi
+    done
+    shopt -u nullglob
     return 0
 }
 
@@ -1361,6 +1412,7 @@ sync_runtime_node_outbound_modes_unlocked() {
         runtime_sync_error="无法保存运行时配置: $target_config"
         return 1
     fi
+    upgrade_legacy_node_outbound_metadata "$config_dir"
     return 0
 }
 
@@ -3375,9 +3427,12 @@ create() {
         fi
         [[ $is_config_name ]] && is_config_file=$is_config_name
         [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
+        if [[ ! $is_change ]]; then
+            meta_set "$is_config_name" outbound_mode "V4优先"
+        fi
         if [[ ! $node_migration_applied ]]; then
             sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1 || {
-                [[ ! $is_change ]] && rm -f "$is_json_file"
+                [[ ! $is_change ]] && rm -f "$is_json_file" "$is_conf_dir/.quan-meta/$is_config_name.meta.json"
                 err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
             }
             if [[ $is_new_install ]]; then
