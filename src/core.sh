@@ -1427,6 +1427,12 @@ sync_runtime_node_outbound_modes() {
     return "$status"
 }
 
+migrate_runtime_config() {
+    block_cn_clean_all_legacy_inbounds "$is_conf_dir"
+    [[ -f $is_config_json ]] || return 0
+    sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1
+}
+
 manage_restart_confirmed() {
     local pid
     if [[ $is_systemd ]]; then
@@ -5058,20 +5064,28 @@ update() {
         is_new_ver=$latest_ver
     fi
     download $is_update_name $is_new_ver
+    case $is_update_name in
+    sh)
+        if [[ -f $is_config_json ]] && ! "$is_sh_bin" __post-update; then
+            err "脚本更新后配置迁移失败，已安装新脚本但配置尚未完成同步。请运行: sb fix-config.json"
+        fi
+        ;;
+    core)
+        if ! migrate_runtime_config; then
+            err "内核更新后配置校验发现异常，已阻断内核重启以防服务故障。请检查配置或运行: sb fix-config.json"
+        fi
+        if ! manage restart $is_update_name; then
+            err "$is_show_name 更新后服务重启失败，请检查服务状态."
+        fi
+        ;;
+    caddy)
+        if ! manage restart $is_update_name; then
+            err "$is_show_name 更新后服务重启失败，请检查服务状态."
+        fi
+        ;;
+    esac
     msg "更新成功, 当前 $is_show_name 版本: $(_green $is_new_ver)\n"
     msg "$(_green 请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver)\n"
-    if [[ $is_update_name == 'core' || $is_update_name == 'sh' ]]; then
-        block_cn_clean_all_legacy_inbounds "$is_conf_dir"
-        if [[ -f $is_config_json ]]; then
-            if ! sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1; then
-                if [[ $is_update_name == 'core' ]]; then
-                    err "内核更新后配置校验发现异常，已阻断内核重启以防服务故障。请检查配置或运行: sb fix-config.json"
-                    return 1
-                fi
-            fi
-        fi
-    fi
-    [[ $is_update_name != 'sh' ]] && manage restart $is_update_name &
 }
 
 menu_pause() {
@@ -5585,6 +5599,9 @@ main() {
     fix-config.json)
         block_cn_clean_all_legacy_inbounds "$is_conf_dir"
         create config.json
+        ;;
+    __post-update)
+        migrate_runtime_config || err "更新后配置迁移失败: ${runtime_sync_error:-未知错误}"
         ;;
     fix-caddyfile)
         if [[ $is_caddy ]]; then

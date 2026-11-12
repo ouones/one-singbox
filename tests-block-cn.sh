@@ -721,7 +721,24 @@ restart_after=$(restart_count)
 rm -f "$is_conf_dir/invalid-broken.json"
 [[ $restart_after -eq $restart_before ]] || fail "update core must NOT restart service when config validation fails: $update_fail_out"
 
-# 19.2 全局自愈式一次性迁移 (Seam 2)
+assert_update_restarts_once() {
+    local target=$1 version=$2 service=$3 output="$case_dir/update-${1}-success.out"
+    reset_service_log
+    update "$target" "$version" >"$output" 2>&1 || fail "update $target success path failed"
+    wait
+    [[ $(restart_count) -eq 1 ]] || fail "update $target must restart service once after successful update"
+    [[ $(<"$SERVICE_LOG") == "restart $service" ]] || fail "update $target restarted the wrong service: $(<"$SERVICE_LOG")"
+    [[ $(grep -Fc '更新成功' "$output") -eq 1 ]] || fail "update $target must report success exactly once"
+}
+
+# 19.1b update core/caddy 成功后必须重启对应服务
+assert_update_restarts_once core 1.15.0 "$is_core"
+is_caddy=1
+is_caddy_ver=v2.7.6
+assert_update_restarts_once caddy 2.8.0 caddy
+unset is_caddy is_caddy_ver
+
+# 19.2 全局自愈式一次性迁移 (Seam 2: __post-update)
 cat >"$is_conf_dir/unmigrated-node.json" <<'EOF'
 {
   "inbounds": [
@@ -738,9 +755,8 @@ cat >"$is_conf_dir/unmigrated-node.json" <<'EOF'
   ]
 }
 EOF
-is_sh_ver=1.52
-(update sh 1.53 >/dev/null 2>&1) || true
-jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/unmigrated-node.json" >/dev/null || fail "update sh must auto-migrate legacy inbound sniff fields"
+main __post-update 2>&1 >/dev/null
+jq -e '(.inbounds[0].sniff == null) and (.inbounds[0].sniff_override_destination == null)' "$is_conf_dir/unmigrated-node.json" >/dev/null || fail "post-update migration must clean legacy inbound sniff fields"
 rm -f "$is_conf_dir/unmigrated-node.json"
 
 # 20. Standards 审查回归测试：验证废弃旧别名退役

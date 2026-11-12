@@ -42,6 +42,10 @@ download() {
         tmpfile=$tmpdir/sh.tar.gz
         link="https://github.com/${is_sh_repo}/releases/download/${latest_ver}/code.tar.gz"
         download_file
+        if ! tar -xOf "$tmpfile" src/post-update-capable 2>/dev/null | grep -Fxq '1'; then
+            rm -rf "$tmpdir"
+            err "目标脚本版本不支持更新后配置迁移，请选择包含该修复的新版本."
+        fi
         tar zxf $tmpfile -C $is_sh_dir
         chmod +x $is_sh_bin ${is_sh_bin/$is_core/sb}
         ;;
