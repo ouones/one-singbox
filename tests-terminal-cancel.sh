@@ -43,6 +43,7 @@ source <(sed -n '/^mainmenu=(/,/^)/p' "$CORE_FILE")
 source <(sed -n '/^log_set() {/,/^}/p' "$LOG_FILE")
 source <(sed -n '/^interactive_read() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^interactive_log_tail() {/,/^}/p' "$LOG_FILE")
 
 if ! declare -F interactive_read >/dev/null; then
@@ -251,6 +252,8 @@ class PtyProcess:
         return self
 
     def send(self, value):
+        if value == b"\x03":
+            time.sleep(0.05)
         os.write(self.fd, value)
         return self
 

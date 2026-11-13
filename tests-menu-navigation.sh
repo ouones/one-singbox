@@ -6,7 +6,7 @@ repo_root=$(cd "$(dirname "$0")" && pwd)
 # Legacy cases extract individual functions; the PTY suite exercises the real
 # signal-aware helpers.
 interactive_read() { builtin read "$@"; }
-run_interactive_operation() { "$@"; }
+run_interactive_operation() { ( "$@" ); }
 export -f interactive_read run_interactive_operation
 
 fail() {
@@ -164,7 +164,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_has_nodes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_empty_state() {/,/^}/p' "$CORE_FILE")
@@ -204,7 +204,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_list() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_menu_has_entries() {/,/^}/p' "$CORE_FILE")
@@ -243,7 +243,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_add() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
@@ -293,7 +293,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_info() {/,/^}/p' "$CORE_FILE")
@@ -339,7 +339,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_delete() {/,/^}/p' "$CORE_FILE")
@@ -396,7 +396,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
@@ -424,7 +424,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
@@ -454,6 +454,7 @@ fail() {
 
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
 
 case_dir=$(mktemp -d)
@@ -499,6 +500,7 @@ fail() {
 
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
 
 case_dir=$(mktemp -d)
@@ -542,7 +544,7 @@ fail() {
 
 source <(sed -n '/^mainmenu=(/,/^)/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_has_nodes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_empty_state() {/,/^}/p' "$CORE_FILE")
@@ -614,22 +616,21 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^system_tools_menu() {/,/^}/p' "$CORE_FILE")
 
 msg() { printf '%b\n' "$*"; }
 show_list() { printf '%s\n' "$@"; }
 is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
-load() { action_calls+=("load:$1"); }
-_try_enable_bbr() { action_calls+=(bbr); }
-dns_set() { action_calls+=(dns); }
-log_limit_set() { action_calls+=(log-limit); }
-block_cn_menu_toggle() { action_calls+=(block-cn); }
+load() { :; }
+_try_enable_bbr() { printf '已执行：启用 BBR\n'; }
+dns_set() { printf '已执行：DNS\n'; }
+log_limit_set() { printf '已执行：日志上限\n'; }
+block_cn_menu_toggle() { printf '已执行：屏蔽回国流量\n'; }
 block_cn_status_text() { printf '未启用'; }
-get() { action_calls+=("get:$1"); }
+get() { printf '已执行：重装脚本\n'; }
 
-action_calls=()
 input_file=$(mktemp)
 output_file=$(mktemp)
 trap 'rm -f "$input_file" "$output_file"' EXIT
@@ -642,7 +643,9 @@ done
 [[ $output != *$'\n返回\n'* ]] || fail "system settings have no legacy return item: $output"
 [[ $output == *'0) 返回上级'* ]] || fail "system settings show the shared return item: $output"
 [[ $output == *'请选择系统设置'* ]] || fail "system settings prompt uses its menu name: $output"
-[[ ${action_calls[*]} == 'load:bbr.sh bbr load:dns.sh dns log-limit block-cn get:reinstall' ]] || fail "system setting choices keep their actions: ${action_calls[*]}"
+for result in '已执行：启用 BBR' '已执行：DNS' '已执行：日志上限' '已执行：屏蔽回国流量' '已执行：重装脚本'; do
+    [[ $output == *"$result"* ]] || fail "system setting choices keep the visible action '$result': $output"
+done
 CASE
 }
 
@@ -726,6 +729,7 @@ fail() {
 
 source <(sed -n '/^mainmenu=(/,/^)/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^is_main_menu() {/,/^}/p' "$CORE_FILE")
 
@@ -843,7 +847,7 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^system_tools_menu() {/,/^}/p' "$CORE_FILE")
