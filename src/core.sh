@@ -5237,12 +5237,6 @@ menu_select() {
                 unset is_tmp_list
                 return 2
             fi
-            if [[ ! $REPLY && $menu_default ]]; then
-                export "$menu_var=$menu_default"
-                msg "选择: ${!menu_var}"
-                unset is_tmp_list
-                return 0
-            fi
         else
             case $REPLY in
             q | Q)
