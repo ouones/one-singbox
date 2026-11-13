@@ -70,6 +70,7 @@ fail() {
 source <(sed -n '/^_green() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^update() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
 
@@ -88,7 +89,7 @@ is_core_repo=SagerNet/sing-box
 is_update_repo=$is_core_repo
 is_show_name=sing-box
 
-output=$(printf '1\n\n0\n' | update_menu 2>&1); status=$?
+output=$(printf '1\ny\n\n0\n' | update_menu 2>&1); status=$?
 [[ $status == 0 ]] || fail "the update menu resumes after no change: status=$status output=$output"
 [[ $output == *'当前已经是最新版本了'* ]] || fail "the no-change reason is visible: $output"
 message_line=$(awk 'index($0, "当前已经是最新版本了") { print NR; exit }' <<<"$output")

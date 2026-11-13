@@ -345,6 +345,20 @@ confirm_exact_yes() {
     [[ $answer == YES ]]
 }
 
+menu_system_impact() {
+    local object=$1 impact=$2 restart_core=$3
+    shift 3
+    msg "\n------------- 系统影响确认 -------------"
+    msg "操作对象：$object"
+    msg "主要影响：$impact"
+    msg "是否重启核心：$restart_core"
+    if ! confirm_action "确认执行上述操作"; then
+        msg "已取消。"
+        return 1
+    fi
+    "$@"
+}
+
 get_uuid() {
     tmp_uuid=$(cat /proc/sys/kernel/random/uuid)
 }
@@ -5253,12 +5267,12 @@ service_menu() {
             menu_status=$action_status
             ;;
         3)
-            menu_action service_action_result stop
+            menu_action menu_system_impact "sing-box 内核服务（停止）" "停止监听并中断所有节点连接" "否（执行后保持停止）" service_action_result stop
             action_status=$?
             menu_status=$action_status
             ;;
         4)
-            menu_action service_action_result restart
+            menu_action menu_system_impact "sing-box 内核服务（重启）" "短暂中断所有节点连接后重新加载配置" "是" service_action_result restart
             action_status=$?
             menu_status=$action_status
             ;;
@@ -5284,11 +5298,14 @@ update_menu() {
         [[ $choice_status == 2 ]] && return
         [[ $choice_status == 0 ]] || return 1
         case $REPLY in
-        1 | 2)
-            menu_action update "$REPLY"
+        1)
+            menu_action menu_system_impact "sing-box 内核" "下载并替换 sing-box 内核程序，保留现有配置" "是" update 1
+            ;;
+        2)
+            menu_action menu_system_impact "one-singbox 脚本" "下载并替换 one-singbox 脚本，不改 sing-box 配置" "否" update 2
             ;;
         3)
-            menu_action update caddy
+            menu_action menu_system_impact "Caddy" "下载并替换 Caddy 程序并重启 Caddy，不改 sing-box 配置" "否" update caddy
             ;;
         esac
     done
@@ -5308,7 +5325,7 @@ system_tools_menu() {
         case $REPLY in
         1)
             load bbr.sh
-            menu_action _try_enable_bbr
+            menu_action menu_system_impact "系统内核拥塞控制（BBR）" "修改 /etc/sysctl.conf 中的拥塞控制与队列设置" "否" _try_enable_bbr
             ;;
         2)
             load dns.sh
@@ -5318,7 +5335,11 @@ system_tools_menu() {
             menu_action log_limit_set
             ;;
         4)
-            menu_action block_cn_menu_toggle
+            if block_cn_is_enabled; then
+                menu_action menu_system_impact "停用屏蔽回国流量（block-cn）" "移除启用标记并重写运行时路由，恢复原有出站规则" "是" block_cn_menu_toggle
+            else
+                menu_action menu_system_impact "启用屏蔽回国流量（block-cn）" "写入启用标记、同步回国白名单并重写运行时路由" "是" block_cn_menu_toggle
+            fi
             ;;
         5)
             menu_action get reinstall

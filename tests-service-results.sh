@@ -65,6 +65,7 @@ rc-service() {
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     source <(sed -n '/^manage() {/,/^}/p' "$core_file")
     source <(sed -n '/^menu_action() {/,/^}/p' "$core_file")
+    source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$core_file")
     source <(sed -n '/^service_menu() {/,/^}/p' "$core_file")
     source <(sed -n '/^service_action_result() {/,/^}/p' "$core_file")
     source <(sed -n '/^main() {/,/^}/p' "$core_file")
@@ -93,7 +94,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     menu_choice=3
     menu_output=
     : >"$service_calls_file"
-    if menu_output=$(service_menu 2>&1); then fail "$core_file menu must reject a stop that did not reach inactive"; fi
+    if menu_output=$(service_menu <<<"y" 2>&1); then fail "$core_file menu must reject a stop that did not reach inactive"; fi
     [[ $menu_output == *'停止服务未达到目标状态'* && $menu_output == *'journalctl -u sing-box.service'* ]] || fail "$core_file menu reports stop failure with logs: $menu_output"
     [[ $(cat "$service_calls_file") == $'stop sing-box\nis-active sing-box' ]] || fail "$core_file menu verifies a completed stop"
 
@@ -103,7 +104,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     menu_choice=4
     menu_output=
     : >"$service_calls_file"
-    if menu_output=$(service_menu 2>&1); then fail "$core_file menu must not report unknown restart status as success"; fi
+    if menu_output=$(service_menu <<<"y" 2>&1); then fail "$core_file menu must not report unknown restart status as success"; fi
     [[ $menu_output == *'无法确认 sing-box 当前状态'* && $menu_output == *'journalctl -u sing-box.service'* ]] || fail "$core_file menu explains unknown state and logs: $menu_output"
     [[ $menu_output != *'重启服务成功'* ]] || fail "$core_file menu does not claim success for unknown state"
 
