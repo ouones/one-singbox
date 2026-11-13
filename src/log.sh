@@ -248,6 +248,10 @@ log_set() {
                 tail -f $is_log_dir/access.log
             fi
         else
+            if [[ $is_terminal_log_view ]]; then
+                _red "无法找到 log 文件."
+                return 1
+            fi
             err "无法找到 log 文件."
         fi
     fi

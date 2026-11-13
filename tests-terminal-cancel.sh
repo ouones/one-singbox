@@ -65,6 +65,7 @@ fi
 msg() { printf '%b\n' "$*"; }
 _green() { printf '%s' "$*"; }
 _red() { printf '%s' "$*"; }
+err() { printf '%b\n' "$*" >&2; exit 1; }
 show_list() { printf '%s\n' "$@"; }
 menu_pause() {
     printf '\n按回车返回菜单。\n'
@@ -189,6 +190,9 @@ reinstall-confirm)
     ;;
 kernel-log)
     touch "$is_log_dir/access.log"
+    service_menu
+    ;;
+kernel-log-missing)
     service_menu
     ;;
 system-input)
@@ -514,6 +518,14 @@ def verify(core_file):
     )
     if status != 0:
         raise AssertionError(f"kernel-log: panel did not return to the kernel menu (status {status})\n{proc.text()}")
+
+    proc, status = run_case(
+        "kernel-log-missing",
+        core_file,
+        ["请选择服务操作", b"5\n", "无法找到 log 文件", "按回车返回菜单。", b"\n", "请选择服务操作", b"0\n"],
+    )
+    if status != 0:
+        raise AssertionError(f"kernel-log-missing: panel did not return to the kernel menu (status {status})\n{proc.text()}")
 
     proc, status = run_case(
         "system-input",

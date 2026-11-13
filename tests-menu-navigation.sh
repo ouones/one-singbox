@@ -122,6 +122,159 @@ output=$(printf '0\n' | change sample.json); status=$?
 CASE
 }
 
+run_outbound_selection_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^current_outbound_mode_display() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^edit_node_outbound_mode() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+current_outbound_mode_display() { printf 'IPv4 优先'; }
+meta_file() { printf '/dev/null'; }
+outbound_proxy_from_metadata() { outbound_proxy_json='{"config":{"type":"shadowsocks"}}'; return 0; }
+apply_node_outbound_mode() { printf 'applied:%s\n' "$2"; }
+msg_outbound_mode_display() { :; }
+interactive_read() { builtin read "$@"; }
+is_config_file=node.json
+is_err='错误!'
+
+output=$(printf '0\n' | edit_node_outbound_mode 2>&1); status=$?
+[[ $status == 2 ]] || fail "0 returns from outbound selection: status=$status output=$output"
+[[ $output == *'0) 返回上级'* ]] || fail "outbound selection shows the shared return item: $output"
+[[ $output == *'IPv6 优先'* && $output == *'Shadowsocks 出口'* && $output == *'VLESS 出口'* ]] || fail "outbound choices remain visible: $output"
+[[ $output != *'applied:'* ]] || fail "0 must not apply an outbound mode: $output"
+
+invalid_output=$(printf '99\n0\n' | edit_node_outbound_mode 2>&1); status=$?
+[[ $status == 2 ]] || fail "invalid then 0 returns from outbound selection: status=$status output=$invalid_output"
+[[ $(grep -Fc 'IPv6 优先' <<<"$invalid_output") == 2 ]] || fail "invalid input redraws the full outbound menu: $invalid_output"
+[[ $(grep -Fc '0) 返回上级' <<<"$invalid_output") == 2 ]] || fail "invalid input redraws the return item: $invalid_output"
+[[ $(grep -Fc '输入无效' <<<"$invalid_output") == 1 ]] || fail "invalid input prints one error per attempt: $invalid_output"
+
+selected=$(printf '5\n\n' | edit_node_outbound_mode 2>&1); status=$?
+[[ $status == 0 ]] || fail "outbound option 5 still applies: status=$status output=$selected"
+[[ $selected == *'applied:SS 出站'* ]] || fail "outbound option 5 keeps its business mapping: $selected"
+CASE
+}
+
+run_ss_method_selection_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^ss_method_list=(/,/^)/p' "$CORE_FILE")
+source <(sed -n '/^protocol_list=(/,/^)/p' "$CORE_FILE")
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^select_ss_method() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^change() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^add() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+_green() { printf '%s' "$*"; }
+ask() { fail 'numbered SS method selection must use menu_select parent'; }
+info() {
+    is_config_file=node.json
+    net=ss
+    is_protocol=ss
+    ss_password=old-secret
+    return 0
+}
+get() { printf 'generated-password'; }
+get_uuid() { tmp_uuid=22222222-2222-4222-8222-222222222222; }
+node_port_used() { return 1; }
+create() { printf 'created:%s\n' "$ss_method"; }
+meta_set() { :; }
+add() { printf 'changed:%s\n' "$is_new_method"; }
+is_random_ss_method=2022-blake3-aes-128-gcm
+is_err='错误!'
+
+return_output=$(unset ss_method; printf '0\n' | change node.json method 2>&1); status=$?
+[[ $status == 2 ]] || fail "0 returns from the SS method change selector: status=$status output=$return_output"
+[[ $return_output == *'0) 返回上级'* && $return_output == *'aes-128-gcm'* && $return_output == *'2022-blake3-chacha20-poly1305'* ]] || fail "SS method choices remain visible: $return_output"
+[[ $return_output != *'changed:'* ]] || fail "0 must not change the SS method: $return_output"
+
+default_output=$(unset ss_method; printf '\n' | change node.json method 2>&1); status=$?
+[[ $status == 0 ]] || fail "Enter keeps the SS method default in change mode: status=$status output=$default_output"
+[[ $default_output == *'changed:2022-blake3-aes-128-gcm'* ]] || fail "change mode uses the configured SS method default: $default_output"
+
+source <(sed -n '/^add() {/,/^}/p' "$CORE_FILE")
+add_return=$(unset ss_method; is_main_start=1; port=32002; printf '0\n' | add shadowsocks 2>&1); status=$?
+[[ $status == 2 ]] || fail "0 returns from the SS method add selector: status=$status output=$add_return"
+[[ $add_return == *'0) 返回上级'* ]] || fail "SS add shows the shared return item: $add_return"
+[[ $add_return != *'created:'* ]] || fail "0 must not create a Shadowsocks node: $add_return"
+
+add_default=$(unset ss_method; is_main_start=1; port=32002; ss_password=generated-password; printf '\n\n' | add shadowsocks 2>&1); status=$?
+[[ $status == 0 ]] || fail "Enter keeps the SS method default in add mode: status=$status output=$add_default"
+[[ $add_default == *'created:2022-blake3-aes-128-gcm'* ]] || fail "add mode uses the configured SS method default: $add_default"
+
+quick_output=$(unset ss_method; is_main_start=; port=; ss_password=; printf '' | add shadowsocks 32003 secret aes-128-gcm 2>&1); status=$?
+[[ $status == 0 && $quick_output == *'created:aes-128-gcm'* ]] || fail "SS quick arguments bypass the selector: status=$status output=$quick_output"
+CASE
+}
+
+run_snell_selection_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^select_snell_mode() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^select_snell_obfs_mode() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^change() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+_green() { printf '%s' "$*"; }
+ask() { fail 'numbered Snell selection must use menu_select parent'; }
+snell_mode_desc() { printf 'default\nunshaped\nunsafe-raw'; }
+snell_mode_valid() { return 0; }
+add() { printf 'added:mode=%s:obfs=%s\n' "$snell_mode" "$snell_obfs_mode"; }
+info() {
+    is_config_file=node.json
+    net=snell
+    is_protocol=snell
+    snell_version=$SCENARIO_VERSION
+    snell_psk=0123456789ab
+    return 0
+}
+is_err='错误!'
+
+for spec in '19|6|unshaped|运行模式' '19|5|http|混淆模式' '20|5|http|混淆模式' '20|6|unsafe-raw|运行模式'; do
+    IFS='|' read -r change_id version expected_label label <<<"$spec"
+    SCENARIO_VERSION=$version
+    if [[ $change_id == 19 ]]; then change_alias=obfs; else change_alias=mode; fi
+    output=$(printf '0\n' | change node.json "$change_alias" 2>&1); status=$?
+    [[ $status == 2 ]] || fail "Snell v$version $label 0 returns: status=$status output=$output"
+    [[ $output == *'0) 返回上级'* && $output == *"$expected_label"* ]] || fail "Snell v$version $label choices remain visible: $output"
+    [[ $output != *'added:'* ]] || fail "Snell v$version $label 0 must not update the node: $output"
+    [[ $(grep -Fc '0) 返回上级' <<<"$output") == 1 ]] || fail "Snell v$version $label shows one shared return item: $output"
+done
+
+SCENARIO_VERSION=6
+quick_output=$(change node.json mode default 2>&1); status=$?
+[[ $status == 0 && $quick_output == *'added:mode=default:obfs='* ]] || fail "Snell mode shortcut bypasses the selector: status=$status output=$quick_output"
+CASE
+}
+
 run_node_selector_return_case() {
     local core_file=$1
     CORE_FILE="$core_file" bash <<'CASE' || exit 1
@@ -223,7 +376,7 @@ mkdir -p "$is_conf_dir"
 is_main_start=1
 
 output=$(printf '2\n\n0\n5\n' | relay_menu)
-[[ $output == *'暂无转发，请先添加'* ]] || fail "empty relay state is explained: $output"
+[[ $output == *'暂无端口转发，请先添加'* ]] || fail "empty relay state is explained: $output"
 [[ $(cat "$menu_file") == $'添加\n列表\n查看\n删除' ]] || fail "relay menu uses concise action labels in order: $(cat "$menu_file")"
 [[ $output == *'0) 返回上级'* ]] || fail "relay menu shows the shared return item: $output"
 [[ $output == *'按回车返回菜单'* ]] || fail "empty relay state remains visible until return: $output"
@@ -773,7 +926,7 @@ fail() {
     exit 1
 }
 
-source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_exact_yes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
 
@@ -813,6 +966,35 @@ run_case 1 2 'Caddy'
 [[ $confirmation == *'Caddy 服务'* ]] || fail "full uninstall confirms Caddy service removal: $confirmation"
 [[ $confirmation == *'/etc/caddy'* ]] || fail "full uninstall confirms the Caddy directory scope: $confirmation"
 run_case '' '' 'one-singbox 程序、脚本和快捷命令'
+CASE
+}
+
+run_caddy_uninstall_selection_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
+
+msg() { printf '%b\n' "$*"; }
+show_list() { local i=1; local item; for item in "$@"; do printf '%s) %s\n' "$i" "$item"; ((i++)); done; }
+ask() { fail 'numbered Caddy uninstall scope must use menu_select parent'; }
+confirm_exact_yes() { fail '0 must not continue to uninstall confirmation'; }
+manage() { fail '0 must not change services'; }
+log_limit_remove() { fail '0 must not remove logs'; }
+is_caddy=1
+is_err='错误!'
+
+output=$(printf '0\n' | uninstall 2>&1); status=$?
+[[ $status == 2 ]] || fail "0 returns from Caddy uninstall scope: status=$status output=$output"
+[[ $output == *'0) 返回上级'* ]] || fail "Caddy uninstall scope shows the shared return item: $output"
+[[ $output == *'1) 卸载内核和脚本'* && $output == *'2) 全部卸载'* ]] || fail "Caddy uninstall scope keeps business numbering: $output"
 CASE
 }
 
@@ -959,7 +1141,7 @@ trap 'rm -rf "$case_dir"' EXIT
 is_conf_dir=$case_dir/conf
 mkdir -p "$is_conf_dir"
 output=$(relay_main list) || fail "relay list CLI succeeds: $output"
-[[ $output == *'当前未配置任何中转'* ]] || fail "relay list CLI keeps its output: $output"
+[[ $output == *'当前未配置任何端口转发'* ]] || fail "relay list CLI keeps its output: $output"
 [[ $output != *'按回车返回'* ]] || fail 'noninteractive relay list must not pause'
 CASE
 }
@@ -1011,11 +1193,41 @@ output=$(log_set)
 CASE
 }
 
+run_log_missing_cli_case() {
+    local log_file=$1
+    LOG_FILE="$log_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${LOG_FILE}): $*"
+    exit 1
+}
+
+source <(sed -n '/^log_set() {/,/^}/p' "$LOG_FILE")
+
+is_log_dir=$(mktemp -d)
+trap 'rm -rf "$is_log_dir"' EXIT
+is_terminal_log_view=
+_green() { printf '%s' "$*"; }
+msg() { printf '%b\n' "$*"; }
+err() { printf '%b\n' "$*" >&2; return 1; }
+
+output=$(log_set 2>&1)
+status=$?
+[[ $status != 0 ]] || fail 'missing log must fail in CLI mode'
+[[ $output == *'无法找到 log 文件'* ]] || fail "missing log failure is visible: $output"
+[[ $output != *'按回车返回'* ]] || fail 'missing log CLI failure must not pause'
+CASE
+}
+
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     run_node_menu_navigation_case "$core_file"
     run_main_menu_navigation_case "$core_file"
     run_node_change_menu_return_case "$core_file"
     run_node_selector_return_case "$core_file"
+    run_outbound_selection_case "$core_file"
+    run_ss_method_selection_case "$core_file"
+    run_snell_selection_case "$core_file"
     run_empty_node_case "$core_file"
     run_empty_relay_case "$core_file"
     run_relay_add_copy_case "$core_file"
@@ -1035,6 +1247,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     run_dns_display_mapping_case "$core_file"
     run_interactive_help_case "$core_file"
     run_uninstall_copy_case "$core_file"
+    run_caddy_uninstall_selection_case "$core_file"
     run_child_back_case "$core_file"
     run_protocol_cancel_case "$core_file"
     run_cli_relay_list_case "$core_file"
@@ -1047,5 +1260,6 @@ done
 run_log_limit_prompt_case
 
 run_log_exit_prompt_case "$repo_root/src/log.sh"
+run_log_missing_cli_case "$repo_root/src/log.sh"
 
 echo 'PASS: terminal menu navigation, labels, DNS mapping, uninstall, and log prompts'

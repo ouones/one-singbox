@@ -230,12 +230,12 @@ restart_count_after=$(grep -c "restart" "$manage_log" || true)
 [[ -f "$is_conf_dir/relay-10001.json" ]] || fail "other relay files should not be deleted"
 
 # 13. mainmenu contains relay management and unknown subcommand fails
-printf '%s\n' "${mainmenu[@]}" | grep -qE '中转|转发' || fail "mainmenu should contain relay/port forwarding item"
+printf '%s\n' "${mainmenu[@]}" | grep -q '端口转发' || fail "mainmenu should contain port forwarding item"
 if (main relay unknown) >/dev/null 2>&1; then
     fail "unknown relay subcommand should fail"
 fi
 
-# 13.1. relay_menu option 2 is 中转列表 and does not prompt for local_port
+# 13.1. relay_menu option 2 is the port-forwarding list and does not prompt for local_port
 del_option=4
 ret_option=0
 
@@ -246,7 +246,7 @@ menu_out=$(
 0
 EOF
 )
-[[ $menu_out == *"中转列表"* || $menu_out == *"暂无转发"* || $menu_out == *"当前未配置任何中转"* ]] || fail "relay_menu option 2 should output relay list"
+[[ $menu_out == *"端口转发列表"* || $menu_out == *"暂无端口转发"* || $menu_out == *"当前未配置任何端口转发"* ]] || fail "relay_menu option 2 should output the port-forwarding list"
 [[ $menu_out != *"请输入要查看的中转本地端口"* ]] || fail "relay_menu option 2 should not prompt for local port"
 
 # 13.2. Interactive deletion must accept a relay port that is actively listening

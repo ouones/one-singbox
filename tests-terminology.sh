@@ -8,13 +8,13 @@ fail() {
     exit 1
 }
 
-for file in README.md docs/usage.md src/help.sh core.sh src/core.sh; do
+for file in README.md docs/usage.md src/help.sh core.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '端口中转' "$repo_root/$file"); then
         fail "$file still contains the deprecated term: $legacy"
     fi
 done
 
-for file in README.md docs/usage.md src/help.sh; do
+for file in README.md docs/usage.md src/help.sh core.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '中转' "$repo_root/$file"); then
         fail "$file still mixes relay wording: $legacy"
     fi
@@ -22,6 +22,11 @@ for file in README.md docs/usage.md src/help.sh; do
 done
 
 grep -Fq '**端口转发**' "$repo_root/GLOSSARY.md" || fail 'GLOSSARY.md is missing the 端口转发 definition'
+grep -Fq 'Title: "节点出站与端口转发"' "$repo_root/assets/readme/source/imagegen-prompts.md" || fail 'capabilities prompt title is missing 端口转发'
+grep -Fq 'Lower lane heading: "端口转发"' "$repo_root/assets/readme/source/imagegen-prompts.md" || fail 'capabilities prompt lane heading is missing 端口转发'
+if legacy=$(grep -n '中转' "$repo_root/assets/readme/source/imagegen-prompts.md"); then
+    fail "capabilities prompt still contains the deprecated term: $legacy"
+fi
 
 technical_doc="$repo_root/docs/adr/0002-node-default-outbound-and-block-cn.md"
 first_term=$(grep -nE '端口转发|端口中转' "$technical_doc" | head -n 1)
@@ -62,6 +67,8 @@ fail() {
 }
 
 source <(sed -n '/^relay_list() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^relay_info() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_warn_security() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_main() {/,/^}/p' "$CORE_FILE")
 msg() { printf '%b\n' "$*"; }
@@ -76,7 +83,8 @@ is_main_start=
 is_core=sb
 
 output=$(relay_main list)
-[[ $output == $'\n当前未配置任何中转.' ]] || fail "relay list output changed: $output"
+[[ $output == $'\n当前未配置任何端口转发.' ]] || fail "empty relay list output changed: $output"
+[[ $output != *'中转'* ]] || fail "empty relay list still mixes wording: $output"
 [[ $output != *'按回车返回'* ]] || fail 'relay list CLI must not pause'
 
 error_output=$(relay_main unknown 2>&1)
@@ -88,13 +96,20 @@ status=$?
 [[ $error_output != *'按回车返回'* ]] || fail 'relay error CLI must not pause'
 
 cat >"$is_conf_dir/relay-10000.json" <<'JSON'
-{"inbounds":[{"listen_port":10000,"override_address":"203.0.113.60","override_port":20060}]}
+{"inbounds":[{"tag":"relay-10000.json","type":"direct","listen_port":10000,"override_address":"203.0.113.60","override_port":20060}]}
 JSON
+jq -e '.inbounds[0] | .tag == "relay-10000.json" and .type == "direct" and .listen_port == 10000 and .override_address == "203.0.113.60" and .override_port == 20060' "$is_conf_dir/relay-10000.json" >/dev/null || fail 'relay compatibility fields changed'
 
 cli_list=$(relay_main list)
-[[ $cli_list == *'中转列表'* && $cli_list == *'共 1 个中转'* && $cli_list == *'中转没有身份验证'* ]] || fail "CLI relay list output changed: $cli_list"
-[[ $cli_list != *'端口转发'* ]] || fail "CLI relay list output changed to interactive wording: $cli_list"
+[[ $cli_list == *'端口转发列表'* && $cli_list == *'共 1 个端口转发'* && $cli_list == *'端口转发没有身份验证'* ]] || fail "CLI relay list wording changed: $cli_list"
+[[ $cli_list == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "CLI relay list machine fields changed: $cli_list"
+[[ $cli_list != *'中转'* ]] || fail "CLI relay list still mixes wording: $cli_list"
 [[ $cli_list != *'按回车返回'* ]] || fail 'CLI relay list with entries must not pause'
+
+cli_info=$(relay_main info 10000)
+[[ $cli_info == *'端口转发配置信息'* && $cli_info == *'类型: TCP/UDP 端口转发'* && $cli_info == *'监听端口: 10000'* && $cli_info == *'目标地址: 203.0.113.60'* && $cli_info == *'目标端口: 20060'* ]] || fail "CLI relay info compatibility fields changed: $cli_info"
+[[ $cli_info != *'中转'* ]] || fail "CLI relay info still mixes wording: $cli_info"
+[[ $cli_info != *'按回车返回'* ]] || fail 'CLI relay info must not pause'
 
 is_main_start=1
 interactive_list=$(relay_list)

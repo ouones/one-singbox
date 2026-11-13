@@ -777,6 +777,33 @@ ask() {
     unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg
 }
 
+select_ss_method() {
+    local status previous_default=${is_default_arg-} had_default=${is_default_arg+x}
+    is_default_arg=$is_random_ss_method
+    menu_select parent ss_method "\n选择加密方式:\n" "${ss_method_list[@]}"
+    status=$?
+    if [[ $had_default ]]; then
+        is_default_arg=$previous_default
+    else
+        unset is_default_arg
+    fi
+    return "$status"
+}
+
+select_snell_mode() {
+    local prompt=$1 status
+    menu_select parent is_new_snell_mode "$prompt" default unshaped unsafe-raw
+    status=$?
+    return "$status"
+}
+
+select_snell_obfs_mode() {
+    local prompt=$1 status
+    menu_select parent is_new_snell_obfs_mode "$prompt" none http
+    status=$?
+    return "$status"
+}
+
 meta_dir() {
     echo "$is_conf_dir/.quan-meta"
 }
@@ -1961,8 +1988,21 @@ apply_node_outbound_mode() {
 }
 
 edit_node_outbound_mode() {
-    local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type
-    ask set_outbound_mode
+    local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type outbound_status
+    printf '\n当前出口方式: %s\n' "$(current_outbound_mode_display "$is_config_file")"
+    msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出口可选 Shadowsocks 或 VLESS。"
+    menu_select parent is_outbound_mode "\n选择出口方式:\n" "IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 出口" "VLESS 出口"
+    outbound_status=$?
+    [[ $outbound_status == 2 ]] && return 2
+    [[ $outbound_status == 0 ]] || return 1
+    case $is_outbound_mode in
+    'IPv6 优先') is_outbound_mode='V6优先' ;;
+    'IPv4 优先') is_outbound_mode='V4优先' ;;
+    '仅 IPv4') is_outbound_mode='仅V4' ;;
+    '仅 IPv6') is_outbound_mode='仅V6' ;;
+    'Shadowsocks 出口') is_outbound_mode='SS 出站' ;;
+    'VLESS 出口') is_outbound_mode='VLESS 出站' ;;
+    esac
     metadata_file=$(meta_file "$is_config_file")
     if [[ $is_outbound_mode == 'SS 出站' ]]; then
         if outbound_proxy_from_metadata "$is_config_file" "$metadata_file"; then
@@ -3542,7 +3582,7 @@ create() {
 
 # change config file
 change() {
-    local change_choice_status change_info_status
+    local change_choice_status change_info_status ss_method_status snell_status
     is_change=1
     is_dont_show_info=1
     is_auto=
@@ -3737,10 +3777,13 @@ change() {
         is_new_ss_password=$ss_password
         [[ $net != 'ss' ]] && err "($is_config_file) 不支持更改加密方式."
         [[ $is_auto ]] && is_new_method=$is_random_ss_method
-        [[ ! $is_new_method ]] && {
-            ask set_ss_method
+        if [[ ! $is_new_method ]]; then
+            select_ss_method
+            ss_method_status=$?
+            [[ $ss_method_status == 2 ]] && return 2
+            [[ $ss_method_status == 0 ]] || return 1
             is_new_method=$ss_method
-        }
+        fi
         if [[ $(grep 2022 <<<$is_new_method) ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
             is_new_ss_password=$(ss_password_for_method "$is_new_method")
             msg "\n已根据新的加密方式自动更新密码: $(_green $is_new_ss_password)\n"
@@ -3912,18 +3955,22 @@ change() {
                 return
             fi
             # interactive prompt for mode
-            is_tmp_list=(default unshaped unsafe-raw)
-            ask list is_new_snell_mode "${is_tmp_list[*]}" "\n当前为 Snell v6 节点，请选择运行模式:\n$(snell_mode_desc)\n"
+            select_snell_mode "\n当前为 Snell v6 节点，请选择运行模式:\n$(snell_mode_desc)\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
             snell_mode=$is_new_snell_mode
             add snell
             return
         fi
         is_new_snell_obfs_mode=$3
         [[ $is_new_snell_obfs_mode == auto ]] && is_new_snell_obfs_mode=none
-        [[ ! $is_new_snell_obfs_mode ]] && {
-            is_tmp_list=(none http)
-            ask list is_new_snell_obfs_mode
-        }
+        if [[ ! $is_new_snell_obfs_mode ]]; then
+            select_snell_obfs_mode "\n选择 Snell 混淆模式:\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
+        fi
         snell_obfs_mode=$is_new_snell_obfs_mode
         add snell
         ;;
@@ -3947,18 +3994,22 @@ change() {
                 add snell
                 return
             fi
-            is_tmp_list=(none http)
-            ask list is_new_snell_obfs_mode "${is_tmp_list[*]}" "\n当前为 Snell v5 节点，请选择混淆模式:\n"
+            select_snell_obfs_mode "\n当前为 Snell v5 节点，请选择混淆模式:\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
             snell_obfs_mode=$is_new_snell_obfs_mode
             add snell
             return
         fi
         is_new_snell_mode=$3
         [[ $is_new_snell_mode == auto ]] && is_new_snell_mode=default
-        [[ ! $is_new_snell_mode ]] && {
-            is_tmp_list=(default unshaped unsafe-raw)
-            ask list is_new_snell_mode "${is_tmp_list[*]}" "\n请选择 Snell v6 运行模式:\n$(snell_mode_desc)\n"
-        }
+        if [[ ! $is_new_snell_mode ]]; then
+            select_snell_mode "\n请选择 Snell v6 运行模式:\n$(snell_mode_desc)\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
+        fi
         snell_mode_valid "$is_new_snell_mode" || err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"
         snell_mode=$is_new_snell_mode
         add snell
@@ -3981,7 +4032,7 @@ del() {
     [[ ! $is_config_file ]] && { get info $1 || return $?; }
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
-            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点。确认删除"; then
+            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点，删除后将重启 sing-box。确认删除"; then
                 msg "已取消删除节点。"
                 return
             fi
@@ -4012,11 +4063,13 @@ del() {
 
 # uninstall
 uninstall() {
-    local uninstall_scope="将删除 sing-box 程序、服务和配置，日志维护服务及日志，以及 one-singbox 程序、脚本和快捷命令"
+    local uninstall_scope="将删除 sing-box 程序、服务和配置，日志维护服务及日志，以及 one-singbox 程序、脚本和快捷命令" uninstall_choice_status
     if [[ $is_caddy ]]; then
-        is_tmp_list=("卸载内核和脚本" "全部卸载")
-        ask list is_do_uninstall
-        if [[ $REPLY == '2' ]]; then
+        menu_select parent is_do_uninstall "\n请选择卸载范围:\n" "卸载内核和脚本" "全部卸载"
+        uninstall_choice_status=$?
+        [[ $uninstall_choice_status == 2 ]] && return 2
+        [[ $uninstall_choice_status == 0 ]] || return 1
+        if [[ $is_do_uninstall == '全部卸载' ]]; then
             confirm_exact_yes "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return 1; }
         else
             confirm_exact_yes "$uninstall_scope。Caddy 服务、程序及 /etc/caddy 安装和配置目录保留，不删除。确认卸载" || { msg "已取消卸载。"; return 1; }
@@ -4035,8 +4088,8 @@ uninstall() {
         rm -f /etc/init.d/$is_core
     fi
     sed -i "/$is_core/d" /root/.bashrc
-    # uninstall caddy; 2 is ask result
-    if [[ $REPLY == '2' ]]; then
+    # uninstall caddy only when the full-removal scope was selected
+    if [[ $is_do_uninstall == '全部卸载' ]]; then
         manage stop caddy &>/dev/null
         manage disable caddy &>/dev/null
         if [[ $is_systemd ]]; then
@@ -4145,7 +4198,7 @@ service_action_result() {
 
 # add a config
 add() {
-    local caddy_shared_lock= protocol_choice_status
+    local caddy_shared_lock= protocol_choice_status ss_method_status
     [[ ! $1 && ! $is_change ]] && unset is_new_protocol
     if [[ ! $is_change ]]; then
         is_servername=
@@ -4438,7 +4491,15 @@ add() {
                 ;;
             shadowsocks)
                 # set method
-                [[ ! $ss_method ]] && ask set_ss_method
+                if [[ ! $ss_method ]]; then
+                    select_ss_method
+                    ss_method_status=$?
+                    if [[ $ss_method_status == 2 ]]; then
+                        msg "\n已取消添加节点，返回节点管理菜单。\n"
+                        return 2
+                    fi
+                    [[ $ss_method_status == 0 ]] || return 1
+                fi
                 # set password
                 [[ ! $ss_password ]] && {
                     if [[ $(grep 2022 <<<$ss_method) ]]; then
@@ -5154,7 +5215,7 @@ menu_action() {
 }
 
 menu_select() {
-    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent=
+    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent= menu_default=${is_default_arg:-}
     shift 3
     [[ $menu_kind == parent ]] && menu_has_parent=1
     while :; do
@@ -5162,7 +5223,9 @@ menu_select() {
         is_tmp_list=("$@")
         show_list "${is_tmp_list[@]}"
         [[ $menu_has_parent ]] && msg "0) 返回上级"
-        if [[ $menu_has_parent ]]; then
+        if [[ $menu_has_parent && $menu_default ]]; then
+            echo -ne "请输入选项编号 [\e[91m0-${#is_tmp_list[@]}\e[0m] (0 返回上级，回车默认 $menu_default):"
+        elif [[ $menu_has_parent ]]; then
             echo -ne "请输入选项编号 [\e[91m0-${#is_tmp_list[@]}\e[0m] (0 返回上级):"
         else
             echo -ne "请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (q 退出):"
@@ -5173,6 +5236,12 @@ menu_select() {
                 export "$menu_var="
                 unset is_tmp_list
                 return 2
+            fi
+            if [[ ! $REPLY && $menu_default ]]; then
+                export "$menu_var=$menu_default"
+                msg "选择: ${!menu_var}"
+                unset is_tmp_list
+                return 0
             fi
         else
             case $REPLY in
@@ -5392,7 +5461,7 @@ relay_warn_security() {
     if [[ $is_main_start ]]; then
         warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
     else
-        warn "中转没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
     fi
 }
 
@@ -5476,7 +5545,7 @@ relay_add() {
     if [[ $is_main_start ]]; then
         msg "\n$(_green '端口转发配置添加成功!')"
     else
-        msg "\n$(_green '中转配置添加成功!')"
+        msg "\n$(_green '端口转发配置添加成功!')"
     fi
     msg "------------------------------------------------"
     relay_info_show "$local_port" "$remote_addr" "$remote_port"
@@ -5500,7 +5569,7 @@ relay_info() {
     if [[ $is_main_start ]]; then
         msg "\n------------- 端口转发配置信息 -------------"
     else
-        msg "\n------------- 中转配置信息 -------------"
+        msg "\n------------- 端口转发配置信息 -------------"
     fi
     relay_info_show "$local_port" "$r_addr" "$r_port"
     msg "----------------------------------------"
@@ -5514,16 +5583,16 @@ relay_list() {
     shopt -u nullglob
     if [[ ${#files[@]} -eq 0 ]]; then
         if [[ $is_main_start ]]; then
-            msg "\n暂无转发，请先添加\n"
+            msg "\n暂无端口转发，请先添加\n"
         else
-            msg "\n当前未配置任何中转.\n"
+            msg "\n当前未配置任何端口转发.\n"
         fi
         return
     fi
     if [[ $is_main_start ]]; then
         msg "\n------------- 端口转发列表 -------------"
     else
-        msg "\n------------- 中转列表 -------------"
+        msg "\n------------- 端口转发列表 -------------"
     fi
     for file in "${files[@]}"; do
         l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
@@ -5536,7 +5605,7 @@ relay_list() {
     if [[ $is_main_start ]]; then
         msg "共 $count 个端口转发"
     else
-        msg "共 $count 个中转"
+        msg "共 $count 个端口转发"
     fi
     relay_warn_security
 }
@@ -5576,7 +5645,7 @@ relay_delete() {
     if [[ $is_main_start ]]; then
         _green "\n已删除端口转发配置: relay-${local_port}.json\n"
     else
-        _green "\n已删除中转配置: relay-${local_port}.json\n"
+        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
     fi
 }
 

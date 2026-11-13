@@ -112,7 +112,7 @@ list_relays() {
     }
     valid+=("$file")
   done
-  printf '中转列表（共 %d 个）\n\n' "${#valid[@]}"
+  printf '端口转发列表（共 %d 个）\n\n' "${#valid[@]}"
   for file in "${valid[@]}"; do
     base=${file##*/}
     local_port=$(node_value "$file" '.inbounds[0].listen_port // "-"' || printf '%s' '-')
@@ -129,7 +129,7 @@ list_relays() {
     printf '   网络：tcp,udp\n\n'
   done
   if [[ $count -eq 0 && ${#valid[@]} -gt 0 ]]; then
-    printf '（没有有效的中转配置）\n'
+    printf '（没有有效的端口转发配置）\n'
   fi
 }
 

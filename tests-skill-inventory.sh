@@ -46,7 +46,7 @@ nodes=$($script nodes "$conf_dir")
 [[ "$nodes" != *'11111111-1111-1111-1111-111111111111'* ]] || { printf 'FAIL: UUID leaked\n%s\n' "$nodes"; exit 1; }
 
 relays=$($script relays "$conf_dir")
-[[ "$relays" == *'中转列表（共 1 个）'* ]] || { printf 'FAIL: relay count\n%s\n' "$relays"; exit 1; }
+[[ "$relays" == *'端口转发列表（共 1 个）'* ]] || { printf 'FAIL: relay count\n%s\n' "$relays"; exit 1; }
 [[ "$relays" == *'10000 -> 203.0.113.10:443'* ]] || { printf 'FAIL: relay summary\n%s\n' "$relays"; exit 1; }
 
 logs=$($script logs 2 ERROR "$log_file")

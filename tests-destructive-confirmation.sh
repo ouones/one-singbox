@@ -47,6 +47,7 @@ for input in y Y n N '' 0 yes 'Y '; do
     output=$(printf '%s\n\n' "$input" | menu_action del 2>&1)
     [[ $output == *'测试节点'* && $output == *'node.json'* ]] || fail "input '$input' did not identify the node and its config file: $output"
     [[ $output == *'删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点'* ]] || fail "input '$input' did not explain the node deletion scope: $output"
+    [[ $output == *'删除后将重启 sing-box'* ]] || fail "input '$input' did not explain the core restart: $output"
     if [[ $input == y || $input == Y ]]; then
         [[ $(cat "$WORKDIR/effects") == 'delete:node.json' ]] || fail "input '$input' did not execute node deletion: $output"
         [[ $output != *'已取消删除节点'* ]] || fail "accepted input '$input' was reported as canceled: $output"
@@ -126,7 +127,7 @@ source <(sed -n '/^interactive_read() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_pause() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_exact_yes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
 
