@@ -332,10 +332,17 @@ pause() {
 }
 
 confirm_action() {
-    local answer
+    local answer IFS=
     echo -ne "$1 [y/N]: "
     interactive_read -r answer
-    [[ ${answer,,} == y || ${answer,,} == yes ]]
+    [[ $answer == y || $answer == Y ]]
+}
+
+confirm_exact_yes() {
+    local answer IFS=
+    echo -ne "$1 [仅输入 YES 确认]: "
+    interactive_read -r answer
+    [[ $answer == YES ]]
 }
 
 get_uuid() {
@@ -3960,7 +3967,7 @@ del() {
     [[ ! $is_config_file ]] && { get info $1 || return $?; }
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
-            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file。确认删除"; then
+            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点。确认删除"; then
                 msg "已取消删除节点。"
                 return
             fi
@@ -3991,17 +3998,17 @@ del() {
 
 # uninstall
 uninstall() {
-    local uninstall_scope="将删除 sing-box 内核、服务和配置，日志维护服务及日志，以及 one-singbox 脚本和快捷命令"
+    local uninstall_scope="将删除 sing-box 程序、服务和配置，日志维护服务及日志，以及 one-singbox 程序、脚本和快捷命令"
     if [[ $is_caddy ]]; then
         is_tmp_list=("卸载内核和脚本" "全部卸载")
         ask list is_do_uninstall
         if [[ $REPLY == '2' ]]; then
-            confirm_action "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return; }
+            confirm_exact_yes "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return 1; }
         else
-            confirm_action "$uninstall_scope。确认卸载" || { msg "已取消卸载。"; return; }
+            confirm_exact_yes "$uninstall_scope。Caddy 服务、程序及 /etc/caddy 安装和配置目录保留，不删除。确认卸载" || { msg "已取消卸载。"; return 1; }
         fi
     else
-        confirm_action "$uninstall_scope。确认卸载" || { msg "已取消卸载。"; return; }
+        confirm_exact_yes "$uninstall_scope。Caddy 未安装，不涉及 Caddy 删除。确认卸载" || { msg "已取消卸载。"; return 1; }
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
@@ -4774,7 +4781,7 @@ get() {
         ;;
     reinstall)
         is_install_sh=$(cat $is_sh_dir/install.sh)
-        uninstall
+        uninstall || return $?
         bash <<<$is_install_sh
         ;;
     esac
@@ -5514,7 +5521,7 @@ relay_list() {
 }
 
 relay_delete() {
-    local local_port=$1 relay_file backup_file
+    local local_port=$1 relay_file backup_file remote_addr remote_port
     if [[ ! $local_port ]]; then
         relay_list
         # Existing relays may be listening; only validate the port format here.
@@ -5526,7 +5533,9 @@ relay_delete() {
     relay_file="$is_conf_dir/relay-${local_port}.json"
     [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
     if [[ $is_main_start ]]; then
-        confirm_action "将删除监听端口 $local_port 的端口转发配置。确认删除" || { msg "已取消删除端口转发。"; return; }
+        remote_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
+        remote_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
+        confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return; }
     fi
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"

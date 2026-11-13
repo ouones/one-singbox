@@ -29,6 +29,7 @@ mkdir -p "$is_conf_dir" "$is_core_dir" "$is_log_dir"
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_action() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_exact_yes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_has_nodes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_empty_state() {/,/^}/p' "$CORE_FILE")
@@ -45,6 +46,9 @@ source <(sed -n '/^interactive_read() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^interactive_log_tail() {/,/^}/p' "$LOG_FILE")
+source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^get() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^del() {/,/^}/p' "$CORE_FILE" | sed '1s/^del()/delete_node_scenario()/')
 
 if ! declare -F interactive_read >/dev/null; then
     interactive_read() { builtin read "$@"; }
@@ -94,6 +98,9 @@ change() {
     ask string node_name '输入新节点名称:'
     printf '%s' "$node_name" >"$case_dir/change-name"
 }
+apply_node_config_lifecycle() {
+    printf 'deleted' >"$case_dir/node-deleted"
+}
 
 relay_list() { printf 'RELAY_LIST\n'; }
 relay_info() { printf 'RELAY_INFO\n'; }
@@ -118,6 +125,22 @@ dns_set() {
     printf '%s' "$is_dns_use" >"$case_dir/dns-created"
 }
 
+manage() {
+    printf '%s\n' "$*" >>"$case_dir/manage-effects"
+}
+log_limit_remove() {
+    printf 'removed\n' >"$case_dir/logs-removed"
+}
+is_caddy=
+is_core=sing-box
+is_systemd=
+is_openrc=
+is_sh_dir=$case_dir/apps
+installer_marker=$case_dir/installer-ran
+mkdir -p "$is_sh_dir/core" "$is_sh_dir/log"
+printf 'core\n' >"$is_sh_dir/sing-box"
+printf '#!/usr/bin/env bash\nprintf installed > %q\n' "$installer_marker" >"$is_sh_dir/install.sh"
+
 case $SCENARIO in
 node-inputs)
     node_menu
@@ -126,11 +149,36 @@ node-free-text)
     add
     printf 'NODE_ADD_RETURNED\n'
     ;;
+node-delete-confirm)
+    printf 'NODE_DELETE_CONFIRM_INPUT\n'
+    is_config_file=node.json
+    is_config_name=测试节点
+    mkdir -p "$is_conf_dir"
+    printf '{}\n' >"$is_conf_dir/$is_config_file"
+    run_interactive_operation delete_node_scenario
+    printf 'NODE_DELETE_RETURNED\n'
+    ;;
 relay-add)
     relay_menu
     ;;
 relay-confirm)
     relay_menu
+    ;;
+uninstall-confirm)
+    printf 'UNINSTALL_CONFIRM_INPUT\n'
+    is_core_dir=$is_sh_dir/core
+    is_log_dir=$is_sh_dir/log
+    is_sh_bin=$is_sh_dir/sing-box
+    run_interactive_operation uninstall
+    printf 'UNINSTALL_RETURNED\n'
+    ;;
+reinstall-confirm)
+    printf 'REINSTALL_CONFIRM_INPUT\n'
+    is_core_dir=$is_sh_dir/core
+    is_log_dir=$is_sh_dir/log
+    is_sh_bin=$is_sh_dir/sing-box
+    run_interactive_operation get reinstall
+    printf 'REINSTALL_RETURNED\n'
     ;;
 kernel-log)
     touch "$is_log_dir/access.log"
@@ -393,6 +441,37 @@ def verify(core_file):
     if status != 0:
         raise AssertionError(f"relay-confirm: menu did not exit normally after return (status {status})\n{proc.text()}")
     assert_no_file(os.path.join(proc.case_dir, "relay-deleted"), "relay-confirm: Ctrl+C executed the confirmed action")
+
+    proc, status = run_case(
+        "node-delete-confirm",
+        core_file,
+        ["NODE_DELETE_CONFIRM_INPUT", "测试节点", "node.json", "删除范围包括该节点的配置", b"\x03", "已取消当前操作", b"\n", "NODE_DELETE_RETURNED"],
+    )
+    if status != 0:
+        raise AssertionError(f"node-delete-confirm: process did not return normally (status {status})\n{proc.text()}")
+    assert_no_file(os.path.join(proc.case_dir, "node-deleted"), "node-delete-confirm: Ctrl+C deleted the node")
+
+    proc, status = run_case(
+        "uninstall-confirm",
+        core_file,
+        ["UNINSTALL_CONFIRM_INPUT", "sing-box 程序、服务和配置", "Caddy 未安装", b"\x03", "已取消当前操作", b"\n", "UNINSTALL_RETURNED"],
+    )
+    if status != 0:
+        raise AssertionError(f"uninstall-confirm: process did not return normally (status {status})\n{proc.text()}")
+    assert_no_file(os.path.join(proc.case_dir, "manage-effects"), "uninstall-confirm: Ctrl+C changed service state")
+    assert_no_file(os.path.join(proc.case_dir, "logs-removed"), "uninstall-confirm: Ctrl+C removed logs")
+    if not os.path.isdir(os.path.join(proc.case_dir, "apps", "core")):
+        raise AssertionError("uninstall-confirm: Ctrl+C removed the core directory")
+
+    proc, status = run_case(
+        "reinstall-confirm",
+        core_file,
+        ["REINSTALL_CONFIRM_INPUT", "sing-box 程序、服务和配置", b"\x03", "已取消当前操作", b"\n", "REINSTALL_RETURNED"],
+    )
+    if status != 0:
+        raise AssertionError(f"reinstall-confirm: process did not return normally (status {status})\n{proc.text()}")
+    assert_no_file(os.path.join(proc.case_dir, "installer-ran"), "reinstall-confirm: Ctrl+C ran the installer")
+    assert_no_file(os.path.join(proc.case_dir, "manage-effects"), "reinstall-confirm: Ctrl+C changed service state")
 
     proc, status = run_case(
         "kernel-log",
