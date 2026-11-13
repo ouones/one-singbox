@@ -1,30 +1,30 @@
 # one-singbox
 
 <p align="center">
-  <img src="assets/readme/hero.png" width="100%" alt="one-singbox：sing-box 安装与终端管理工具，通过 sb 菜单、节点命令和中转命令管理 Linux 服务器上的配置。">
+  <img src="assets/readme/hero.png" width="100%" alt="one-singbox：sing-box 安装与终端管理工具，通过 sb 菜单、节点命令和端口转发命令管理 Linux 服务器上的配置。">
 </p>
 
 ## 介绍
 
-**one-singbox 是面向 Linux 服务器的 sing-box 安装与终端管理工具。** 通过交互式菜单和快捷命令 `sb`，管理代理节点、节点出站方式、TCP/UDP 端口中转及日常维护。
+**one-singbox 是面向 Linux 服务器的 sing-box 安装与终端管理工具。** 通过交互式菜单和快捷命令 `sb`，管理代理节点、节点出站方式、TCP/UDP 端口转发及日常维护。
 
 从[安装教程](#教程)开始，已有安装可直接查看[常用命令](#命令行)。
 
-**one-singbox** 是由 **ouones** 维护的 sing-box 安装与终端管理脚本，围绕节点管理、节点出站、中转及日常维护持续开发。
+**one-singbox** 是由 **ouones** 维护的 sing-box 安装与终端管理脚本，围绕节点管理、节点出站、端口转发及日常维护持续开发。
 
 | 能力 | 可以做什么 |
 | --- | --- |
 | 多协议节点管理 | 新增、修改、查看和删除多个节点，支持 VLESS-REALITY、TUIC、Trojan、Hysteria2、AnyTLS、Shadowsocks、VMess 等协议与部分传输组合。 |
 | Snell 支持 | 创建和管理 Snell v6/v5 节点，导出 `snell://` URI 与 Surge 配置。 |
 | 节点出站 | 为本机节点选择 IPv4/IPv6 直连方式，或通过 SS、VLESS 分享链接配置代理出站。 |
-| TCP/UDP 中转 | 使用 sing-box 原生 `direct` 入站，将本地端口转发到固定的远端地址和端口。 |
+| TCP/UDP 端口转发 | 使用 sing-box 原生 `direct` 入站，将本地端口转发到固定的远端地址和端口。 |
 | 日常维护 | 查看服务状态，更新脚本与内核，管理日志容量，为支持分享的节点显示二维码。 |
 
 <p align="center">
-  <img src="assets/readme/capabilities.png" width="100%" alt="功能关系示意：客户端连接本机代理节点后，使用所选直连或 SS、VLESS 代理出站；端口中转则把本地 TCP/UDP 端口转发到固定远端。">
+  <img src="assets/readme/capabilities.png" width="100%" alt="功能关系示意：客户端连接本机代理节点后，使用所选直连或 SS、VLESS 代理出站；端口转发则把本地 TCP/UDP 端口转发到固定远端。">
 </p>
 
-节点出站与端口中转分别管理：前者决定本机代理节点的流量如何发出，后者转发一个本地端口到固定目标。协议、版本与分享限制见[详细使用说明](docs/usage.md)。
+节点出站与端口转发分别管理：前者决定本机代理节点的流量如何发出，后者转发一个本地端口到固定目标。协议、版本与分享限制见[详细使用说明](docs/usage.md)。
 
 ## 教程
 
@@ -51,7 +51,7 @@ bash <(wget -qO- -o- https://github.com/ouones/one-singbox/raw/main/install.sh)
 sb
 ```
 
-首页按任务分为“节点管理”“TCP/UDP 端口中转”“服务控制”“更新软件”和“系统工具”等入口，同时显示内核状态与日志占用；**服务运行状态不代表外网连通性**。
+首页按任务分为“节点管理”“TCP/UDP 端口转发”“服务控制”“更新软件”和“系统工具”等入口，同时显示内核状态与日志占用；**服务运行状态不代表外网连通性**。
 
 ### 443 SNI 分流
 
@@ -74,11 +74,11 @@ sb add snell
 
 Snell 创建需要 sing-box 内核 **1.14.0 或更高版本**，默认创建 v6；AnyTLS 需要 **1.12.0 或更高版本**。需要域名及自动 TLS 的配置，请先阅读[协议与 TLS 条件](docs/usage.md#协议与-tls)。
 
-更多操作见[使用说明](docs/usage.md)：[节点出站](docs/usage.md#节点出站)、[端口中转](docs/usage.md#端口中转)、[二维码](docs/usage.md#二维码与分享)、[日志管理](docs/usage.md#日志与容量限制)。中转无内置认证，使用前应通过防火墙或网络 ACL 限制来源。
+更多操作见[使用说明](docs/usage.md)：[节点出站](docs/usage.md#节点出站)、[端口转发](docs/usage.md#端口转发)、[二维码](docs/usage.md#二维码与分享)、[日志管理](docs/usage.md#日志与容量限制)。端口转发无内置认证，使用前应通过防火墙或网络 ACL 限制来源。
 
 ## 命令行
 
-下表中的 `节点名` 是脚本中显示的节点配置名，`本地端口` 是已有中转使用的监听端口，执行时请替换为实际值。运行 `sb` 可进入首页；省略部分参数时，脚本会交互询问。
+下表中的 `节点名` 是脚本中显示的节点配置名，`本地端口` 是已有端口转发使用的监听端口，执行时请替换为实际值。运行 `sb` 可进入首页；省略部分参数时，脚本会交互询问。
 
 ### 节点管理
 
@@ -100,16 +100,16 @@ Snell 创建需要 sing-box 内核 **1.14.0 或更高版本**，默认创建 v6�
 | --- | --- |
 | 更改节点出站方式 | `sb c 节点名 outbound` |
 
-### 端口中转
+### 端口转发
 
 | 操作 | 命令 |
 | --- | --- |
-| 交互添加中转 | `sb relay add` |
-| 列出中转 | `sb relay list` |
-| 查看中转 | `sb relay info 本地端口` |
-| 删除中转 | `sb relay delete 本地端口` |
+| 交互添加端口转发 | `sb relay add` |
+| 列出端口转发 | `sb relay list` |
+| 查看端口转发 | `sb relay info 本地端口` |
+| 删除端口转发 | `sb relay delete 本地端口` |
 
-**中转无内置认证；面板删除中转时会先确认，命令行 `sb relay delete` 会立即删除。**
+**端口转发无内置认证；面板删除端口转发时会先确认，命令行 `sb relay delete` 会立即删除。**
 
 ### 服务维护
 

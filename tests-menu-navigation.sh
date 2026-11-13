@@ -221,7 +221,7 @@ output=$(printf '2\n\n0\n5\n' | relay_menu)
 [[ $(cat "$menu_file") == $'添加\n列表\n查看\n删除' ]] || fail "relay menu uses concise action labels in order: $(cat "$menu_file")"
 [[ $output == *'0) 返回上级'* ]] || fail "relay menu shows the shared return item: $output"
 [[ $output == *'按回车返回菜单'* ]] || fail "empty relay state remains visible until return: $output"
-[[ $(grep -o '请选择端口中转操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to relay menu: $output"
+[[ $(grep -o '请选择端口转发操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to relay menu: $output"
 [[ -z $(find "$is_conf_dir" -type f -print -quit) ]] || fail 'empty relay listing must not change configuration'
 CASE
 }
@@ -369,12 +369,12 @@ is_main_start=1
 output=$(printf '4\n10000\nn\n\n0\n5\n' | relay_menu)
 [[ $output == *'输入要删除的监听端口'* ]] || fail "delete requests the listener port by name: $output"
 [[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
-[[ $output == *'已取消删除转发'* ]] || fail "cancel is reported without deleting the relay: $output"
+[[ $output == *'已取消删除端口转发'* ]] || fail "cancel is reported without deleting the relay: $output"
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
 output=$(printf '4\n10000\ny\n\n0\n5\n' | relay_menu)
-[[ $output == *'将删除监听端口 10000 的转发配置。确认删除 [y/N]'* ]] || fail "confirmed deletion retains the original yes/no confirmation: $output"
-[[ $output == *'已删除中转配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
+[[ $output == *'将删除监听端口 10000 的端口转发配置。确认删除 [y/N]'* ]] || fail "confirmed deletion retains the original yes/no confirmation: $output"
+[[ $output == *'已删除端口转发配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
 [[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'
 CASE
 }
@@ -585,7 +585,7 @@ output=$(printf '%s' "$input" | is_main_menu)
 [[ ${mainmenu[2]} == '内核管理' && ${mainmenu[3]} == '更新' ]] || fail "home labels distinguish kernel management and updates: ${mainmenu[*]}"
 [[ ${mainmenu[1]} == '端口转发' ]] || fail "home labels relay management as port forwarding: ${mainmenu[1]}"
 if [[ $MENU_CHOICE == 2 ]]; then
-    [[ $output == *'请选择端口中转操作'* ]] || fail "home choice 2 still opens relay management: $output"
+    [[ $output == *'请选择端口转发操作'* ]] || fail "home choice 2 still opens relay management: $output"
 fi
 [[ $output != *'443 SNI 前置'* ]] || fail "home must not offer Nginx frontend management: $output"
 [[ $output == *'q 退出'* ]] || fail "home clearly explains that q exits: $output"

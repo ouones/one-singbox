@@ -292,6 +292,6 @@ grep -qE 'relay info.*(\[local-port\]|本地端口)' "$repo_root/README.md" || f
 grep -qE 'relay delete.*(\[local-port\]|本地端口)' "$repo_root/README.md" || fail "README missing relay delete"
 grep -q '防火墙' "$repo_root/README.md" || fail "README missing firewall warning"
 grep -q 'ACL' "$repo_root/README.md" || fail "README missing ACL warning"
-grep -qE '中转管理|端口中转|TCP/UDP 端口中转' "$repo_root/README.md" || fail "README missing interactive relay entry"
+grep -q '端口转发' "$repo_root/README.md" || fail "README missing interactive relay entry"
 
 echo "PASS: Task 3 interactive menu and documentation coverage"
