@@ -455,6 +455,7 @@ fail() {
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
 
 case_dir=$(mktemp -d)
@@ -475,7 +476,7 @@ log_set() { printf 'log\n' >>"$action_file"; }
 load() { [[ $1 == log.sh ]]; }
 
 is_caddy=1
-output=$(printf '1\n\n2\n\n3\n\n4\n\n5\n\n0\n6\n' | service_menu)
+output=$(printf '1\n\n2\n\n3\ny\n\n4\ny\n\n5\n\n0\n6\n' | service_menu)
 [[ $(cat "$menu_file") == $'状态\n启动\n停止\n重启\n日志' ]] || fail "kernel menu uses the requested labels in order: $(cat "$menu_file")"
 [[ $output == *'sing-box 内核：运行中 (版本 1.50)'* && $output == *'Caddy：已停止 (版本 2.10)'* ]] || fail "status identifies sing-box kernel and Caddy: $output"
 [[ $(cat "$action_file") == $'start\nstop\nrestart\nlog' ]] || fail "kernel menu choices retain their actions: $(cat "$action_file")"
@@ -501,6 +502,7 @@ fail() {
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
 
 case_dir=$(mktemp -d)
@@ -518,7 +520,7 @@ msg() { printf '%b\n' "$*"; }
 update() { printf '%s\n' "$*" >>"$update_file"; }
 
 is_caddy=1
-output=$(printf '1\n\n2\n\n3\n\n0\n4\n' | update_menu)
+output=$(printf '1\ny\n\n2\ny\n\n3\ny\n\n0\n4\n' | update_menu)
 [[ $(cat "$menu_file") == $'更新 sing-box 内核\n更新脚本\n更新 Caddy' ]] || fail "update menu includes Caddy in the requested order: $(cat "$menu_file")"
 [[ $(cat "$update_file") == $'1\n2\ncaddy' ]] || fail "installed update choices keep their targets: $(cat "$update_file")"
 [[ $output == *'更新脚本'* ]] || fail "update menu text is visible: $output"
@@ -526,7 +528,7 @@ output=$(printf '1\n\n2\n\n3\n\n0\n4\n' | update_menu)
 : >"$menu_file"
 : >"$update_file"
 is_caddy=
-output=$(printf '1\n\n2\n\n0\n3\n' | update_menu)
+output=$(printf '1\ny\n\n2\ny\n\n0\n3\n' | update_menu)
 [[ $(cat "$menu_file") == $'更新 sing-box 内核\n更新脚本' ]] || fail "update menu hides Caddy when it is not installed: $(cat "$menu_file")"
 [[ $(cat "$update_file") == $'1\n2' ]] || fail "without Caddy, update choices still target core and script: $(cat "$update_file")"
 CASE
@@ -618,6 +620,7 @@ fail() {
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^system_tools_menu() {/,/^}/p' "$CORE_FILE")
 
 msg() { printf '%b\n' "$*"; }
@@ -628,13 +631,14 @@ _try_enable_bbr() { printf '已执行：启用 BBR\n'; }
 dns_set() { printf '已执行：DNS\n'; }
 log_limit_set() { printf '已执行：日志上限\n'; }
 block_cn_menu_toggle() { printf '已执行：屏蔽回国流量\n'; }
+block_cn_is_enabled() { return 1; }
 block_cn_status_text() { printf '未启用'; }
 get() { printf '已执行：重装脚本\n'; }
 
 input_file=$(mktemp)
 output_file=$(mktemp)
 trap 'rm -f "$input_file" "$output_file"' EXIT
-printf '1\n\n2\n\n3\n\n4\n\n5\n\n0\n6\n' >"$input_file"
+printf '1\ny\n\n2\n\n3\n\n4\ny\n\n5\n\n0\n6\n' >"$input_file"
 system_tools_menu <"$input_file" >"$output_file"
 output=$(cat "$output_file")
 for label in '启用 BBR' 'DNS' '日志上限' '屏蔽回国流量' '重装脚本'; do
@@ -661,6 +665,7 @@ fail() {
 
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
 source "$REPO_ROOT/src/dns.sh"
 
 msg() { printf '%b\n' "$*"; }
@@ -680,7 +685,7 @@ manage_log=$case_dir/manage.log
 mkdir -p "$is_conf_dir"
 is_core_ver=1.16.0
 printf '%s\n' '{"dns":{"servers":[{"tag":"old"}]},"route":{"default_domain_resolver":"old"}}' >"$is_config_json"
-printf '6\nh3://dns.google/dns-query\n' >"$case_dir/custom-input"
+printf '6\nh3://dns.google/dns-query\ny\n' >"$case_dir/custom-input"
 dns_set <"$case_dir/custom-input" >"$case_dir/custom-output"
 output=$(cat "$case_dir/custom-output")
 for address in 1.1.1.1 8.8.8.8 h3://dns.google/dns-query h3://cloudflare-dns.com/dns-query h3://family.cloudflare-dns.com/dns-query; do
@@ -692,7 +697,7 @@ jq -e '.dns.servers[0].type == "h3" and .dns.servers[0].server == "dns.google" a
 [[ $output != *'已更新 DNS 为: none'* ]] || fail "custom DNS success output does not expose an internal option name: $output"
 
 printf '%s\n' '{"dns":{"servers":[{"tag":"old"}]},"route":{"default_domain_resolver":"old"}}' >"$is_config_json"
-printf '7\n' >"$case_dir/none-input"
+printf '7\ny\n' >"$case_dir/none-input"
 dns_set <"$case_dir/none-input" >"$case_dir/none-output"
 output=$(cat "$case_dir/none-output")
 [[ $output == *'不设置'* ]] || fail "DNS menu names the disabled option in Chinese: $output"

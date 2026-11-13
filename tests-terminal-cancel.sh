@@ -30,6 +30,7 @@ mkdir -p "$is_conf_dir" "$is_core_dir" "$is_log_dir"
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_exact_yes() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_system_impact() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_has_nodes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^node_menu_empty_state() {/,/^}/p' "$CORE_FILE")
@@ -39,6 +40,7 @@ source <(sed -n '/^relay_menu_empty_state() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^system_tools_menu() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^is_main_menu() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^mainmenu=(/,/^)/p' "$CORE_FILE")
 source <(sed -n '/^log_set() {/,/^}/p' "$LOG_FILE")
@@ -117,11 +119,16 @@ relay_delete() {
     printf 'deleted' >"$case_dir/relay-deleted"
 }
 
-service_action_result() { return 0; }
-block_cn_status_text() { printf '已关闭'; }
+service_action_result() { printf '%s' "$1" >"$case_dir/service-applied"; }
+update() { printf '%s' "$1" >"$case_dir/update-applied"; }
+_try_enable_bbr() { printf 'applied' >"$case_dir/bbr-applied"; }
+block_cn_is_enabled() { return 1; }
+block_cn_status_text() { printf '未启用'; }
+block_cn_menu_toggle() { printf 'applied' >"$case_dir/block-cn-applied"; }
 dns_set() {
     printf 'DNS_INPUT\n'
     ask string is_dns_use '请输入 DNS:'
+    menu_system_impact "DNS 配置：$is_dns_use" '更新运行时 DNS 配置并重启 sing-box' '是' : || return 1
     printf '%s' "$is_dns_use" >"$case_dir/dns-created"
 }
 
@@ -186,6 +193,22 @@ kernel-log)
     ;;
 system-input)
     system_tools_menu
+    ;;
+system-impact-bbr)
+    system_tools_menu
+    ;;
+system-impact-dns)
+    system_tools_menu
+    ;;
+system-impact-update)
+    is_caddy=1
+    update_menu
+    ;;
+system-impact-stop)
+    service_menu
+    ;;
+system-impact-restart)
+    service_menu
     ;;
 started-operation)
     write_operation() {
@@ -412,6 +435,17 @@ def probe_timeout_cleanup(core_file):
         raise AssertionError("timeout-cleanup: process remained after process-group cleanup")
 
 
+def verify_system_impact_cancel(name, core_file, choice, page_text, menu_prompt, effect_name, send_before_page=None):
+    steps = [menu_prompt, choice]
+    if send_before_page is not None:
+        steps.extend(send_before_page)
+    steps.extend([page_text, b"\x03", "已取消当前操作", "按回车返回菜单。", b"\n", menu_prompt, b"0\n"])
+    proc, status = run_case(name, core_file, steps)
+    if status not in (0, 2):
+        raise AssertionError(f"{name}: confirmation cancellation did not return to the menu (status {status})\n{proc.text()}")
+    assert_no_file(os.path.join(proc.case_dir, effect_name), f"{name}: Ctrl+C executed the confirmed action")
+
+
 def verify(core_file):
     case = os.path.join(workdir, os.path.basename(os.path.dirname(core_file)) + "-" + os.path.basename(core_file))
     proc, status = run_case(
@@ -490,6 +524,48 @@ def verify(core_file):
         raise AssertionError(f"system-input: menu did not exit normally after return (status {status})\n{proc.text()}")
     assert_no_file(os.path.join(proc.case_dir, "dns-created"), "system-input: Ctrl+C changed DNS")
 
+    verify_system_impact_cancel(
+        "system-impact-bbr",
+        core_file,
+        b"1\n",
+        "操作对象：系统内核拥塞控制（BBR）",
+        "请选择系统设置",
+        "bbr-applied",
+    )
+    verify_system_impact_cancel(
+        "system-impact-dns",
+        core_file,
+        b"2\n",
+        "操作对象：DNS 配置：1.1.1.1",
+        "请选择系统设置",
+        "dns-created",
+        send_before_page=["请输入 DNS:", b"1.1.1.1\n"],
+    )
+    verify_system_impact_cancel(
+        "system-impact-update",
+        core_file,
+        b"1\n",
+        "操作对象：sing-box 内核",
+        "请选择要更新的软件",
+        "update-applied",
+    )
+    verify_system_impact_cancel(
+        "system-impact-stop",
+        core_file,
+        b"3\n",
+        "操作对象：sing-box 内核服务（停止）",
+        "请选择服务操作",
+        "service-applied",
+    )
+    verify_system_impact_cancel(
+        "system-impact-restart",
+        core_file,
+        b"4\n",
+        "操作对象：sing-box 内核服务（重启）",
+        "请选择服务操作",
+        "service-applied",
+    )
+
     proc, status = run_case(
         "started-operation",
         core_file,
@@ -538,7 +614,7 @@ def verify(core_file):
 for core_file in (f"{repo_root}/core.sh", f"{repo_root}/src/core.sh"):
     verify(core_file)
 
-print("PASS: PTY Ctrl+C cancellation, started work, CLI SIGINT, free text, log return, main exit, timeout, and process-group cleanup")
+print("PASS: PTY Ctrl+C cancellation, system confirmations, started work, CLI SIGINT, free text, log return, main exit, timeout, and process-group cleanup")
 PY
 
 echo 'PASS: terminal Ctrl+C process tests'

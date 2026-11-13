@@ -404,17 +404,23 @@ RUNNER
 
 run_active_update() {
   local latest=$1 mode=$2
+  local -a runner_env=(
+    "QRCODE_TEST_LATEST_VERSION=$latest"
+    "QRCODE_TEST_MODE=$mode"
+    "QRCODE_TEST_CORE=$update_core"
+    "QRCODE_TEST_UPDATE_ARCHIVE=$update_archive"
+    "QRCODE_TEST_PACKAGE_LOG=$update_package_log"
+    "QRCODE_TEST_SERVICE_LOG=$update_service_log"
+    "QRCODE_TEST_INSTALLED_MARKER=$QRCODE_TEST_INSTALLED_MARKER"
+    "QRCODE_TEST_BIN=$qrcode_test_bin"
+    "PATH=$qrcode_test_bin:$PATH"
+  )
   shift 2
-  QRCODE_TEST_LATEST_VERSION=$latest \
-    QRCODE_TEST_MODE=$mode \
-    QRCODE_TEST_CORE=$update_core \
-    QRCODE_TEST_UPDATE_ARCHIVE=$update_archive \
-    QRCODE_TEST_PACKAGE_LOG=$update_package_log \
-    QRCODE_TEST_SERVICE_LOG=$update_service_log \
-    QRCODE_TEST_INSTALLED_MARKER=$QRCODE_TEST_INSTALLED_MARKER \
-    QRCODE_TEST_BIN=$qrcode_test_bin \
-    PATH="$qrcode_test_bin:$PATH" \
-    bash "$update_runner" "$@"
+  if [[ ${1:-} == main ]]; then
+    printf '4\n2\ny\n\n0\nq\n' | env "${runner_env[@]}" bash "$update_runner" "$@"
+  else
+    env "${runner_env[@]}" bash "$update_runner" "$@"
+  fi
 }
 
 prepare_update_fixture
