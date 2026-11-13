@@ -5257,7 +5257,11 @@ is_main_menu() {
 }
 
 relay_warn_security() {
-    warn "中转没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+    if [[ $is_main_start ]]; then
+        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+    else
+        warn "中转没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+    fi
 }
 
 relay_info_show() {
@@ -5304,7 +5308,7 @@ relay_add() {
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建中转临时配置文件."
+    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建端口转发临时配置文件."
 
     local relay_inbound
     relay_inbound=$(jq -n \
@@ -5314,30 +5318,34 @@ relay_add() {
         --argjson remote_port "$remote_port" \
         '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
         rm -f "$tmp_file"
-        err "生成中转配置 JSON 失败."
+        err "生成端口转发配置 JSON 失败."
     }
     printf '%s\n' "$relay_inbound" > "$tmp_file"
 
     if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
         rm -f "$tmp_file"
-        err "中转配置校验失败."
+        err "端口转发配置校验失败."
     fi
 
     if ! mv -f "$tmp_file" "$relay_file"; then
         rm -f "$tmp_file"
-        err "保存中转配置文件失败."
+        err "保存端口转发配置文件失败."
     fi
 
     if [[ -f $is_config_json ]]; then
         if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
             rm -f "$relay_file"
-            err "完整运行时配置校验失败，已取消安装该中转配置."
+            err "完整运行时配置校验失败，已取消安装该端口转发配置."
         fi
     fi
 
     shared_config_unlock
     manage restart &
-    msg "\n$(_green '中转配置添加成功!')"
+    if [[ $is_main_start ]]; then
+        msg "\n$(_green '端口转发配置添加成功!')"
+    else
+        msg "\n$(_green '中转配置添加成功!')"
+    fi
     msg "------------------------------------------------"
     relay_info_show "$local_port" "$remote_addr" "$remote_port"
     msg "------------------------------------------------"
@@ -5353,11 +5361,15 @@ relay_info() {
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     local relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到中转配置 (relay-${local_port}.json)."
+    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
     local r_addr r_port
     r_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
     r_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-    msg "\n------------- 中转配置信息 -------------"
+    if [[ $is_main_start ]]; then
+        msg "\n------------- 端口转发配置信息 -------------"
+    else
+        msg "\n------------- 中转配置信息 -------------"
+    fi
     relay_info_show "$local_port" "$r_addr" "$r_port"
     msg "----------------------------------------"
     relay_warn_security
@@ -5376,7 +5388,11 @@ relay_list() {
         fi
         return
     fi
-    msg "\n------------- 中转列表 -------------"
+    if [[ $is_main_start ]]; then
+        msg "\n------------- 端口转发列表 -------------"
+    else
+        msg "\n------------- 中转列表 -------------"
+    fi
     for file in "${files[@]}"; do
         l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
         r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
@@ -5385,7 +5401,11 @@ relay_list() {
         ((count++))
     done
     msg "------------------------------------"
-    msg "共 $count 个中转"
+    if [[ $is_main_start ]]; then
+        msg "共 $count 个端口转发"
+    else
+        msg "共 $count 个中转"
+    fi
     relay_warn_security
 }
 
@@ -5400,17 +5420,17 @@ relay_delete() {
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到中转配置 (relay-${local_port}.json)."
+    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
     if [[ $is_main_start ]]; then
-        confirm_action "将删除监听端口 $local_port 的转发配置。确认删除" || { msg "已取消删除转发。"; return; }
+        confirm_action "将删除监听端口 $local_port 的端口转发配置。确认删除" || { msg "已取消删除端口转发。"; return; }
     fi
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
-    mv -f "$relay_file" "$backup_file" || err "备份中转配置失败，未执行删除."
+    mv -f "$relay_file" "$backup_file" || err "备份端口转发配置失败，未执行删除."
     if [[ -f $is_config_json ]]; then
         if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
             mv -f "$backup_file" "$relay_file"
-            err "删除中转后完整运行时配置校验失败，已恢复中转配置."
+            err "删除端口转发后完整运行时配置校验失败，已恢复端口转发配置."
         fi
     fi
     rm -f "$backup_file"
@@ -5419,7 +5439,11 @@ relay_delete() {
     }
     shared_config_unlock
     manage restart &
-    _green "\n已删除中转配置: relay-${local_port}.json\n"
+    if [[ $is_main_start ]]; then
+        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
+    else
+        _green "\n已删除中转配置: relay-${local_port}.json\n"
+    fi
 }
 
 relay_menu_has_entries() {
@@ -5440,7 +5464,7 @@ relay_menu_empty_state() {
 relay_menu() {
     while :; do
         is_tmp_list=("添加" "列表" "查看" "删除" "返回")
-        ask list is_relay_action null "\n请选择端口中转操作:\n"
+        ask list is_relay_action null "\n请选择端口转发操作:\n"
         case $REPLY in
         1)
             relay_add
@@ -5483,7 +5507,7 @@ relay_main() {
         relay_menu
         ;;
     *)
-        err "无法识别中转命令 ($1), 正确用法: $is_core relay [add|list|info|delete]"
+        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|delete]"
         ;;
     esac
 }
