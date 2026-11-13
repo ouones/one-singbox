@@ -601,27 +601,6 @@ ask() {
         is_opt_input_msg="(默认\e[92m $is_default_arg\e[0m):"
         is_ask_set=ss_method
         ;;
-    set_protocol)
-        is_tmp_list=(${protocol_list[@]})
-        [[ $is_no_auto_tls ]] && {
-            unset is_tmp_list
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list=(${is_tmp_list[@]} $v)
-            done
-        }
-        is_tmp_list+=("返回节点管理")
-        is_opt_msg="\n选择协议:\n"
-        is_ask_set=is_new_protocol
-        ;;
-    set_change_list)
-        is_tmp_list=()
-        for v in ${is_can_change[@]}; do
-            is_tmp_list+=("${change_labels[$v]%%|*}")
-        done
-        is_opt_msg="\n请选择更改:\n"
-        is_ask_set=is_change_str
-        is_opt_input_msg=$3
-        ;;
     set_outbound_mode)
         is_tmp_list=("IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 出口" "VLESS 出口")
         outbound_display=$(current_outbound_mode_display "$is_config_file")
@@ -636,17 +615,6 @@ ask() {
         [[ ! $is_tmp_list ]] && is_tmp_list=($3)
         is_opt_msg=$4
         is_opt_input_msg=$5
-        ;;
-    get_config_file)
-        is_tmp_list=("${is_all_json[@]}")
-        is_opt_msg="\n选择节点:\n"
-        is_ask_set=is_config_file
-        ;;
-    mainmenu)
-        is_tmp_list=("${mainmenu[@]}")
-        is_ask_set=is_main_pick
-        is_emtpy_exit=1
-        is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (回车退出):"
         ;;
     esac
     case $is_ask_set in
@@ -669,11 +637,7 @@ ask() {
         else
             read -r REPLY
         fi
-        [[ ! $REPLY && $is_emtpy_exit && $is_ask_set == is_main_pick ]] && exit
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
-        [[ "$REPLY" == "${is_str}2${is_get}3${is_opt}3" && $is_ask_set == 'is_main_pick' ]] && {
-            msg "\n${is_get}2${is_str}3${is_msg}3b${is_tmp}o${is_opt}y\n" && exit
-        }
         if [[ ! $is_tmp_list ]]; then
             [[ $(grep port <<<$is_ask_set) ]] && {
                 [[ ! $(is_test port "$REPLY") ]] && {
@@ -741,7 +705,7 @@ ask() {
             msg "$is_err 输入无效，请按提示重新输入。"
         fi
     done
-    unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg is_emtpy_exit
+    unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg
 }
 
 meta_dir() {
@@ -3509,6 +3473,7 @@ create() {
 
 # change config file
 change() {
+    local change_choice_status change_info_status
     is_change=1
     is_dont_show_info=1
     is_auto=
@@ -3587,6 +3552,7 @@ change() {
     [[ $is_try_change ]] && return
     [[ $is_dont_auto_exit ]] && {
         get info $1
+        change_info_status=$?
     } || {
         [[ $is_change_id ]] && {
             if [[ $is_change_id == 'full' ]]; then
@@ -3597,8 +3563,10 @@ change() {
             [[ $is_change_msg ]] && _green "\n快速执行: $is_change_msg"
         }
         info $1
+        change_info_status=$?
         [[ $is_auto_get_config ]] && msg "\n自动选择: $is_config_file"
     }
+    [[ $change_info_status == 2 ]] && return 2
     is_old_net=$net
     [[ $is_tcp_http ]] && net=http
     [[ $host ]] && net=$is_protocol-$net-tls
@@ -3609,7 +3577,14 @@ change() {
     is_dont_show_info=
     # if not prefer args, show change list and then get change id.
     [[ ! $is_change_id ]] && {
-        ask set_change_list
+        is_tmp_list=()
+        for v in ${is_can_change[@]}; do
+            is_tmp_list+=("${change_labels[$v]%%|*}")
+        done
+        menu_select parent is_change_str "\n请选择更改:\n" "${is_tmp_list[@]}"
+        change_choice_status=$?
+        [[ $change_choice_status == 2 ]] && return 2
+        [[ $change_choice_status == 0 ]] || return 1
         is_change_id=${is_can_change[$REPLY - 1]}
     }
     case $is_change_id in
@@ -3934,7 +3909,7 @@ del() {
     [[ $is_select_delete_node ]] && unset is_config_file is_conf_dir_empty
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
-    [[ ! $is_config_file ]] && get info $1
+    [[ ! $is_config_file ]] && { get info $1 || return $?; }
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
             if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file。确认删除"; then
@@ -4101,7 +4076,7 @@ service_action_result() {
 
 # add a config
 add() {
-    local caddy_shared_lock=
+    local caddy_shared_lock= protocol_choice_status
     [[ ! $1 && ! $is_change ]] && unset is_new_protocol
     if [[ ! $is_change ]]; then
         is_servername=
@@ -4158,11 +4133,22 @@ add() {
     fi
 
     # no prefer protocol
-    [[ ! $is_new_protocol ]] && ask set_protocol
-    if [[ $is_new_protocol == "返回节点管理" ]]; then
-        unset is_new_protocol
-        msg "\n已取消添加节点，返回节点管理菜单。\n"
-        return
+    if [[ ! $is_new_protocol ]]; then
+        is_tmp_list=(${protocol_list[@]})
+        [[ $is_no_auto_tls ]] && {
+            is_tmp_list=()
+            for v in ${protocol_list[@]}; do
+                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list+=("$v")
+            done
+        }
+        menu_select parent is_new_protocol "\n选择协议:\n" "${is_tmp_list[@]}"
+        protocol_choice_status=$?
+        if [[ $protocol_choice_status == 2 ]]; then
+            unset is_new_protocol
+            msg "\n已取消添加节点，返回节点管理菜单。\n"
+            return 2
+        fi
+        [[ $protocol_choice_status == 0 ]] || return 1
     fi
 
     if [[ ${is_new_protocol,,} == 'anytls' ]]; then
@@ -4475,6 +4461,7 @@ add() {
 # get config info
 # or somes required args
 get() {
+    local get_status
     case $1 in
     addr)
         is_public_port=$port
@@ -4511,12 +4498,17 @@ get() {
         [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
-            ask get_config_file
+            menu_select parent is_config_file "\n选择节点:\n" "${is_all_json[@]}"
+            get_status=$?
+            [[ $get_status == 2 ]] && return 2
+            [[ $get_status == 0 ]] || return 1
         }
         ;;
     info)
         is_tcp_http=
         get file $2
+        get_status=$?
+        [[ $get_status == 2 ]] && return 2
         if [[ $is_config_file ]]; then
             is_json_str=$(json_strip_comments "$is_conf_dir/$is_config_file")
             is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<$is_json_str)
@@ -4743,13 +4735,18 @@ get() {
 # show info
 info() {
     local info_target=${1:-${is_config_file:-$is_config_name}}
+    local info_status
     is_surge_str=
     is_url=
     [[ $is_gen ]] && return
     if [[ $info_target ]]; then
         get info "$info_target"
+        info_status=$?
+        [[ $info_status == 2 ]] && return 2
     elif [[ ! $is_protocol ]]; then
         get info $1
+        info_status=$?
+        [[ $info_status == 2 ]] && return 2
     fi
     # is_color=$(shuf -i 41-45 -n1)
     is_color=44
@@ -5079,6 +5076,54 @@ menu_pause() {
     read -r
 }
 
+menu_select() {
+    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent=
+    shift 3
+    [[ $menu_kind == parent ]] && menu_has_parent=1
+    while :; do
+        msg "$menu_prompt"
+        is_tmp_list=("$@")
+        show_list "${is_tmp_list[@]}"
+        [[ $menu_has_parent ]] && msg "0) 返回上级"
+        if [[ $menu_has_parent ]]; then
+            echo -ne "请输入选项编号 [\e[91m0-${#is_tmp_list[@]}\e[0m] (0 返回上级):"
+        else
+            echo -ne "请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (q 退出):"
+        fi
+        read -r REPLY || { unset is_tmp_list; return 1; }
+        if [[ $menu_has_parent ]]; then
+            if [[ $REPLY == 0 ]]; then
+                export "$menu_var="
+                unset is_tmp_list
+                return 2
+            fi
+        else
+            case $REPLY in
+            q | Q)
+                unset is_tmp_list
+                return 3
+                ;;
+            '' | 0)
+                msg "已在主菜单"
+                unset is_tmp_list
+                return 4
+                ;;
+            esac
+        fi
+        if [[ $REPLY =~ ^[1-9][0-9]*$ ]] && ((REPLY <= ${#is_tmp_list[@]})); then
+            export "$menu_var=${is_tmp_list[REPLY - 1]}"
+            msg "选择: ${!menu_var}"
+            unset is_tmp_list
+            return 0
+        fi
+        if [[ $menu_has_parent ]]; then
+            msg "$is_err 输入无效，请输入 0-${#is_tmp_list[@]} 中的编号。"
+        else
+            msg "$is_err 输入无效，请输入 1-${#is_tmp_list[@]} 中的编号，或 q 退出。"
+        fi
+    done
+}
+
 node_menu_has_nodes() {
     local file
     shopt -s nullglob
@@ -5099,39 +5144,47 @@ node_menu_empty_state() {
 }
 
 node_menu() {
+    local menu_status action_status
     while :; do
-        is_tmp_list=("添加" "修改" "查看" "删除" "返回")
-        ask list is_node_action null "\n请选择节点操作:\n"
+        menu_select parent is_node_action "\n请选择节点操作:\n" "添加" "修改" "查看" "删除"
+        menu_status=$?
+        [[ $menu_status == 2 ]] && return
+        [[ $menu_status == 0 ]] || return 1
         case $REPLY in
         1)
             ( add )
-            menu_pause
+            action_status=$?
+            [[ $action_status == 2 ]] || menu_pause
             ;;
         2)
             node_menu_empty_state && continue
             ( change )
-            menu_pause
+            action_status=$?
+            [[ $action_status == 2 ]] || menu_pause
             ;;
         3)
             node_menu_empty_state && continue
             ( info )
-            menu_pause
+            action_status=$?
+            [[ $action_status == 2 ]] || menu_pause
             ;;
         4)
             node_menu_empty_state && continue
             ( is_select_delete_node=1 del )
-            menu_pause
+            action_status=$?
+            [[ $action_status == 2 ]] || menu_pause
             ;;
-        5) return ;;
         esac
     done
 }
 
 service_menu() {
-    local menu_status=0 action_status
+    local menu_status=0 action_status choice_status
     while :; do
-        is_tmp_list=("状态" "启动" "停止" "重启" "日志" "返回")
-        ask list is_service_action null "\n请选择服务操作:\n"
+        menu_select parent is_service_action "\n请选择服务操作:\n" "状态" "启动" "停止" "重启" "日志"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return "$menu_status"
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
             core_status_read
@@ -5162,39 +5215,43 @@ service_menu() {
             log_set
             menu_pause
             ;;
-        6) return "$menu_status" ;;
         esac
     done
 }
 
 update_menu() {
+    local choice_status
     while :; do
         is_tmp_list=("更新 sing-box 内核" "更新脚本")
         [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
-        is_tmp_list+=("返回")
-        ask list is_do_update null "\n请选择要更新的软件:\n"
+        menu_select parent is_do_update "\n请选择要更新的软件:\n" "${is_tmp_list[@]}"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1 | 2)
             update "$REPLY"
             menu_pause
             ;;
         3)
-            if [[ $is_caddy ]]; then
-                update caddy
-                menu_pause
-            else
-                return
-            fi
+            update caddy
+            menu_pause
             ;;
-        4) return ;;
         esac
     done
 }
 
 system_tools_menu() {
+    local choice_status action_status
     while :; do
-        is_tmp_list=("启用 BBR" "DNS" "日志上限" "屏蔽回国流量 ($(block_cn_status_text))" "重装脚本" "返回")
-        ask list is_system_tool null "\n请选择系统设置:\n"
+        is_tmp_list=("启用 BBR" "DNS" "日志上限" "屏蔽回国流量 ($(block_cn_status_text))" "重装脚本")
+        if menu_select parent is_system_tool "\n请选择系统设置:\n" "${is_tmp_list[@]}"; then
+            choice_status=0
+        else
+            choice_status=$?
+        fi
+        [[ $choice_status == 2 ]] && return
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
             load bbr.sh
@@ -5204,7 +5261,8 @@ system_tools_menu() {
         2)
             load dns.sh
             dns_set
-            menu_pause
+            action_status=$?
+            [[ $action_status == 2 ]] || menu_pause
             ;;
         3)
             log_limit_set
@@ -5218,14 +5276,13 @@ system_tools_menu() {
             get reinstall
             menu_pause
             ;;
-        6) return ;;
         esac
     done
 }
 
-# Main menu; leave input empty to exit.
+# Main menu; q/Q exits and empty input or 0 redraws it.
 is_main_menu() {
-    local is_log_usage_limit is_log_usage_bytes
+    local is_log_usage_limit is_log_usage_bytes menu_status
     while :; do
         if ! qrcode_dependency_checked; then
             qrcode_dependency_install || :
@@ -5242,7 +5299,14 @@ is_main_menu() {
         fi
         msg "问题反馈：$(msg_ul https://github.com/ouones/one-singbox/issues)"
         is_main_start=1
-        ask mainmenu
+        if menu_select root is_main_pick "" "${mainmenu[@]}"; then
+            menu_status=0
+        else
+            menu_status=$?
+        fi
+        [[ $menu_status == 3 ]] && return
+        [[ $menu_status == 4 ]] && continue
+        [[ $menu_status == 0 ]] || return 1
         case $REPLY in
         1) node_menu ;;
         2) relay_menu ;;
@@ -5462,9 +5526,12 @@ relay_menu_empty_state() {
 }
 
 relay_menu() {
+    local choice_status
     while :; do
-        is_tmp_list=("添加" "列表" "查看" "删除" "返回")
-        ask list is_relay_action null "\n请选择端口转发操作:\n"
+        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "删除"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
             relay_add
@@ -5484,7 +5551,6 @@ relay_menu() {
             relay_delete
             menu_pause
             ;;
-        5) return ;;
         esac
     done
 }

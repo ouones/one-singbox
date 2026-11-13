@@ -16,14 +16,16 @@ source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
 msg() { menu_output+="$*"$'\n'; }
 _green() { printf '%s' "$*"; }
 _red() { printf '%s' "$*"; }
-ask() {
-    [[ ${is_tmp_list[1]} == '启动' ]] || fail 'service menu offers start action'
+menu_select() {
+    [[ $5 == '启动' ]] || fail 'service menu offers start action'
     if [[ $menu_return_after_action ]]; then
-        REPLY=6
+        REPLY=0
         menu_return_after_action=
+        return 2
     else
         REPLY=$menu_choice
         menu_return_after_action=1
+        return 0
     fi
 }
 menu_pause() { :; }

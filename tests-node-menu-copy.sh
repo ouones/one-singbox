@@ -27,7 +27,7 @@ node_menu >"$case_dir/tls-output" 2>&1 <<'INPUT'
 example.com
 tls-node
 
-5
+0
 INPUT
 tls_output=$(cat "$case_dir/tls-output")
 [[ $tls_output == *'选择协议:'* ]] || fail "protocol choice uses the short prompt: $tls_output"
@@ -44,7 +44,7 @@ alice
 
 socks-node
 
-5
+0
 INPUT
 socks_output=$(cat "$case_dir/socks-output")
 [[ $socks_output == *'输入监听端口 (1-65535，回车自动分配 32000):'* ]] || fail "SOCKS add explains automatic port assignment: $socks_output"
@@ -62,7 +62,7 @@ node_menu >"$case_dir/ss-output" 2>&1 <<'INPUT'
 
 ss-node
 
-5
+0
 INPUT
 ss_output=$(cat "$case_dir/ss-output")
 [[ $ss_output == *'选择加密方式:'* ]] || fail "Shadowsocks add uses the concise method prompt: $ss_output"
@@ -72,7 +72,8 @@ ss_output=$(cat "$case_dir/ss-output")
 [[ $ss_output != *'请输入密码'* ]] || fail "Shadowsocks add drops the old password prompt prefix: $ss_output"
 
 is_can_change=({0..20})
-ask set_change_list <<<15 >"$case_dir/change-output" 2>&1
+is_tmp_list=(协议 监听端口 域名 路径 密码 UUID 加密方式 目标地址 目标端口 密钥 SNI 反向代理域名 用户名 节点名称 出口方式 分享地址 查看分享链接 PSK 'Snell 版本' 混淆模式 运行模式)
+menu_select parent is_change_str $'\n请选择更改:\n' "${is_tmp_list[@]}" <<<15 >"$case_dir/change-output" 2>&1
 change_output=$(cat "$case_dir/change-output")
 for item in 协议 监听端口 域名 路径 密码 UUID 加密方式 目标地址 目标端口 密钥 SNI 反向代理域名 用户名 节点名称 出口方式 分享地址 查看分享链接 PSK 'Snell 版本' 混淆模式 运行模式; do
     [[ $change_output == *"$item"* ]] || fail "change menu shows $item: $change_output"
@@ -83,7 +84,8 @@ done
 change_menu_labels=(协议 监听端口 域名 路径 密码 UUID 加密方式 目标地址 目标端口 密钥 SNI 反向代理域名 用户名 节点名称 出口方式 分享地址 查看分享链接 PSK 'Snell 版本' 混淆模式 运行模式)
 for index in "${!change_menu_labels[@]}"; do
     is_can_change=($index)
-    ask set_change_list <<<1 >"$case_dir/change-index-output" 2>&1
+    is_tmp_list=("${change_menu_labels[$index]}")
+    menu_select parent is_change_str $'\n请选择更改:\n' "${is_tmp_list[@]}" <<<1 >"$case_dir/change-index-output" 2>&1
     index_output=$(cat "$case_dir/change-index-output")
     [[ $index_output == *"1) ${change_menu_labels[$index]}"* && $index_output == *"选择: ${change_menu_labels[$index]}"* ]] || fail "change index $index maps to ${change_menu_labels[$index]}: $index_output"
     [[ ${is_can_change[$REPLY - 1]} == "$index" ]] || fail "change index $index remains selected: $REPLY"
@@ -217,7 +219,7 @@ node_menu >"$case_dir/change-output" 2>&1 <<'INPUT'
 3
 new-secret
 
-5
+0
 INPUT
 change_output=$(cat "$case_dir/change-output")
 [[ $change_output == *'选择: 密码'* ]] || fail "password is selectable from the modify menu: $change_output"
