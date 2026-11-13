@@ -379,7 +379,7 @@ output=$(printf '4\n10000\nn\n\n0\n5\n' | relay_menu)
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
 output=$(printf '4\n10000\ny\n\n0\n5\n' | relay_menu)
-[[ $output == *'将删除监听端口 10000 的端口转发配置。确认删除 [y/N]'* ]] || fail "confirmed deletion retains the original yes/no confirmation: $output"
+[[ $output == *'将删除监听端口 10000 → 203.0.113.60:20060 的端口转发'* && $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "confirmed deletion explains the forwarding target and scope: $output"
 [[ $output == *'已删除端口转发配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
 [[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'
 CASE
@@ -769,14 +769,15 @@ fail() {
 }
 
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_exact_yes() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
 
 msg() { printf '%b\n' "$*"; }
 show_list() { printf '%s\n' "$@"; }
 is_test() { [[ $1 == number && $2 =~ ^[1-9][0-9]*$ ]] && printf '1'; }
-confirm_action() {
+confirm_exact_yes() {
     confirmation=$1
-    printf '%s [y/N]: ' "$1"
+    printf '%s [仅输入 YES 确认]: ' "$1"
     return 1
 }
 
@@ -801,12 +802,12 @@ run_case() {
     [[ $output == *'已取消卸载。'* ]] || fail "declining uninstall cancels before changes: $output"
 }
 
-run_case 1 1 'one-singbox 脚本'
-[[ $confirmation != *'Caddy'* ]] || fail "core-and-script uninstall does not remove Caddy: $confirmation"
+run_case 1 1 'one-singbox 程序、脚本和快捷命令'
+[[ $confirmation == *'Caddy 服务、程序及 /etc/caddy 安装和配置目录保留，不删除'* ]] || fail "core-and-script uninstall explains that Caddy is preserved: $confirmation"
 run_case 1 2 'Caddy'
 [[ $confirmation == *'Caddy 服务'* ]] || fail "full uninstall confirms Caddy service removal: $confirmation"
 [[ $confirmation == *'/etc/caddy'* ]] || fail "full uninstall confirms the Caddy directory scope: $confirmation"
-run_case '' '' 'one-singbox 脚本'
+run_case '' '' 'one-singbox 程序、脚本和快捷命令'
 CASE
 }
 
