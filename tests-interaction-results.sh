@@ -3,6 +3,10 @@ set -o pipefail
 
 repo_root=$(cd "$(dirname "$0")" && pwd)
 
+interactive_read() { builtin read "$@"; }
+run_interactive_operation() { ( "$@" ); }
+export -f interactive_read run_interactive_operation
+
 run_action_result_case() {
     local core_file=$1 result=$2
     CORE_FILE="$core_file" RESULT="$result" bash <<'CASE' || exit 1

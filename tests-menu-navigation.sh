@@ -3,6 +3,12 @@ set -o pipefail
 
 repo_root=$(cd "$(dirname "$0")" && pwd)
 
+# Legacy cases extract individual functions; the PTY suite exercises the real
+# signal-aware helpers.
+interactive_read() { builtin read "$@"; }
+run_interactive_operation() { ( "$@" ); }
+export -f interactive_read run_interactive_operation
+
 fail() {
     echo "FAIL: $*"
     exit 1
@@ -904,13 +910,16 @@ expected_protocols=(TUIC Trojan Hysteria2 VMess-WS VMess-TCP VMess-HTTP VMess-QU
 [[ ${protocol_list[*]} == "${expected_protocols[*]}" ]] || fail "existing protocol order changed: ${protocol_list[*]}"
 manage() { printf '%s\n' "$*" >>"$manage_log"; }
 info() { :; }
-meta_set() { :; }
+meta_set() { printf '%s|%s|%s\n' "$1" "$2" "$3" >"$case_dir/meta"; }
 node_port_used() { return 1; }
 node_protocol_transport() { printf 'udp\n'; }
 config_port_used() { return 1; }
 shared_config_lock() { return 0; }
 shared_config_unlock() { :; }
 sync_runtime_node_outbound_modes() { return 0; }
+get_snell_psk() { printf '0123456789ab'; }
+validate_snell() { return 0; }
+create() { is_config_name=zero-node.json; }
 cancel_choice=$((${#protocol_list[@]} + 1))
 output=$(printf '0\n%s\n1\nsample-node\n' "$cancel_choice" | add); status=$?
 wait
@@ -920,6 +929,8 @@ wait
 [[ $output == *'已取消添加节点'* ]] || fail "canceling protocol selection returns without adding: $output"
 [[ -z $(find "$is_conf_dir" -type f -print -quit) ]] || fail 'canceling protocol selection must not change configuration'
 [[ ! -s $manage_log ]] || fail 'canceling protocol selection must not change services'
+output=$(printf '22\n0\n' | add) || fail "node name 0 must be accepted: $output"
+[[ $(cat "$case_dir/meta") == 'zero-node.json|node_name|0' ]] || fail "node name 0 must be stored verbatim: $(cat "$case_dir/meta")"
 CASE
 }
 

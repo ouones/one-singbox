@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+interactive_read() { builtin read "$@"; }
+run_interactive_operation() { ( "$@" ); }
+menu_action() {
+    local status
+    "$@"
+    status=$?
+    menu_pause
+    return "$status"
+}
+export -f interactive_read run_interactive_operation menu_action
+
 repo_root=$(cd "$(dirname "$0")" && pwd)
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
