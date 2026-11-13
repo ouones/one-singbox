@@ -520,8 +520,8 @@ jq -e '.route.rules | any(.domain // [] | any(. == "connectivitycheck.gstatic.co
 main block-cn off 2>&1 >/dev/null
 [[ ! -f "$is_core_dir/.block-cn-enabled" ]] || fail "ensure block-cn disabled initially"
 
-# 仿真执行: 选中 4 (切换为启用) -> 回车确认 -> 选中 4 (切换为未启用) -> 回车确认 -> 选中 6 (返回)
-menu_in=$'4\n\n4\n\n6\n'
+# 仿真执行: 选中 4 (切换为启用) -> y 确认 -> 回车暂停 -> 选中 4 (切换为未启用) -> y 确认 -> 回车暂停 -> 选中 0 (返回)
+menu_in=$'4\ny\n\n4\ny\n\n0\n'
 menu_out=$(printf '%s' "$menu_in" | system_tools_menu 2>&1)
 
 # 断言 1: 初始菜单展示包含 "屏蔽回国流量 (未启用)"
@@ -541,7 +541,7 @@ block_cn_is_enabled && fail "block-cn should be disabled after toggling back"
 
 # 仿真仅切换为启用并退出菜单
 reset_service_log
-printf '4\n\n6\n' | system_tools_menu 2>&1 >/dev/null
+printf '4\ny\n\n0\n' | system_tools_menu 2>&1 >/dev/null
 block_cn_is_enabled || fail "block-cn should be enabled after menu toggle"
 [[ -f "$is_core_dir/.block-cn-enabled" ]] || fail "flag file should exist after menu toggle to enable"
 [[ -f "$is_core_dir/.cn-whitelist.json" ]] || fail "whitelist file should exist after menu toggle to enable"
@@ -552,7 +552,7 @@ jq -e '.route.rule_set | any(.tag == "geosite-cn")' "$is_config_json" >/dev/null
 
 # 再次从已启用状态切换为未启用并退出菜单
 reset_service_log
-printf '4\n\n6\n' | system_tools_menu 2>&1 >/dev/null
+printf '4\ny\n\n0\n' | system_tools_menu 2>&1 >/dev/null
 block_cn_is_enabled && fail "block-cn should be disabled after second menu toggle"
 [[ ! -f "$is_core_dir/.block-cn-enabled" ]] || fail "flag file must be removed after menu toggle to disable"
 [[ $(restart_count) -ge 1 ]] || fail "menu toggle to disable must restart service"

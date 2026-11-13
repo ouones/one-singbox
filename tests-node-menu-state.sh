@@ -23,9 +23,9 @@ node_port_used() { :; }
 create() { printf '%s %s %s\n' "$2" "$port" "${is_config_file:-empty}" >"$case_dir/result"; }
 # Supply SS method and password only for that protocol.
 if [[ $CHOICE == 8 ]]; then
-  input=$'3\n\n1\n8\n30001\n1\n\nnewname\n\n5\n'
+  input=$'3\n\n1\n8\n30001\n1\n\nnewname\n\n0\n'
 else
-  input=$'3\n\n1\n18\n30001\nnewname\n\n5\n'
+  input=$'3\n\n1\n18\n30001\nnewname\n\n0\n'
 fi
 node_menu <<<"$input" >"$case_dir/output" 2>&1
 read -r protocol selected_port selected_file <"$case_dir/result"
@@ -60,7 +60,7 @@ first
 30002
 second
 
-5
+0
 INPUT
 [[ $(cat "$case_dir/ports") == $'30001\n30002' ]] || { echo "FAIL: $CORE_FILE reused the first node's port"; exit 1; }
 CASE
@@ -79,17 +79,18 @@ render_qrcode() { :; }
 for n in 1 2; do
     printf '{"inbounds":[{"type":"shadowsocks","listen_port":%s,"method":"aes-128-gcm","password":"example"}]}\n' "$((30000+n))" >"$is_conf_dir/node$n.json"
 done
-eval "$(declare -f ask | sed '1s/^ask /original_ask /')"
-ask() {
-    if [[ $1 == set_change_list ]]; then
+eval "$(declare -f menu_select | sed '1s/^menu_select /original_menu_select /')"
+menu_select() {
+    if [[ $2 == is_change_str ]]; then
         printf '%s' "$is_config_file" >"$case_dir/changed-target"
         is_can_change=(999)
         REPLY=1
+        return 0
     else
-        original_ask "$@"
+        original_menu_select "$@"
     fi
 }
-node_menu >"$case_dir/output" 2>&1 <<<"$(printf '3\n1\n\n%s\n2\n\n5\n' "$ACTION")"
+node_menu >"$case_dir/output" 2>&1 <<<"$(printf '3\n1\n\n%s\n2\n\n0\n' "$ACTION")"
 [[ $(grep -Fx -c '选择节点:' "$case_dir/output") == 2 ]] || { echo "FAIL: $CORE_FILE did not prompt for the second node"; exit 1; }
 if [[ $ACTION == 2 ]]; then
     [[ $(cat "$case_dir/changed-target") == node2.json ]] || { echo "FAIL: $CORE_FILE selected the wrong node for modification"; exit 1; }
@@ -112,7 +113,7 @@ node_menu <<<'2
 
 1
 
-5' >"$case_dir/output" 2>&1
+0' >"$case_dir/output" 2>&1
 [[ $(cat "$case_dir/result") == 'empty empty empty' ]] || { echo "FAIL: $CORE_FILE retained state after changing a node"; exit 1; }
 CASE
 done

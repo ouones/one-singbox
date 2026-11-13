@@ -275,19 +275,88 @@ msg_ul() {
     echo -e "\e[4m$@\e[0m"
 }
 
+# Read interactive input. During a menu operation the operation subprocess exits
+# immediately on Ctrl+C so no later form step or business action can run.
+interactive_read() {
+    local previous_int status
+    if [[ ${is_interactive_operation:-0} != 1 ]]; then
+        builtin read "$@"
+        return
+    fi
+    interactive_input_active=1
+    previous_int=$(trap -p INT)
+    trap 'exit 130' INT
+    [[ $interactive_cancel_requested ]] && exit 130
+    builtin read "$@"
+    status=$?
+    interactive_input_active=
+    if [[ $previous_int ]]; then
+        eval "$previous_int"
+    else
+        trap - INT
+    fi
+    return "$status"
+}
+
+run_interactive_operation() {
+    local previous_int status
+    previous_int=$(trap -p INT)
+    trap ':' INT
+    is_interactive_operation=1
+    interactive_cancel_requested=
+    (
+        trap 'interactive_cancel_requested=1; [[ $interactive_input_active ]] && exit 130' INT
+        "$@"
+    )
+    status=$?
+    is_interactive_operation=
+    if [[ $status == 130 ]]; then
+        msg '\n已取消当前操作\n'
+        menu_pause
+    fi
+    if [[ $previous_int ]]; then
+        eval "$previous_int"
+    else
+        trap - INT
+    fi
+    [[ $status == 130 ]] && return 2
+    return "$status"
+}
+
 # pause
 pause() {
     echo
     echo -ne "按 $(_green Enter 回车键) 继续, 或按 $(_red Ctrl + C) 取消."
-    read -rs -d $'\n'
+    interactive_read -rs -d $'\n'
     echo
 }
 
 confirm_action() {
-    local answer
+    local answer IFS=
     echo -ne "$1 [y/N]: "
-    read -r answer
-    [[ ${answer,,} == y || ${answer,,} == yes ]]
+    interactive_read -r answer
+    [[ $answer == y || $answer == Y ]]
+}
+
+confirm_exact_yes() {
+    local answer IFS=
+    echo -ne "$1 [仅输入 YES 确认]: "
+    interactive_read -r answer
+    [[ $answer == YES ]]
+}
+
+menu_system_impact() {
+    local object=$1 impact=$2 restart_core=$3
+    shift 3
+    msg "\n------------- 系统影响确认 -------------"
+    msg "操作对象：$object"
+    msg "主要影响：$impact"
+    msg "是否重启核心：$restart_core"
+    if ! confirm_action "确认执行上述操作"; then
+        msg "已取消。"
+        return 1
+    fi
+    "$@"
 }
 
 get_uuid() {
@@ -601,27 +670,6 @@ ask() {
         is_opt_input_msg="(默认\e[92m $is_default_arg\e[0m):"
         is_ask_set=ss_method
         ;;
-    set_protocol)
-        is_tmp_list=(${protocol_list[@]})
-        [[ $is_no_auto_tls ]] && {
-            unset is_tmp_list
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list=(${is_tmp_list[@]} $v)
-            done
-        }
-        is_tmp_list+=("返回节点管理")
-        is_opt_msg="\n选择协议:\n"
-        is_ask_set=is_new_protocol
-        ;;
-    set_change_list)
-        is_tmp_list=()
-        for v in ${is_can_change[@]}; do
-            is_tmp_list+=("${change_labels[$v]%%|*}")
-        done
-        is_opt_msg="\n请选择更改:\n"
-        is_ask_set=is_change_str
-        is_opt_input_msg=$3
-        ;;
     set_outbound_mode)
         is_tmp_list=("IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 出口" "VLESS 出口")
         outbound_display=$(current_outbound_mode_display "$is_config_file")
@@ -636,17 +684,6 @@ ask() {
         [[ ! $is_tmp_list ]] && is_tmp_list=($3)
         is_opt_msg=$4
         is_opt_input_msg=$5
-        ;;
-    get_config_file)
-        is_tmp_list=("${is_all_json[@]}")
-        is_opt_msg="\n选择节点:\n"
-        is_ask_set=is_config_file
-        ;;
-    mainmenu)
-        is_tmp_list=("${mainmenu[@]}")
-        is_ask_set=is_main_pick
-        is_emtpy_exit=1
-        is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (回车退出):"
         ;;
     esac
     case $is_ask_set in
@@ -664,16 +701,12 @@ ask() {
     while :; do
         echo -ne $is_opt_input_msg
         if [[ $is_secret_input ]]; then
-            read -rs REPLY
+            interactive_read -rs REPLY
             echo
         else
-            read -r REPLY
+            interactive_read -r REPLY
         fi
-        [[ ! $REPLY && $is_emtpy_exit && $is_ask_set == is_main_pick ]] && exit
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
-        [[ "$REPLY" == "${is_str}2${is_get}3${is_opt}3" && $is_ask_set == 'is_main_pick' ]] && {
-            msg "\n${is_get}2${is_str}3${is_msg}3b${is_tmp}o${is_opt}y\n" && exit
-        }
         if [[ ! $is_tmp_list ]]; then
             [[ $(grep port <<<$is_ask_set) ]] && {
                 [[ ! $(is_test port "$REPLY") ]] && {
@@ -741,7 +774,34 @@ ask() {
             msg "$is_err 输入无效，请按提示重新输入。"
         fi
     done
-    unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg is_emtpy_exit
+    unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg
+}
+
+select_ss_method() {
+    local status previous_default=${is_default_arg-} had_default=${is_default_arg+x}
+    is_default_arg=$is_random_ss_method
+    menu_select parent ss_method "\n选择加密方式:\n" "${ss_method_list[@]}"
+    status=$?
+    if [[ $had_default ]]; then
+        is_default_arg=$previous_default
+    else
+        unset is_default_arg
+    fi
+    return "$status"
+}
+
+select_snell_mode() {
+    local prompt=$1 status
+    menu_select parent is_new_snell_mode "$prompt" default unshaped unsafe-raw
+    status=$?
+    return "$status"
+}
+
+select_snell_obfs_mode() {
+    local prompt=$1 status
+    menu_select parent is_new_snell_obfs_mode "$prompt" none http
+    status=$?
+    return "$status"
 }
 
 meta_dir() {
@@ -1934,8 +1994,21 @@ apply_node_outbound_mode() {
 }
 
 edit_node_outbound_mode() {
-    local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type
-    ask set_outbound_mode
+    local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type outbound_status
+    printf '\n当前出口方式: %s\n' "$(current_outbound_mode_display "$is_config_file")"
+    msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出口可选 Shadowsocks 或 VLESS。"
+    menu_select parent is_outbound_mode "\n选择出口方式:\n" "IPv6 优先" "IPv4 优先" "仅 IPv4" "仅 IPv6" "Shadowsocks 出口" "VLESS 出口"
+    outbound_status=$?
+    [[ $outbound_status == 2 ]] && return 2
+    [[ $outbound_status == 0 ]] || return 1
+    case $is_outbound_mode in
+    'IPv6 优先') is_outbound_mode='V6优先' ;;
+    'IPv4 优先') is_outbound_mode='V4优先' ;;
+    '仅 IPv4') is_outbound_mode='仅V4' ;;
+    '仅 IPv6') is_outbound_mode='仅V6' ;;
+    'Shadowsocks 出口') is_outbound_mode='SS 出站' ;;
+    'VLESS 出口') is_outbound_mode='VLESS 出站' ;;
+    esac
     metadata_file=$(meta_file "$is_config_file")
     if [[ $is_outbound_mode == 'SS 出站' ]]; then
         if outbound_proxy_from_metadata "$is_config_file" "$metadata_file"; then
@@ -1947,7 +2020,7 @@ edit_node_outbound_mode() {
         else
             echo -ne "请输入 Shadowsocks 分享链接 (输入内容隐藏):"
         fi
-        IFS= read -rs is_outbound_ss_uri
+        IFS= interactive_read -rs is_outbound_ss_uri
         echo
         [[ $is_outbound_ss_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_ss_uri ]]; then
@@ -1969,7 +2042,7 @@ edit_node_outbound_mode() {
         else
             echo -ne "请输入 VLESS 分享链接 (输入内容隐藏):"
         fi
-        IFS= read -rs is_outbound_vless_uri
+        IFS= interactive_read -rs is_outbound_vless_uri
         echo
         [[ $is_outbound_vless_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_vless_uri ]]; then
@@ -3515,6 +3588,7 @@ create() {
 
 # change config file
 change() {
+    local change_choice_status change_info_status ss_method_status snell_status
     is_change=1
     is_dont_show_info=1
     is_auto=
@@ -3593,6 +3667,7 @@ change() {
     [[ $is_try_change ]] && return
     [[ $is_dont_auto_exit ]] && {
         get info $1
+        change_info_status=$?
     } || {
         [[ $is_change_id ]] && {
             if [[ $is_change_id == 'full' ]]; then
@@ -3603,8 +3678,10 @@ change() {
             [[ $is_change_msg ]] && _green "\n快速执行: $is_change_msg"
         }
         info $1
+        change_info_status=$?
         [[ $is_auto_get_config ]] && msg "\n自动选择: $is_config_file"
     }
+    [[ $change_info_status == 2 ]] && return 2
     is_old_net=$net
     [[ $is_tcp_http ]] && net=http
     [[ $host ]] && net=$is_protocol-$net-tls
@@ -3615,7 +3692,14 @@ change() {
     is_dont_show_info=
     # if not prefer args, show change list and then get change id.
     [[ ! $is_change_id ]] && {
-        ask set_change_list
+        is_tmp_list=()
+        for v in ${is_can_change[@]}; do
+            is_tmp_list+=("${change_labels[$v]%%|*}")
+        done
+        menu_select parent is_change_str "\n请选择更改:\n" "${is_tmp_list[@]}"
+        change_choice_status=$?
+        [[ $change_choice_status == 2 ]] && return 2
+        [[ $change_choice_status == 0 ]] || return 1
         is_change_id=${is_can_change[$REPLY - 1]}
     }
     case $is_change_id in
@@ -3699,10 +3783,13 @@ change() {
         is_new_ss_password=$ss_password
         [[ $net != 'ss' ]] && err "($is_config_file) 不支持更改加密方式."
         [[ $is_auto ]] && is_new_method=$is_random_ss_method
-        [[ ! $is_new_method ]] && {
-            ask set_ss_method
+        if [[ ! $is_new_method ]]; then
+            select_ss_method
+            ss_method_status=$?
+            [[ $ss_method_status == 2 ]] && return 2
+            [[ $ss_method_status == 0 ]] || return 1
             is_new_method=$ss_method
-        }
+        fi
         if [[ $(grep 2022 <<<$is_new_method) ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
             is_new_ss_password=$(ss_password_for_method "$is_new_method")
             msg "\n已根据新的加密方式自动更新密码: $(_green $is_new_ss_password)\n"
@@ -3814,7 +3901,7 @@ change() {
         is_new_entry_addr=$3
         if [[ -z $is_new_entry_addr ]]; then
             echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
-            read -r is_new_entry_addr
+            interactive_read -r is_new_entry_addr
         fi
         is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || err "入口地址更新失败: $is_new_entry_addr"
         msg "\n已更新入口地址为: $(_green $is_new_entry_addr)\n"
@@ -3874,18 +3961,22 @@ change() {
                 return
             fi
             # interactive prompt for mode
-            is_tmp_list=(default unshaped unsafe-raw)
-            ask list is_new_snell_mode "${is_tmp_list[*]}" "\n当前为 Snell v6 节点，请选择运行模式:\n$(snell_mode_desc)\n"
+            select_snell_mode "\n当前为 Snell v6 节点，请选择运行模式:\n$(snell_mode_desc)\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
             snell_mode=$is_new_snell_mode
             add snell
             return
         fi
         is_new_snell_obfs_mode=$3
         [[ $is_new_snell_obfs_mode == auto ]] && is_new_snell_obfs_mode=none
-        [[ ! $is_new_snell_obfs_mode ]] && {
-            is_tmp_list=(none http)
-            ask list is_new_snell_obfs_mode
-        }
+        if [[ ! $is_new_snell_obfs_mode ]]; then
+            select_snell_obfs_mode "\n选择 Snell 混淆模式:\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
+        fi
         snell_obfs_mode=$is_new_snell_obfs_mode
         add snell
         ;;
@@ -3909,18 +4000,22 @@ change() {
                 add snell
                 return
             fi
-            is_tmp_list=(none http)
-            ask list is_new_snell_obfs_mode "${is_tmp_list[*]}" "\n当前为 Snell v5 节点，请选择混淆模式:\n"
+            select_snell_obfs_mode "\n当前为 Snell v5 节点，请选择混淆模式:\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
             snell_obfs_mode=$is_new_snell_obfs_mode
             add snell
             return
         fi
         is_new_snell_mode=$3
         [[ $is_new_snell_mode == auto ]] && is_new_snell_mode=default
-        [[ ! $is_new_snell_mode ]] && {
-            is_tmp_list=(default unshaped unsafe-raw)
-            ask list is_new_snell_mode "${is_tmp_list[*]}" "\n请选择 Snell v6 运行模式:\n$(snell_mode_desc)\n"
-        }
+        if [[ ! $is_new_snell_mode ]]; then
+            select_snell_mode "\n请选择 Snell v6 运行模式:\n$(snell_mode_desc)\n"
+            snell_status=$?
+            [[ $snell_status == 2 ]] && return 2
+            [[ $snell_status == 0 ]] || return 1
+        fi
         snell_mode_valid "$is_new_snell_mode" || err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"
         snell_mode=$is_new_snell_mode
         add snell
@@ -3940,10 +4035,10 @@ del() {
     [[ $is_select_delete_node ]] && unset is_config_file is_conf_dir_empty
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
-    [[ ! $is_config_file ]] && get info $1
+    [[ ! $is_config_file ]] && { get info $1 || return $?; }
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
-            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file。确认删除"; then
+            if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点，删除后将重启 sing-box。确认删除"; then
                 msg "已取消删除节点。"
                 return
             fi
@@ -3974,17 +4069,19 @@ del() {
 
 # uninstall
 uninstall() {
-    local uninstall_scope="将删除 sing-box 内核、服务和配置，日志维护服务及日志，以及 one-singbox 脚本和快捷命令"
+    local uninstall_scope="将删除 sing-box 程序、服务和配置，日志维护服务及日志，以及 one-singbox 程序、脚本和快捷命令" uninstall_choice_status
     if [[ $is_caddy ]]; then
-        is_tmp_list=("卸载内核和脚本" "全部卸载")
-        ask list is_do_uninstall
-        if [[ $REPLY == '2' ]]; then
-            confirm_action "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return; }
+        menu_select parent is_do_uninstall "\n请选择卸载范围:\n" "卸载内核和脚本" "全部卸载"
+        uninstall_choice_status=$?
+        [[ $uninstall_choice_status == 2 ]] && return 2
+        [[ $uninstall_choice_status == 0 ]] || return 1
+        if [[ $is_do_uninstall == '全部卸载' ]]; then
+            confirm_exact_yes "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return 1; }
         else
-            confirm_action "$uninstall_scope。确认卸载" || { msg "已取消卸载。"; return; }
+            confirm_exact_yes "$uninstall_scope。Caddy 服务、程序及 /etc/caddy 安装和配置目录保留，不删除。确认卸载" || { msg "已取消卸载。"; return 1; }
         fi
     else
-        confirm_action "$uninstall_scope。确认卸载" || { msg "已取消卸载。"; return; }
+        confirm_exact_yes "$uninstall_scope。Caddy 未安装，不涉及 Caddy 删除。确认卸载" || { msg "已取消卸载。"; return 1; }
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
@@ -3997,8 +4094,8 @@ uninstall() {
         rm -f /etc/init.d/$is_core
     fi
     sed -i "/$is_core/d" /root/.bashrc
-    # uninstall caddy; 2 is ask result
-    if [[ $REPLY == '2' ]]; then
+    # uninstall caddy only when the full-removal scope was selected
+    if [[ $is_do_uninstall == '全部卸载' ]]; then
         manage stop caddy &>/dev/null
         manage disable caddy &>/dev/null
         if [[ $is_systemd ]]; then
@@ -4052,7 +4149,7 @@ manage() {
 }
 
 service_action_result() {
-    local action=$1 service=${2:-$is_core} service_arg=${2:-} action_label expected_state action_status service_state service_status_text service_label
+    local action=$1 service=${2:-$is_core} service_arg=${2:-} action_label expected_state action_status service_state service_status_text service_label service_status_color
     case $action in
         start) action_label=启动; expected_state=running ;;
         stop) action_label=停止; expected_state=stopped ;;
@@ -4077,21 +4174,21 @@ service_action_result() {
     [[ $service == "$is_core" ]] && service_label=$is_core_name
     [[ $service == caddy ]] && service_label=Caddy
     case $service_state in
-        running) service_status_text='运行中' ;;
-        stopped) service_status_text='已停止' ;;
-        failed) service_status_text='启动失败' ;;
-        *) service_status_text='状态未知' ;;
+        running) service_status_text='运行中'; service_status_color=$(_green "$service_status_text") ;;
+        stopped) service_status_text='已停止'; service_status_color=$(_red "$service_status_text") ;;
+        failed) service_status_text='启动失败'; service_status_color=$(_red "$service_status_text") ;;
+        *) service_status_text='状态读取失败'; service_status_color=$(_red "$service_status_text") ;;
     esac
 
     if [[ $service_state == unknown ]]; then
-        msg "无法确认 ${service_label} 当前状态；未报告${action_label}成功。"
+        msg "无法确认 ${service_label} 当前状态（$service_status_color）；未报告${action_label}成功。"
     elif [[ $service_state == "$expected_state" && $action_status == 0 ]]; then
-        msg "${action_label}服务成功：已确认 ${service_label} 当前状态为${service_status_text}。"
+        msg "${action_label}服务成功：已确认 ${service_label} 当前状态为$service_status_color。"
         return 0
     elif [[ $service_state == "$expected_state" ]]; then
-        msg "${action_label}服务命令返回失败，但已确认 ${service_label} 当前状态为${service_status_text}。"
+        msg "${action_label}服务命令返回失败，但已确认 ${service_label} 当前状态为$service_status_color。"
     else
-        msg "${action_label}服务未达到目标状态：${service_label} 当前状态为${service_status_text}。"
+        msg "${action_label}服务未达到目标状态：${service_label} 当前状态为$service_status_color。"
     fi
     if [[ $is_systemd ]]; then
         msg "查看服务日志：journalctl -u ${service}.service -n 100 --no-pager"
@@ -4107,7 +4204,7 @@ service_action_result() {
 
 # add a config
 add() {
-    local caddy_shared_lock=
+    local caddy_shared_lock= protocol_choice_status ss_method_status
     [[ ! $1 && ! $is_change ]] && unset is_new_protocol
     if [[ ! $is_change ]]; then
         is_servername=
@@ -4164,11 +4261,22 @@ add() {
     fi
 
     # no prefer protocol
-    [[ ! $is_new_protocol ]] && ask set_protocol
-    if [[ $is_new_protocol == "返回节点管理" ]]; then
-        unset is_new_protocol
-        msg "\n已取消添加节点，返回节点管理菜单。\n"
-        return
+    if [[ ! $is_new_protocol ]]; then
+        is_tmp_list=(${protocol_list[@]})
+        [[ $is_no_auto_tls ]] && {
+            is_tmp_list=()
+            for v in ${protocol_list[@]}; do
+                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list+=("$v")
+            done
+        }
+        menu_select parent is_new_protocol "\n选择协议:\n" "${is_tmp_list[@]}"
+        protocol_choice_status=$?
+        if [[ $protocol_choice_status == 2 ]]; then
+            unset is_new_protocol
+            msg "\n已取消添加节点，返回节点管理菜单。\n"
+            return 2
+        fi
+        [[ $protocol_choice_status == 0 ]] || return 1
     fi
 
     if [[ ${is_new_protocol,,} == 'anytls' ]]; then
@@ -4389,7 +4497,15 @@ add() {
                 ;;
             shadowsocks)
                 # set method
-                [[ ! $ss_method ]] && ask set_ss_method
+                if [[ ! $ss_method ]]; then
+                    select_ss_method
+                    ss_method_status=$?
+                    if [[ $ss_method_status == 2 ]]; then
+                        msg "\n已取消添加节点，返回节点管理菜单。\n"
+                        return 2
+                    fi
+                    [[ $ss_method_status == 0 ]] || return 1
+                fi
                 # set password
                 [[ ! $ss_password ]] && {
                     if [[ $(grep 2022 <<<$ss_method) ]]; then
@@ -4462,7 +4578,7 @@ add() {
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
         echo -ne "输入节点名称 (回车自动生成 8 位名称):"
-        read -r is_custom_node_name
+        interactive_read -r is_custom_node_name
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
@@ -4481,6 +4597,7 @@ add() {
 # get config info
 # or somes required args
 get() {
+    local get_status
     case $1 in
     addr)
         is_public_port=$port
@@ -4517,12 +4634,17 @@ get() {
         [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
-            ask get_config_file
+            menu_select parent is_config_file "\n选择节点:\n" "${is_all_json[@]}"
+            get_status=$?
+            [[ $get_status == 2 ]] && return 2
+            [[ $get_status == 0 ]] || return 1
         }
         ;;
     info)
         is_tcp_http=
         get file $2
+        get_status=$?
+        [[ $get_status == 2 ]] && return 2
         if [[ $is_config_file ]]; then
             is_json_str=$(json_strip_comments "$is_conf_dir/$is_config_file")
             is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<$is_json_str)
@@ -4740,7 +4862,7 @@ get() {
         ;;
     reinstall)
         is_install_sh=$(cat $is_sh_dir/install.sh)
-        uninstall
+        uninstall || return $?
         bash <<<$is_install_sh
         ;;
     esac
@@ -4749,13 +4871,18 @@ get() {
 # show info
 info() {
     local info_target=${1:-${is_config_file:-$is_config_name}}
+    local info_status
     is_surge_str=
     is_url=
     [[ $is_gen ]] && return
     if [[ $info_target ]]; then
         get info "$info_target"
+        info_status=$?
+        [[ $info_status == 2 ]] && return 2
     elif [[ ! $is_protocol ]]; then
         get info $1
+        info_status=$?
+        [[ $info_status == 2 ]] && return 2
     fi
     # is_color=$(shuf -i 41-45 -n1)
     is_color=44
@@ -5049,7 +5176,7 @@ update() {
     fi
     [[ $is_run_ver == $is_new_ver ]] && {
         msg "\n自定义版本和当前 $is_show_name 版本一样, 无需更新.\n"
-        exit
+        return 0
     }
     load download.sh
     if [[ $is_new_ver ]]; then
@@ -5058,7 +5185,7 @@ update() {
         get_latest_version $is_update_name
         [[ $is_run_ver == $latest_ver ]] && {
             msg "\n$is_show_name 当前已经是最新版本了.\n"
-            exit
+            return 0
         }
         msg "\n发现 $is_show_name 新版本: $(_green $latest_ver)\n"
         is_new_ver=$latest_ver
@@ -5090,7 +5217,65 @@ update() {
 
 menu_pause() {
     printf '\n按回车返回菜单。\n'
-    read -r
+    interactive_read -r
+}
+
+menu_action() {
+    local action_status
+    run_interactive_operation "$@"
+    action_status=$?
+    [[ $action_status == 2 ]] || menu_pause
+    return "$action_status"
+}
+
+menu_select() {
+    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent= menu_default=${is_default_arg:-}
+    shift 3
+    [[ $menu_kind == parent ]] && menu_has_parent=1
+    while :; do
+        msg "$menu_prompt"
+        is_tmp_list=("$@")
+        show_list "${is_tmp_list[@]}"
+        [[ $menu_has_parent ]] && msg "0) 返回上级"
+        if [[ $menu_has_parent && $menu_default ]]; then
+            echo -ne "请输入选项编号 [\e[91m0-${#is_tmp_list[@]}\e[0m] (0 返回上级，回车默认 $menu_default):"
+        elif [[ $menu_has_parent ]]; then
+            echo -ne "请输入选项编号 [\e[91m0-${#is_tmp_list[@]}\e[0m] (0 返回上级):"
+        else
+            echo -ne "请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (q 退出):"
+        fi
+        interactive_read -r REPLY || { unset is_tmp_list; return 1; }
+        if [[ $menu_has_parent ]]; then
+            if [[ $REPLY == 0 ]]; then
+                export "$menu_var="
+                unset is_tmp_list
+                return 2
+            fi
+        else
+            case $REPLY in
+            q | Q)
+                unset is_tmp_list
+                return 3
+                ;;
+            '' | 0)
+                msg "已在主菜单"
+                unset is_tmp_list
+                return 4
+                ;;
+            esac
+        fi
+        if [[ $REPLY =~ ^[1-9][0-9]*$ ]] && ((REPLY <= ${#is_tmp_list[@]})); then
+            export "$menu_var=${is_tmp_list[REPLY - 1]}"
+            msg "选择: ${!menu_var}"
+            unset is_tmp_list
+            return 0
+        fi
+        if [[ $menu_has_parent ]]; then
+            msg "$is_err 输入无效，请输入 0-${#is_tmp_list[@]} 中的编号。"
+        else
+            msg "$is_err 输入无效，请输入 1-${#is_tmp_list[@]} 中的编号，或 q 退出。"
+        fi
+    done
 }
 
 node_menu_has_nodes() {
@@ -5113,39 +5298,39 @@ node_menu_empty_state() {
 }
 
 node_menu() {
+    local menu_status
     while :; do
-        is_tmp_list=("添加" "修改" "查看" "删除" "返回")
-        ask list is_node_action null "\n请选择节点操作:\n"
+        menu_select parent is_node_action "\n请选择节点操作:\n" "添加" "修改" "查看" "删除"
+        menu_status=$?
+        [[ $menu_status == 2 ]] && return
+        [[ $menu_status == 0 ]] || return 1
         case $REPLY in
         1)
-            ( add )
-            menu_pause
+            menu_action add
             ;;
         2)
             node_menu_empty_state && continue
-            ( change )
-            menu_pause
+            menu_action change
             ;;
         3)
             node_menu_empty_state && continue
-            ( info )
-            menu_pause
+            menu_action info
             ;;
         4)
             node_menu_empty_state && continue
-            ( is_select_delete_node=1 del )
-            menu_pause
+            is_select_delete_node=1 menu_action del
             ;;
-        5) return ;;
         esac
     done
 }
 
 service_menu() {
-    local menu_status=0 action_status
+    local menu_status=0 action_status choice_status
     while :; do
-        is_tmp_list=("状态" "启动" "停止" "重启" "日志" "返回")
-        ask list is_service_action null "\n请选择服务操作:\n"
+        menu_select parent is_service_action "\n请选择服务操作:\n" "状态" "启动" "停止" "重启" "日志"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return "$menu_status"
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
             core_status_read
@@ -5154,92 +5339,95 @@ service_menu() {
             menu_pause
             ;;
         2)
-            service_action_result start
+            menu_action service_action_result start
             action_status=$?
             menu_status=$action_status
-            menu_pause
             ;;
         3)
-            service_action_result stop
+            menu_action menu_system_impact "sing-box 内核服务（停止）" "停止监听并中断所有节点连接" "否（执行后保持停止）" service_action_result stop
             action_status=$?
             menu_status=$action_status
-            menu_pause
             ;;
         4)
-            service_action_result restart
+            menu_action menu_system_impact "sing-box 内核服务（重启）" "短暂中断所有节点连接后重新加载配置" "是" service_action_result restart
             action_status=$?
             menu_status=$action_status
-            menu_pause
             ;;
         5)
             load log.sh
+            is_terminal_log_view=1
             log_set
-            menu_pause
+            action_status=$?
+            unset is_terminal_log_view
+            [[ $action_status == 130 ]] || menu_pause
             ;;
-        6) return "$menu_status" ;;
         esac
     done
 }
 
 update_menu() {
+    local choice_status
     while :; do
         is_tmp_list=("更新 sing-box 内核" "更新脚本")
         [[ $is_caddy ]] && is_tmp_list+=("更新 Caddy")
-        is_tmp_list+=("返回")
-        ask list is_do_update null "\n请选择要更新的软件:\n"
+        menu_select parent is_do_update "\n请选择要更新的软件:\n" "${is_tmp_list[@]}"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
-        1 | 2)
-            update "$REPLY"
-            menu_pause
+        1)
+            menu_action menu_system_impact "sing-box 内核" "下载并替换 sing-box 内核程序，保留现有配置" "是" update 1
+            ;;
+        2)
+            menu_action menu_system_impact "one-singbox 脚本" "下载并替换 one-singbox 脚本，不改 sing-box 配置" "否" update 2
             ;;
         3)
-            if [[ $is_caddy ]]; then
-                update caddy
-                menu_pause
-            else
-                return
-            fi
+            menu_action menu_system_impact "Caddy" "下载并替换 Caddy 程序并重启 Caddy，不改 sing-box 配置" "否" update caddy
             ;;
-        4) return ;;
         esac
     done
 }
 
 system_tools_menu() {
+    local choice_status
     while :; do
-        is_tmp_list=("启用 BBR" "DNS" "日志上限" "屏蔽回国流量 ($(block_cn_status_text))" "重装脚本" "返回")
-        ask list is_system_tool null "\n请选择系统设置:\n"
+        is_tmp_list=("启用 BBR" "DNS" "日志上限" "屏蔽回国流量 ($(block_cn_status_text))" "重装脚本")
+        if menu_select parent is_system_tool "\n请选择系统设置:\n" "${is_tmp_list[@]}"; then
+            choice_status=0
+        else
+            choice_status=$?
+        fi
+        [[ $choice_status == 2 ]] && return
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
             load bbr.sh
-            _try_enable_bbr
-            menu_pause
+            menu_action menu_system_impact "系统内核拥塞控制（BBR）" "修改 /etc/sysctl.conf 中的拥塞控制与队列设置" "否" _try_enable_bbr
             ;;
         2)
             load dns.sh
-            dns_set
-            menu_pause
+            menu_action dns_set
             ;;
         3)
-            log_limit_set
-            menu_pause
+            menu_action log_limit_set
             ;;
         4)
-            block_cn_menu_toggle
-            menu_pause
+            if block_cn_is_enabled; then
+                menu_action menu_system_impact "停用屏蔽回国流量（block-cn）" "移除启用标记并重写运行时路由，恢复原有出站规则" "是" block_cn_menu_toggle
+            else
+                menu_action menu_system_impact "启用屏蔽回国流量（block-cn）" "写入启用标记、同步回国白名单并重写运行时路由" "是" block_cn_menu_toggle
+            fi
             ;;
         5)
-            get reinstall
-            menu_pause
+            menu_action get reinstall
             ;;
-        6) return ;;
         esac
     done
 }
 
-# Main menu; leave input empty to exit.
+# Main menu; q/Q exits and empty input or 0 redraws it.
 is_main_menu() {
-    local is_log_usage_limit is_log_usage_bytes
+    local is_log_usage_limit is_log_usage_bytes menu_status
     while :; do
         if ! qrcode_dependency_checked; then
             qrcode_dependency_install || :
@@ -5256,22 +5444,33 @@ is_main_menu() {
         fi
         msg "问题反馈：$(msg_ul https://github.com/ouones/one-singbox/issues)"
         is_main_start=1
-        ask mainmenu
+        if menu_select root is_main_pick "" "${mainmenu[@]}"; then
+            menu_status=0
+        else
+            menu_status=$?
+        fi
+        [[ $menu_status == 3 ]] && return
+        [[ $menu_status == 4 ]] && continue
+        [[ $menu_status == 0 ]] || return 1
         case $REPLY in
         1) node_menu ;;
         2) relay_menu ;;
         3) service_menu ;;
         4) update_menu ;;
         5) system_tools_menu ;;
-        6) msg "\n命令行帮助"; load help.sh; show_help ;;
-        7) load help.sh; about ;;
-        8) uninstall ;;
+        6) msg "\n命令行帮助"; load help.sh; show_help; menu_pause ;;
+        7) load help.sh; about; menu_pause ;;
+        8) menu_action uninstall ;;
         esac
     done
 }
 
 relay_warn_security() {
-    warn "中转没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+    if [[ $is_main_start ]]; then
+        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+    else
+        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
+    fi
 }
 
 relay_info_show() {
@@ -5318,7 +5517,7 @@ relay_add() {
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建中转临时配置文件."
+    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建端口转发临时配置文件."
 
     local relay_inbound
     relay_inbound=$(jq -n \
@@ -5328,30 +5527,34 @@ relay_add() {
         --argjson remote_port "$remote_port" \
         '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
         rm -f "$tmp_file"
-        err "生成中转配置 JSON 失败."
+        err "生成端口转发配置 JSON 失败."
     }
     printf '%s\n' "$relay_inbound" > "$tmp_file"
 
     if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
         rm -f "$tmp_file"
-        err "中转配置校验失败."
+        err "端口转发配置校验失败."
     fi
 
     if ! mv -f "$tmp_file" "$relay_file"; then
         rm -f "$tmp_file"
-        err "保存中转配置文件失败."
+        err "保存端口转发配置文件失败."
     fi
 
     if [[ -f $is_config_json ]]; then
         if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
             rm -f "$relay_file"
-            err "完整运行时配置校验失败，已取消安装该中转配置."
+            err "完整运行时配置校验失败，已取消安装该端口转发配置."
         fi
     fi
 
     shared_config_unlock
     manage restart &
-    msg "\n$(_green '中转配置添加成功!')"
+    if [[ $is_main_start ]]; then
+        msg "\n$(_green '端口转发配置添加成功!')"
+    else
+        msg "\n$(_green '端口转发配置添加成功!')"
+    fi
     msg "------------------------------------------------"
     relay_info_show "$local_port" "$remote_addr" "$remote_port"
     msg "------------------------------------------------"
@@ -5367,11 +5570,15 @@ relay_info() {
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     local relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到中转配置 (relay-${local_port}.json)."
+    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
     local r_addr r_port
     r_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
     r_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-    msg "\n------------- 中转配置信息 -------------"
+    if [[ $is_main_start ]]; then
+        msg "\n------------- 端口转发配置信息 -------------"
+    else
+        msg "\n------------- 端口转发配置信息 -------------"
+    fi
     relay_info_show "$local_port" "$r_addr" "$r_port"
     msg "----------------------------------------"
     relay_warn_security
@@ -5384,13 +5591,17 @@ relay_list() {
     shopt -u nullglob
     if [[ ${#files[@]} -eq 0 ]]; then
         if [[ $is_main_start ]]; then
-            msg "\n暂无转发，请先添加\n"
+            msg "\n暂无端口转发，请先添加\n"
         else
-            msg "\n当前未配置任何中转.\n"
+            msg "\n当前未配置任何端口转发.\n"
         fi
         return
     fi
-    msg "\n------------- 中转列表 -------------"
+    if [[ $is_main_start ]]; then
+        msg "\n------------- 端口转发列表 -------------"
+    else
+        msg "\n------------- 端口转发列表 -------------"
+    fi
     for file in "${files[@]}"; do
         l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
         r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
@@ -5399,12 +5610,16 @@ relay_list() {
         ((count++))
     done
     msg "------------------------------------"
-    msg "共 $count 个中转"
+    if [[ $is_main_start ]]; then
+        msg "共 $count 个端口转发"
+    else
+        msg "共 $count 个端口转发"
+    fi
     relay_warn_security
 }
 
 relay_delete() {
-    local local_port=$1 relay_file backup_file
+    local local_port=$1 relay_file backup_file remote_addr remote_port
     if [[ ! $local_port ]]; then
         relay_list
         # Existing relays may be listening; only validate the port format here.
@@ -5414,17 +5629,19 @@ relay_delete() {
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到中转配置 (relay-${local_port}.json)."
+    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
     if [[ $is_main_start ]]; then
-        confirm_action "将删除监听端口 $local_port 的转发配置。确认删除" || { msg "已取消删除转发。"; return; }
+        remote_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
+        remote_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
+        confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return; }
     fi
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
-    mv -f "$relay_file" "$backup_file" || err "备份中转配置失败，未执行删除."
+    mv -f "$relay_file" "$backup_file" || err "备份端口转发配置失败，未执行删除."
     if [[ -f $is_config_json ]]; then
         if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
             mv -f "$backup_file" "$relay_file"
-            err "删除中转后完整运行时配置校验失败，已恢复中转配置."
+            err "删除端口转发后完整运行时配置校验失败，已恢复端口转发配置."
         fi
     fi
     rm -f "$backup_file"
@@ -5433,7 +5650,11 @@ relay_delete() {
     }
     shared_config_unlock
     manage restart &
-    _green "\n已删除中转配置: relay-${local_port}.json\n"
+    if [[ $is_main_start ]]; then
+        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
+    else
+        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
+    fi
 }
 
 relay_menu_has_entries() {
@@ -5452,29 +5673,27 @@ relay_menu_empty_state() {
 }
 
 relay_menu() {
+    local choice_status
     while :; do
-        is_tmp_list=("添加" "列表" "查看" "删除" "返回")
-        ask list is_relay_action null "\n请选择端口中转操作:\n"
+        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "删除"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return
+        [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
-            relay_add
-            menu_pause
+            menu_action relay_add
             ;;
         2)
-            relay_list
-            menu_pause
+            menu_action relay_list
             ;;
         3)
             relay_menu_empty_state && continue
-            relay_info
-            menu_pause
+            menu_action relay_info
             ;;
         4)
             relay_menu_empty_state && continue
-            relay_delete
-            menu_pause
+            menu_action relay_delete
             ;;
-        5) return ;;
         esac
     done
 }
@@ -5497,7 +5716,7 @@ relay_main() {
         relay_menu
         ;;
     *)
-        err "无法识别中转命令 ($1), 正确用法: $is_core relay [add|list|info|delete]"
+        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|delete]"
         ;;
     esac
 }

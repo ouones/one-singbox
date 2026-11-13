@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+interactive_read() { builtin read "$@"; }
+run_interactive_operation() { ( "$@" ); }
+menu_action() {
+    local status
+    "$@"
+    status=$?
+    menu_pause
+    return "$status"
+}
+export -f interactive_read run_interactive_operation menu_action
+
 repo_root=$(cd "$(dirname "$0")" && pwd)
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
@@ -107,24 +118,36 @@ qrcode_dependency_install() { fail 'unexpected QR migration in isolated menu tes
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     source <(sed -n '/^service_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
+    source <(sed -n '/^menu_select() {/,/^}/p' "$core_file")
     source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
-    is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
+    source <(sed -n '/^system_tools_menu() {/,/^}/p' "$core_file")
+    is_script_name=one-singbox is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
     is_systemd= is_openrc=
     _green() { printf 'GREEN:%s' "$*"; }
     _red() { printf 'RED:%s' "$*"; }
     msg_ul() { :; }
     load() { [[ $1 == log.sh ]] || fail 'menu loads log module'; }
-    ask() {
-        if [[ $1 == mainmenu ]]; then
-            REPLY=9
-        else
-            [[ ${is_tmp_list[5]} == '日志大小限制(1MB)' ]] || fail 'menu shows persisted limit'
-            REPLY=6
-        fi
+    menu_pause() { :; }
+    block_cn_status_text() { printf '未启用'; }
+    menu_select() {
+        case $2 in
+        is_main_pick)
+            main_menu_calls=$((${main_menu_calls:-0} + 1))
+            [[ $main_menu_calls == 1 ]] || return 3
+            REPLY=5
+            ;;
+        is_system_tool)
+            [[ $6 == '日志上限' ]] || fail 'system menu shows log limit setting'
+            system_menu_calls=$((${system_menu_calls:-0} + 1))
+            [[ $system_menu_calls == 1 ]] || return 2
+            REPLY=3
+            ;;
+        esac
     }
+    run_main_menu() { main_menu_calls=0 system_menu_calls=0; is_main_menu; }
     menu_called=
     log_limit_set() { menu_called=1; }
-    is_main_menu
+    run_main_menu
     [[ $menu_called == 1 ]] || fail 'menu calls log limit setting'
 
     menu_output=
@@ -149,9 +172,9 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
         local expected=$1
         menu_output=
         menu_called=
-        is_main_menu
+        run_main_menu
         [[ $menu_called == 1 ]] || fail 'status failure must not stop the main menu'
-        [[ $menu_output == *"sing-box test: $expected"* ]] || fail "wrong homepage status: $menu_output"
+        [[ $menu_output == *"sing-box 内核：test ($expected)"* ]] || fail "wrong homepage status: $menu_output"
     }
 
     is_systemd=1
@@ -160,14 +183,14 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     is_core_status=installed
     run_main_menu_status 'RED:已停止'
     [[ $is_core_stop == 1 ]] || fail 'stopped systemd service should set the stop marker'
-    [[ $(cat "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should only query systemd status'
+    [[ $(sort -u "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should only query systemd status'
 
     : >"$menu_service_calls"
     service_state=active
     is_core_stop=1
     run_main_menu_status 'GREEN:运行中'
     [[ -z $is_core_stop ]] || fail 'running systemd service should clear the old stop marker'
-    [[ $(cat "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should refresh systemd status on every display'
+    [[ $(sort -u "$menu_service_calls") == 'systemctl is-active sing-box' ]] || fail 'homepage should refresh systemd status on every display'
 
     : >"$menu_service_calls"
     service_state=failed
@@ -180,7 +203,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     openrc_status=0
     : >"$menu_service_calls"
     run_main_menu_status 'GREEN:运行中'
-    [[ $(cat "$menu_service_calls") == 'rc-service sing-box status' ]] || fail 'OpenRC homepage should query rc-service only'
+    [[ $(sort -u "$menu_service_calls") == 'rc-service sing-box status' ]] || fail 'OpenRC homepage should query rc-service only'
     openrc_status=3
     : >"$menu_service_calls"
     run_main_menu_status 'RED:已停止'
@@ -228,61 +251,73 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     head -c 524288 /dev/zero >"$is_log_dir/error.log"
     head -c 262144 /dev/zero >"$is_log_dir/access.log.1"
     echo 200 >"$is_core_dir/log-limit-mb"
+    source <(sed -n '/^menu_select() {/,/^}/p' "$core_file")
     source <(sed -n '/^is_main_menu() {/,/^}/p' "$core_file")
-    is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
+    source <(sed -n '/^system_tools_menu() {/,/^}/p' "$core_file")
+    is_script_name=one-singbox is_core_name=sing-box is_sh_ver=test author=test is_core_ver=test is_core_status=running
     menu_output=
     msg() { menu_output+="$*"$'\n'; }
     load() { [[ $1 == log.sh ]] || fail 'menu loads log module'; }
-    ask() {
-        if [[ $1 == mainmenu ]]; then
-            REPLY=9
-        else
-            [[ ${is_tmp_list[5]} == "日志大小限制($(log_limit_read)MB)" ]] || fail 'menu shows persisted limit'
-            REPLY=6
-        fi
+    menu_pause() { :; }
+    block_cn_status_text() { printf '未启用'; }
+    menu_select() {
+        case $2 in
+        is_main_pick)
+            main_menu_calls=$((${main_menu_calls:-0} + 1))
+            [[ $main_menu_calls == 1 ]] || return 3
+            REPLY=5
+            ;;
+        is_system_tool)
+            [[ $6 == '日志上限' ]] || fail 'system menu shows log limit setting'
+            system_menu_calls=$((${system_menu_calls:-0} + 1))
+            [[ $system_menu_calls == 1 ]] || return 2
+            REPLY=3
+            ;;
+        esac
     }
+    run_main_menu() { main_menu_calls=0 system_menu_calls=0; is_main_menu; }
     menu_called=
     log_limit_set() { menu_called=1; }
     service_calls_before=$service_calls
     size_before=$(command stat -c %s "$is_log_dir/access.log")
     archive_before=$(command stat -c %s "$is_log_dir/access.log.1")
-    is_main_menu
-    [[ $menu_output == *'日志用量：1.75 / 200 MB'* ]] || fail 'menu displays current usage and limit'
+    run_main_menu
+    [[ $menu_output == *'日志占用：1.75 MB / 上限 200 MB'* ]] || fail 'menu displays current usage and limit'
     [[ $menu_called == 1 ]] || fail 'menu remains usable after usage display'
     [[ $(command stat -c %s "$is_log_dir/access.log") == "$size_before" && $(command stat -c %s "$is_log_dir/access.log.1") == "$archive_before" && $service_calls == "$service_calls_before" ]] || fail 'usage display does not mutate logs or services'
 
     head -c 524288 /dev/zero >"$is_log_dir/access.log"
     echo 100 >"$is_core_dir/log-limit-mb"
     menu_output=
-    is_main_menu
-    [[ $menu_output == *'日志用量：1.25 / 100 MB'* ]] || fail 'menu recomputes usage and limit'
+    run_main_menu
+    [[ $menu_output == *'日志占用：1.25 MB / 上限 100 MB'* ]] || fail 'menu recomputes usage and limit'
     echo 1 >"$is_core_dir/log-limit-mb"
     menu_output=
-    is_main_menu
-    [[ $menu_output == *'日志用量：1.25 / 1 MB'* ]] || fail 'usage display is not truncated to limit'
+    run_main_menu
+    [[ $menu_output == *'日志占用：1.25 MB / 上限 1 MB'* ]] || fail 'usage display is not truncated to limit'
     echo 100 >"$is_core_dir/log-limit-mb"
 
     is_log_dir="$workdir/empty-log"
     mkdir -p "$is_log_dir"
     menu_output=
-    is_main_menu
-    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'empty log directory displays zero usage'
+    run_main_menu
+    [[ $menu_output == *'日志占用：0.00 MB / 上限 100 MB'* ]] || fail 'empty log directory displays zero usage'
 
     is_log_dir="$workdir/no-log-directory"
     menu_output=
-    is_main_menu
-    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'missing log directory displays zero usage'
+    run_main_menu
+    [[ $menu_output == *'日志占用：0.00 MB / 上限 100 MB'* ]] || fail 'missing log directory displays zero usage'
 
     is_log_dir="$workdir/non-stat-log"
     menu_output=
-    is_main_menu
-    [[ $menu_output == *'日志用量：0.00 / 100 MB'* ]] || fail 'directory with no matching logs displays zero usage'
+    run_main_menu
+    [[ $menu_output == *'日志占用：0.00 MB / 上限 100 MB'* ]] || fail 'directory with no matching logs displays zero usage'
 
     rm -f "$is_core_dir/log-limit-mb"
     is_log_dir="$workdir/empty-log"
     menu_output=
-    is_main_menu
-    [[ $menu_output == *'日志用量：0.00 / 200 MB'* ]] || fail 'menu uses default limit without saved value'
+    run_main_menu
+    [[ $menu_output == *'日志占用：0.00 MB / 上限 200 MB'* ]] || fail 'menu uses default limit without saved value'
 
     echo 100 >"$is_core_dir/log-limit-mb"
     is_log_dir="$workdir/usage-log"
@@ -293,8 +328,8 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     }
     menu_output=
     menu_called=
-    is_main_menu
-    [[ $menu_output == *'日志用量：暂不可用 / 100 MB'* ]] || fail 'menu reports unreadable usage without hiding limit'
+    run_main_menu
+    [[ $menu_output == *'日志占用：暂不可用 / 上限 100 MB'* ]] || fail 'menu reports unreadable usage without hiding limit'
     [[ $menu_called == 1 ]] || fail 'menu remains usable after usage read failure'
     unset -f stat
     is_log_dir="$workdir/log"

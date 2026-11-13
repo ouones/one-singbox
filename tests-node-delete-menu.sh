@@ -32,7 +32,7 @@ y
 
 4
 
-5
+0
 INPUT
     output=$(cat "$workdir/output")
     [[ $(grep -Fx -c '选择节点:' <<<"$output") == 3 ]] || { echo "FAIL: node list prompt is concise and shown for every deletion"; exit 1; }

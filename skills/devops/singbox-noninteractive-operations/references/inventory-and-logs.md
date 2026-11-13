@@ -50,7 +50,7 @@ credential fields.
 ## Expected relay display
 
 ```text
-中转列表（共 N 个）
+端口转发列表（共 N 个）
 
 1. <local-port> -> <remote-addr>:<remote-port>
    类型：direct

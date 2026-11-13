@@ -8,7 +8,7 @@ is_dns_list=(
     none
 )
 dns_set() {
-    local candidate_config is_interactive is_dns_use_bak
+    local candidate_config is_interactive is_dns_use_bak dns_choice_status dns_impact
     [[ ! $1 ]] && is_interactive=1
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
@@ -48,7 +48,10 @@ dns_set() {
         is_tmp_list=("${is_dns_list[@]}")
         is_tmp_list[5]="自定义"
         is_tmp_list[6]="不设置"
-        ask list is_dns_use null "\n请选择 DNS；选择“自定义”输入地址，选择“不设置”清除 DNS 配置:\n"
+        menu_select parent is_dns_use "\n请选择 DNS；选择“自定义”输入地址，选择“不设置”清除 DNS 配置:\n" "${is_tmp_list[@]}"
+        dns_choice_status=$?
+        [[ $dns_choice_status == 2 ]] && return 2
+        [[ $dns_choice_status == 0 ]] || return 1
         case $is_dns_use in
         自定义) is_dns_use=set ;;
         不设置) is_dns_use=none ;;
@@ -59,6 +62,14 @@ dns_set() {
     fi
     is_dns_use_bak=$is_dns_use
     [[ $is_interactive && $is_dns_use_bak == none ]] && is_dns_use_bak="不设置"
+    if [[ $is_interactive ]]; then
+        if [[ $is_dns_use == none ]]; then
+            dns_impact='清除现有 DNS 配置并重启 sing-box；现有节点配置不变'
+        else
+            dns_impact='更新运行时 DNS 配置并重启 sing-box；现有节点配置不变'
+        fi
+        menu_system_impact "DNS 配置：$is_dns_use_bak" "$dns_impact" "是" : || return 1
+    fi
     shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
     candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || err "无法创建 DNS 候选配置"
     if [[ $is_dns_use == "none" ]]; then
