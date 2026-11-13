@@ -4021,7 +4021,7 @@ manage() {
 }
 
 service_action_result() {
-    local action=$1 service=${2:-$is_core} service_arg=${2:-} action_label expected_state action_status service_state service_status_text service_label
+    local action=$1 service=${2:-$is_core} service_arg=${2:-} action_label expected_state action_status service_state service_status_text service_label service_status_color
     case $action in
         start) action_label=启动; expected_state=running ;;
         stop) action_label=停止; expected_state=stopped ;;
@@ -4046,21 +4046,21 @@ service_action_result() {
     [[ $service == "$is_core" ]] && service_label=$is_core_name
     [[ $service == caddy ]] && service_label=Caddy
     case $service_state in
-        running) service_status_text='运行中' ;;
-        stopped) service_status_text='已停止' ;;
-        failed) service_status_text='启动失败' ;;
-        *) service_status_text='状态未知' ;;
+        running) service_status_text='运行中'; service_status_color=$(_green "$service_status_text") ;;
+        stopped) service_status_text='已停止'; service_status_color=$(_red "$service_status_text") ;;
+        failed) service_status_text='启动失败'; service_status_color=$(_red "$service_status_text") ;;
+        *) service_status_text='状态读取失败'; service_status_color=$(_red "$service_status_text") ;;
     esac
 
     if [[ $service_state == unknown ]]; then
-        msg "无法确认 ${service_label} 当前状态；未报告${action_label}成功。"
+        msg "无法确认 ${service_label} 当前状态（$service_status_color）；未报告${action_label}成功。"
     elif [[ $service_state == "$expected_state" && $action_status == 0 ]]; then
-        msg "${action_label}服务成功：已确认 ${service_label} 当前状态为${service_status_text}。"
+        msg "${action_label}服务成功：已确认 ${service_label} 当前状态为$service_status_color。"
         return 0
     elif [[ $service_state == "$expected_state" ]]; then
-        msg "${action_label}服务命令返回失败，但已确认 ${service_label} 当前状态为${service_status_text}。"
+        msg "${action_label}服务命令返回失败，但已确认 ${service_label} 当前状态为$service_status_color。"
     else
-        msg "${action_label}服务未达到目标状态：${service_label} 当前状态为${service_status_text}。"
+        msg "${action_label}服务未达到目标状态：${service_label} 当前状态为$service_status_color。"
     fi
     if [[ $is_systemd ]]; then
         msg "查看服务日志：journalctl -u ${service}.service -n 100 --no-pager"
@@ -5040,7 +5040,7 @@ update() {
     fi
     [[ $is_run_ver == $is_new_ver ]] && {
         msg "\n自定义版本和当前 $is_show_name 版本一样, 无需更新.\n"
-        exit
+        return 0
     }
     load download.sh
     if [[ $is_new_ver ]]; then
@@ -5049,7 +5049,7 @@ update() {
         get_latest_version $is_update_name
         [[ $is_run_ver == $latest_ver ]] && {
             msg "\n$is_show_name 当前已经是最新版本了.\n"
-            exit
+            return 0
         }
         msg "\n发现 $is_show_name 新版本: $(_green $latest_ver)\n"
         is_new_ver=$latest_ver
@@ -5074,6 +5074,14 @@ update() {
 menu_pause() {
     printf '\n按回车返回菜单。\n'
     read -r
+}
+
+menu_action() {
+    local action_status
+    ( "$@" )
+    action_status=$?
+    menu_pause
+    return "$action_status"
 }
 
 menu_select() {
@@ -5154,7 +5162,7 @@ node_menu() {
         1)
             ( add )
             action_status=$?
-            [[ $action_status == 2 ]] || menu_pause
+            menu_pause
             ;;
         2)
             node_menu_empty_state && continue
@@ -5193,22 +5201,19 @@ service_menu() {
             menu_pause
             ;;
         2)
-            service_action_result start
+            menu_action service_action_result start
             action_status=$?
             menu_status=$action_status
-            menu_pause
             ;;
         3)
-            service_action_result stop
+            menu_action service_action_result stop
             action_status=$?
             menu_status=$action_status
-            menu_pause
             ;;
         4)
-            service_action_result restart
+            menu_action service_action_result restart
             action_status=$?
             menu_status=$action_status
-            menu_pause
             ;;
         5)
             load log.sh
@@ -5230,12 +5235,10 @@ update_menu() {
         [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1 | 2)
-            update "$REPLY"
-            menu_pause
+            menu_action update "$REPLY"
             ;;
         3)
-            update caddy
-            menu_pause
+            menu_action update caddy
             ;;
         esac
     done
@@ -5254,13 +5257,11 @@ system_tools_menu() {
         [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
-            load bbr.sh
-            _try_enable_bbr
+            ( load bbr.sh; _try_enable_bbr )
             menu_pause
             ;;
         2)
-            load dns.sh
-            dns_set
+            ( load dns.sh; dns_set )
             action_status=$?
             [[ $action_status == 2 ]] || menu_pause
             ;;
@@ -5269,12 +5270,11 @@ system_tools_menu() {
             menu_pause
             ;;
         4)
-            block_cn_menu_toggle
+            ( block_cn_menu_toggle )
             menu_pause
             ;;
         5)
-            get reinstall
-            menu_pause
+            menu_action get reinstall
             ;;
         esac
     done
@@ -5313,9 +5313,9 @@ is_main_menu() {
         3) service_menu ;;
         4) update_menu ;;
         5) system_tools_menu ;;
-        6) msg "\n命令行帮助"; load help.sh; show_help ;;
-        7) load help.sh; about ;;
-        8) uninstall ;;
+        6) msg "\n命令行帮助"; load help.sh; show_help; menu_pause ;;
+        7) load help.sh; about; menu_pause ;;
+        8) menu_action uninstall ;;
         esac
     done
 }
@@ -5534,22 +5534,18 @@ relay_menu() {
         [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
-            relay_add
-            menu_pause
+            menu_action relay_add
             ;;
         2)
-            relay_list
-            menu_pause
+            menu_action relay_list
             ;;
         3)
             relay_menu_empty_state && continue
-            relay_info
-            menu_pause
+            menu_action relay_info
             ;;
         4)
             relay_menu_empty_state && continue
-            relay_delete
-            menu_pause
+            menu_action relay_delete
             ;;
         esac
     done

@@ -13,7 +13,7 @@ fail() {
 source <(sed -n '/^service_status_read() {/,/^}/p' "$repo_root/src/init.sh")
 source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
 
-msg() { menu_output+="$*"$'\n'; }
+msg() { printf '%b\n' "$*"; }
 _green() { printf '%s' "$*"; }
 _red() { printf '%s' "$*"; }
 menu_select() {
@@ -60,6 +60,7 @@ rc-service() {
 
 for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     source <(sed -n '/^manage() {/,/^}/p' "$core_file")
+    source <(sed -n '/^menu_action() {/,/^}/p' "$core_file")
     source <(sed -n '/^service_menu() {/,/^}/p' "$core_file")
     source <(sed -n '/^service_action_result() {/,/^}/p' "$core_file")
     source <(sed -n '/^main() {/,/^}/p' "$core_file")
@@ -78,7 +79,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     menu_choice=2
     menu_output=
     : >"$service_calls_file"
-    service_menu || fail "$core_file menu should accept a confirmed start"
+    menu_output=$(service_menu 2>&1) || fail "$core_file menu should accept a confirmed start"
     [[ $(cat "$service_calls_file") == $'start sing-box\nis-active sing-box' ]] || fail "$core_file menu waits for and verifies start: $(cat "$service_calls_file")"
     [[ $menu_output == *'启动服务成功'* && $menu_output == *'运行中'* ]] || fail "$core_file menu reports confirmed start: $menu_output"
 
@@ -88,7 +89,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     menu_choice=3
     menu_output=
     : >"$service_calls_file"
-    if service_menu; then fail "$core_file menu must reject a stop that did not reach inactive"; fi
+    if menu_output=$(service_menu 2>&1); then fail "$core_file menu must reject a stop that did not reach inactive"; fi
     [[ $menu_output == *'停止服务未达到目标状态'* && $menu_output == *'journalctl -u sing-box.service'* ]] || fail "$core_file menu reports stop failure with logs: $menu_output"
     [[ $(cat "$service_calls_file") == $'stop sing-box\nis-active sing-box' ]] || fail "$core_file menu verifies a completed stop"
 
@@ -98,7 +99,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     menu_choice=4
     menu_output=
     : >"$service_calls_file"
-    if service_menu; then fail "$core_file menu must not report unknown restart status as success"; fi
+    if menu_output=$(service_menu 2>&1); then fail "$core_file menu must not report unknown restart status as success"; fi
     [[ $menu_output == *'无法确认 sing-box 当前状态'* && $menu_output == *'journalctl -u sing-box.service'* ]] || fail "$core_file menu explains unknown state and logs: $menu_output"
     [[ $menu_output != *'重启服务成功'* ]] || fail "$core_file menu does not claim success for unknown state"
 
@@ -110,7 +111,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     service_action_status=0
     menu_output=
     : >"$service_calls_file"
-    main start || fail "$core_file CLI start should succeed without interaction"
+    menu_output=$(main start 2>&1) || fail "$core_file CLI start should succeed without interaction"
     [[ $(cat "$service_calls_file") == $'sing-box start\nsing-box status' ]] || fail "$core_file CLI waits for and verifies OpenRC start: $(cat "$service_calls_file")"
     [[ $menu_output == *'启动服务成功'* && $menu_output == *'运行中'* ]] || fail "$core_file CLI reports confirmed start: $menu_output"
 
@@ -120,7 +121,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     service_action_status=1
     menu_output=
     : >"$service_calls_file"
-    if main start; then fail "$core_file CLI must report OpenRC startup failure"; fi
+    if menu_output=$(main start 2>&1); then fail "$core_file CLI must report OpenRC startup failure"; fi
     [[ $menu_output == *'启动服务未达到目标状态'* && $menu_output == *'/var/log/sing-box/error.log'* ]] || fail "$core_file CLI points to OpenRC error log: $menu_output"
 
     service_state=active
@@ -128,7 +129,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     service_action_status=0
     menu_output=
     : >"$service_calls_file"
-    if main restart; then fail "$core_file CLI must report unknown OpenRC restart status"; fi
+    if menu_output=$(main restart 2>&1); then fail "$core_file CLI must report unknown OpenRC restart status"; fi
     [[ $menu_output == *'无法确认 sing-box 当前状态'* && $menu_output == *'/var/log/sing-box/error.log'* ]] || fail "$core_file CLI explains unknown OpenRC state and logs: $menu_output"
     [[ $menu_output != *'重启服务成功'* ]] || fail "$core_file CLI does not claim success for unknown OpenRC state"
 
@@ -140,7 +141,7 @@ for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
     service_action_status=0
     menu_output=
     : >"$service_calls_file"
-    main r caddy || fail "$core_file CLI preserves the restart caddy command"
+    menu_output=$(main r caddy 2>&1) || fail "$core_file CLI preserves the restart caddy command"
     [[ $(cat "$service_calls_file") == $'restart caddy\nis-active caddy' ]] || fail "$core_file CLI verifies Caddy restart: $(cat "$service_calls_file")"
     [[ $menu_output == *'重启服务成功'* && $menu_output == *'Caddy'* ]] || fail "$core_file CLI reports confirmed Caddy restart: $menu_output"
 done
