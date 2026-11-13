@@ -275,18 +275,66 @@ msg_ul() {
     echo -e "\e[4m$@\e[0m"
 }
 
+# Read interactive input. During a menu operation the operation subprocess exits
+# immediately on Ctrl+C so no later form step or business action can run.
+interactive_read() {
+    local previous_int status
+    if [[ ${is_interactive_operation:-0} != 1 ]]; then
+        builtin read "$@"
+        return
+    fi
+    interactive_input_active=1
+    previous_int=$(trap -p INT)
+    trap 'exit 130' INT
+    [[ $interactive_cancel_requested ]] && exit 130
+    builtin read "$@"
+    status=$?
+    interactive_input_active=
+    if [[ $previous_int ]]; then
+        eval "$previous_int"
+    else
+        trap - INT
+    fi
+    return "$status"
+}
+
+run_interactive_operation() {
+    local previous_int status
+    previous_int=$(trap -p INT)
+    trap ':' INT
+    is_interactive_operation=1
+    interactive_cancel_requested=
+    (
+        trap 'interactive_cancel_requested=1; [[ $interactive_input_active ]] && exit 130' INT
+        "$@"
+    )
+    status=$?
+    is_interactive_operation=
+    if [[ $status == 130 ]]; then
+        msg '\n已取消当前操作\n'
+        menu_pause
+    fi
+    if [[ $previous_int ]]; then
+        eval "$previous_int"
+    else
+        trap - INT
+    fi
+    [[ $status == 130 ]] && return 2
+    return "$status"
+}
+
 # pause
 pause() {
     echo
     echo -ne "按 $(_green Enter 回车键) 继续, 或按 $(_red Ctrl + C) 取消."
-    read -rs -d $'\n'
+    interactive_read -rs -d $'\n'
     echo
 }
 
 confirm_action() {
     local answer
     echo -ne "$1 [y/N]: "
-    read -r answer
+    interactive_read -r answer
     [[ ${answer,,} == y || ${answer,,} == yes ]]
 }
 
@@ -632,10 +680,10 @@ ask() {
     while :; do
         echo -ne $is_opt_input_msg
         if [[ $is_secret_input ]]; then
-            read -rs REPLY
+            interactive_read -rs REPLY
             echo
         else
-            read -r REPLY
+            interactive_read -r REPLY
         fi
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
         if [[ ! $is_tmp_list ]]; then
@@ -1905,7 +1953,7 @@ edit_node_outbound_mode() {
         else
             echo -ne "请输入 Shadowsocks 分享链接 (输入内容隐藏):"
         fi
-        IFS= read -rs is_outbound_ss_uri
+        IFS= interactive_read -rs is_outbound_ss_uri
         echo
         [[ $is_outbound_ss_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_ss_uri ]]; then
@@ -1927,7 +1975,7 @@ edit_node_outbound_mode() {
         else
             echo -ne "请输入 VLESS 分享链接 (输入内容隐藏):"
         fi
-        IFS= read -rs is_outbound_vless_uri
+        IFS= interactive_read -rs is_outbound_vless_uri
         echo
         [[ $is_outbound_vless_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_vless_uri ]]; then
@@ -3783,7 +3831,7 @@ change() {
         is_new_entry_addr=$3
         if [[ -z $is_new_entry_addr ]]; then
             echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
-            read -r is_new_entry_addr
+            interactive_read -r is_new_entry_addr
         fi
         is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || err "入口地址更新失败: $is_new_entry_addr"
         msg "\n已更新入口地址为: $(_green $is_new_entry_addr)\n"
@@ -4442,7 +4490,7 @@ add() {
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
         echo -ne "输入节点名称 (回车自动生成 8 位名称):"
-        read -r is_custom_node_name
+        interactive_read -r is_custom_node_name
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
@@ -5073,7 +5121,7 @@ update() {
 
 menu_pause() {
     printf '\n按回车返回菜单。\n'
-    read -r
+    interactive_read -r
 }
 
 menu_select() {
@@ -5090,7 +5138,7 @@ menu_select() {
         else
             echo -ne "请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (q 退出):"
         fi
-        read -r REPLY || { unset is_tmp_list; return 1; }
+        interactive_read -r REPLY || { unset is_tmp_list; return 1; }
         if [[ $menu_has_parent ]]; then
             if [[ $REPLY == 0 ]]; then
                 export "$menu_var="
@@ -5152,25 +5200,25 @@ node_menu() {
         [[ $menu_status == 0 ]] || return 1
         case $REPLY in
         1)
-            ( add )
+            run_interactive_operation add
             action_status=$?
             [[ $action_status == 2 ]] || menu_pause
             ;;
         2)
             node_menu_empty_state && continue
-            ( change )
+            run_interactive_operation change
             action_status=$?
             [[ $action_status == 2 ]] || menu_pause
             ;;
         3)
             node_menu_empty_state && continue
-            ( info )
+            run_interactive_operation info
             action_status=$?
             [[ $action_status == 2 ]] || menu_pause
             ;;
         4)
             node_menu_empty_state && continue
-            ( is_select_delete_node=1 del )
+            is_select_delete_node=1 run_interactive_operation del
             action_status=$?
             [[ $action_status == 2 ]] || menu_pause
             ;;
@@ -5212,8 +5260,11 @@ service_menu() {
             ;;
         5)
             load log.sh
+            is_terminal_log_view=1
             log_set
-            menu_pause
+            action_status=$?
+            unset is_terminal_log_view
+            [[ $action_status == 130 ]] || menu_pause
             ;;
         esac
     done
@@ -5255,26 +5306,26 @@ system_tools_menu() {
         case $REPLY in
         1)
             load bbr.sh
-            _try_enable_bbr
-            menu_pause
+            run_interactive_operation _try_enable_bbr
+            [[ $? == 2 ]] || menu_pause
             ;;
         2)
             load dns.sh
-            dns_set
+            run_interactive_operation dns_set
             action_status=$?
             [[ $action_status == 2 ]] || menu_pause
             ;;
         3)
-            log_limit_set
-            menu_pause
+            run_interactive_operation log_limit_set
+            [[ $? == 2 ]] || menu_pause
             ;;
         4)
-            block_cn_menu_toggle
-            menu_pause
+            run_interactive_operation block_cn_menu_toggle
+            [[ $? == 2 ]] || menu_pause
             ;;
         5)
-            get reinstall
-            menu_pause
+            run_interactive_operation get reinstall
+            [[ $? == 2 ]] || menu_pause
             ;;
         esac
     done
@@ -5315,7 +5366,7 @@ is_main_menu() {
         5) system_tools_menu ;;
         6) msg "\n命令行帮助"; load help.sh; show_help ;;
         7) load help.sh; about ;;
-        8) uninstall ;;
+        8) run_interactive_operation uninstall ;;
         esac
     done
 }
@@ -5534,8 +5585,8 @@ relay_menu() {
         [[ $choice_status == 0 ]] || return 1
         case $REPLY in
         1)
-            relay_add
-            menu_pause
+            run_interactive_operation relay_add
+            [[ $? == 2 ]] || menu_pause
             ;;
         2)
             relay_list
@@ -5543,13 +5594,13 @@ relay_menu() {
             ;;
         3)
             relay_menu_empty_state && continue
-            relay_info
-            menu_pause
+            run_interactive_operation relay_info
+            [[ $? == 2 ]] || menu_pause
             ;;
         4)
             relay_menu_empty_state && continue
-            relay_delete
-            menu_pause
+            run_interactive_operation relay_delete
+            [[ $? == 2 ]] || menu_pause
             ;;
         esac
     done

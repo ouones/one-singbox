@@ -2,6 +2,10 @@
 set -o pipefail
 
 repo_root=$(cd "$(dirname "$0")" && pwd)
+
+interactive_read() { builtin read "$@"; }
+run_interactive_operation() { "$@"; }
+export -f interactive_read run_interactive_operation
 service_calls_file=$(mktemp)
 trap 'rm -f "$service_calls_file"' EXIT
 

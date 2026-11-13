@@ -137,7 +137,7 @@ log_limit_set() {
     msg "\n当前日志占用上限: $current MB (默认上限 200 MB)"
     while :; do
         msg "输入日志上限 (大于 0 的整数，单位 MB；回车保留当前值):"
-        IFS= read -r value || return
+        IFS= interactive_read -r value || return
         [[ ! $value ]] && return 0
         if log_limit_valid "$value"; then
             break
@@ -180,6 +180,22 @@ is_log_level_list=(
     none
     del
 )
+interactive_log_tail() {
+    local log_file=$1 tail_pid status interrupted=
+    tail -f "$log_file" &
+    tail_pid=$!
+    trap 'interactive_log_cancel_requested=1; kill -TERM "$tail_pid" 2>/dev/null' INT
+    if [[ $interactive_log_cancel_requested ]]; then
+        interrupted=1
+        kill -TERM "$tail_pid" 2>/dev/null
+    fi
+    wait "$tail_pid"
+    status=$?
+    wait "$tail_pid" 2>/dev/null || :
+    [[ $interrupted ]] && return 130
+    return "$status"
+}
+
 log_set() {
     if [[ $1 ]]; then
         for v in ${is_log_level_list[@]}; do
@@ -213,8 +229,24 @@ log_set() {
         [[ $1 != 'del' ]] && msg "\n已更新 Log 设定为: $(_green $is_log_level_use)\n"
     else
         if [[ -f $is_log_dir/access.log ]]; then
-            msg "\n 按 $(_green Ctrl+C) 退出\n"
-            tail -f $is_log_dir/access.log
+            if [[ $is_terminal_log_view ]]; then
+                local previous_int status
+                previous_int=$(trap -p INT)
+                interactive_log_cancel_requested=
+                trap 'interactive_log_cancel_requested=1' INT
+                msg "\n 按 $(_green Ctrl+C) 返回内核管理\n"
+                interactive_log_tail "$is_log_dir/access.log"
+                status=$?
+                if [[ $previous_int ]]; then
+                    eval "$previous_int"
+                else
+                    trap - INT
+                fi
+                return "$status"
+            else
+                msg "\n 按 $(_green Ctrl+C) 退出\n"
+                tail -f $is_log_dir/access.log
+            fi
         else
             err "无法找到 log 文件."
         fi
