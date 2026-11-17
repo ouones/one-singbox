@@ -1321,7 +1321,15 @@ render_runtime_node_outbound_modes() {
             ((direct_managed_tags | index($tag)) != null)
             or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
         def is_broad_direct_rule:
-            .outbound == "direct" and ((keys - ["action","outbound"]) | length) == 0;
+            .outbound == "direct" and (
+                ((keys - ["action","outbound"]) | length) == 0
+                or (
+                    ((keys - ["action","outbound","inbound"]) | length) == 0
+                    and ((.inbound | type) == "array")
+                    and ((.inbound | length) > 0)
+                    and (.inbound | any(.[]; . as $tag | ($managed_inbounds | index($tag)) != null))
+                )
+            );
         def is_managed_whitelist_rule:
             (is_broad_direct_rule | not) and (
                 . as $rule |
