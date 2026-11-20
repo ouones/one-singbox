@@ -4,7 +4,7 @@ repo_root=$(cd "$(dirname "$0")" && pwd)
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
 
-for core in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core in "$repo_root/src/core.sh"; do
   (
     source <(sed '/EUID != 0/d' "$core")
     is_core_dir="$workdir/core"

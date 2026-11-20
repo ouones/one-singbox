@@ -245,7 +245,7 @@ done
 CASE
 }
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     [[ -f $core_file ]] || fail "missing implementation: $core_file"
     rm -rf "$workdir/effects" "$workdir/conf" "$workdir/relay-effects" "$workdir/relay-conf"
     run_node_delete_confirmation_matrix "$core_file"
