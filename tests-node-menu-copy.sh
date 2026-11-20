@@ -2,7 +2,7 @@
 set -o pipefail
 repo_root=$(cd "$(dirname "$0")" && pwd)
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)
@@ -58,7 +58,7 @@ node_menu >"$case_dir/ss-output" 2>&1 <<'INPUT'
 1
 8
 32002
-
+1
 
 ss-node
 
@@ -100,7 +100,7 @@ outbound_output=$(cat "$case_dir/outbound-output")
 CASE
 done
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 fail() { echo "FAIL($CORE_FILE): $*"; exit 1; }
@@ -116,7 +116,7 @@ done
 CASE
 done
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)
@@ -147,7 +147,7 @@ direct_output=$(cat "$case_dir/direct-output")
 CASE
 done
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)
@@ -193,7 +193,7 @@ mismatch_output=$(cat "$case_dir/vless-no-reuse")
 CASE
 done
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)

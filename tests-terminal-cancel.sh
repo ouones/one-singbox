@@ -246,7 +246,7 @@ esac
 HARNESS
 chmod +x "$harness"
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     [ -f "$core_file" ] || fail "missing implementation: $core_file"
 done
 
@@ -623,8 +623,7 @@ def verify(core_file):
     probe_timeout_cleanup(core_file)
 
 
-for core_file in (f"{repo_root}/core.sh", f"{repo_root}/src/core.sh"):
-    verify(core_file)
+verify(f"{repo_root}/src/core.sh")
 
 print("PASS: PTY Ctrl+C cancellation, system confirmations, started work, CLI SIGINT, free text, log return, main exit, timeout, and process-group cleanup")
 PY

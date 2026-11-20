@@ -1236,7 +1236,7 @@ status=$?
 CASE
 }
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     run_node_menu_navigation_case "$core_file"
     run_main_menu_navigation_case "$core_file"
     run_node_change_menu_return_case "$core_file"
