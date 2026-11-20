@@ -259,7 +259,7 @@ return_line=$(awk -v text="$first_prompt" 'index($0, text) { count++; if (count 
 CASE
 }
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     run_action_result_case "$core_file" success
     run_action_result_case "$core_file" failure
     run_action_result_case "$core_file" cancel

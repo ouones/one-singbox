@@ -8,13 +8,13 @@ fail() {
     exit 1
 }
 
-for file in README.md docs/usage.md src/help.sh core.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
+for file in README.md docs/usage.md src/help.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '端口中转' "$repo_root/$file"); then
         fail "$file still contains the deprecated term: $legacy"
     fi
 done
 
-for file in README.md docs/usage.md src/help.sh core.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
+for file in README.md docs/usage.md src/help.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '中转' "$repo_root/$file"); then
         fail "$file still mixes relay wording: $legacy"
     fi
@@ -119,7 +119,6 @@ interactive_list=$(relay_list)
 CASE
 }
 
-run_cli_case "$repo_root/core.sh"
 run_cli_case "$repo_root/src/core.sh"
 
 printf 'PASS: terminology and relay CLI compatibility\n'

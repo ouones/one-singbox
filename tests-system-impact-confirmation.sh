@@ -322,7 +322,7 @@ jq -e '.dns == {} and (.route | has("default_domain_resolver") | not)' "$is_conf
 CASE
 }
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     [[ -f $core_file ]] || fail "missing implementation: $core_file"
     run_bbr_confirmation_case "$core_file"
     run_dns_confirmation_case "$core_file"

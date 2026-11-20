@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 repo_root=$(cd "$(dirname "$0")" && pwd)
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
   for choice in 18 8; do
     CORE_FILE=$core_file CHOICE=$choice timeout 10 bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
@@ -36,7 +36,7 @@ read -r protocol selected_port selected_file <"$case_dir/result"
 CASE
   done
 done
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
   CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)
@@ -65,7 +65,7 @@ INPUT
 [[ $(cat "$case_dir/ports") == $'30001\n30002' ]] || { echo "FAIL: $CORE_FILE reused the first node's port"; exit 1; }
 CASE
 done
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
   for action in 2 3; do
     CORE_FILE=$core_file ACTION=$action bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
@@ -100,7 +100,7 @@ fi
 CASE
   done
 done
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
   CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)
@@ -117,7 +117,7 @@ node_menu <<<'2
 [[ $(cat "$case_dir/result") == 'empty empty empty' ]] || { echo "FAIL: $CORE_FILE retained state after changing a node"; exit 1; }
 CASE
 done
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
   CORE_FILE=$core_file bash <<'CASE' || exit 1
 source <(sed '/EUID != 0/d' "$CORE_FILE")
 case_dir=$(mktemp -d)

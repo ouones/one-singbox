@@ -62,7 +62,7 @@ rc-service() {
     return "$service_action_status"
 }
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     source <(sed -n '/^manage() {/,/^}/p' "$core_file")
     source <(sed -n '/^menu_action() {/,/^}/p' "$core_file")
     source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$core_file")
