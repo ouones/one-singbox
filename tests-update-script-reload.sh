@@ -252,6 +252,10 @@ version) printf 'sing-box version 1.14.4\n' ;;
 *) exit 0 ;;
 esac
 FAKE_CORE
+    cat >"$case_dir/bin/caddy" <<'FAKE_CADDY'
+#!/usr/bin/env bash
+printf 'v2.7.6\n'
+FAKE_CADDY
     cat >"$case_dir/bin/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$ENTRY_SERVICE_LOG"
@@ -263,7 +267,7 @@ is-active)
 esac
 exit 0
 FAKE_SYSTEMCTL
-    chmod +x "$root/etc/sing-box/bin/sing-box" "$case_dir/bin/systemctl" "$entry"
+    chmod +x "$root/etc/sing-box/bin/sing-box" "$case_dir/bin/caddy" "$case_dir/bin/systemctl" "$entry"
 
     case $scenario in
     success)
@@ -281,6 +285,16 @@ FAKE_SYSTEMCTL
     fi
     grep -Fq 'sing-box 1.14.4' "$output" \
         || fail "entry version command did not complete in the $scenario cleanup case: $(<"$output")"
+    if ! ENTRY_SERVICE_LOG="$service_log" PATH="$case_dir/bin:$PATH" bash "$entry" status >"$case_dir/status.out" 2>&1; then
+        fail "entry status command failed in the $scenario cleanup case: $(<"$case_dir/status.out")"
+    fi
+    grep -Fq '运行中' "$case_dir/status.out" \
+        || fail "entry status output did not report 运行中 in the $scenario cleanup case: $(<"$case_dir/status.out")"
+    if ! ENTRY_SERVICE_LOG="$service_log" PATH="$case_dir/bin:$PATH" bash "$entry" relay list >"$case_dir/relay-list.out" 2>&1; then
+        fail "entry relay list command failed in the $scenario cleanup case: $(<"$case_dir/relay-list.out")"
+    fi
+    grep -Fq '端口转发' "$case_dir/relay-list.out" \
+        || fail "entry relay list output did not use 端口转发 in the $scenario cleanup case: $(<"$case_dir/relay-list.out")"
     ! grep -Fq '配置迁移失败' "$output" \
         || fail "entry cleanup was reported as a config migration failure in the $scenario case: $(<"$output")"
     ! grep -Eq '^(restart|reload|start|stop|enable|disable)( |$)' "$service_log" \

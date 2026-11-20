@@ -59,6 +59,7 @@ jobs:
           bash tests-update-script-reload.sh
           bash tests-block-cn.sh
           bash tests-skill-inventory.sh
+          bash tests-terminology.sh
 
   build-test-package:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-test-package'
@@ -87,6 +88,7 @@ jobs:
           bash tests-update-script-reload.sh
           bash tests-block-cn.sh
           bash tests-skill-inventory.sh
+          bash tests-terminology.sh
       - name: read and validate delivery version
         run: |
           set -euo pipefail
@@ -114,8 +116,7 @@ jobs:
             echo "Test package is missing src/core.sh." >&2
             exit 1
           fi
-          legacy_root="core".sh
-          if grep -Fxq "$legacy_root" <<< "$members"; then
+          if grep -Fxq 'core.sh' <<< "$members"; then
             echo "Test package must not contain the removed root management script." >&2
             exit 1
           fi
@@ -135,7 +136,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-test-package
-          path: .release-artifacts/code.tar.gz
+          path: |
+            .release-artifacts/code.tar.gz
+            .release-artifacts/code.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -174,8 +177,20 @@ jobs:
         run: |
           set -euo pipefail
           archive=.release-artifacts/code.tar.gz
+          checksum_file=.release-artifacts/code.tar.gz.sha256
           if [[ ! -f "$archive" ]]; then
             echo "release-test-package did not contain the code.tar.gz asset." >&2
+            exit 1
+          fi
+          if [[ ! -f "$checksum_file" ]]; then
+            echo "release-test-package did not contain the code.tar.gz.sha256 asset." >&2
+            exit 1
+          fi
+          recorded_sha256="$(cut -d ' ' -f1 "$checksum_file")"
+          if [[ "$recorded_sha256" != "$PACKAGE_SHA256" ]]; then
+            echo "Recorded package SHA-256 does not match the package_sha256 input; refusing to publish." >&2
+            echo "expected: ${PACKAGE_SHA256}" >&2
+            echo "recorded: ${recorded_sha256}" >&2
             exit 1
           fi
           actual_sha256="$(sha256sum "$archive" | cut -d ' ' -f1)"
@@ -183,6 +198,29 @@ jobs:
             echo "Package SHA-256 mismatch; refusing to publish." >&2
             echo "expected: ${PACKAGE_SHA256}" >&2
             echo "actual:   ${actual_sha256}" >&2
+            exit 1
+          fi
+          run_json="$(gh run view "$PACKAGE_RUN_ID" --json headSha,headBranch,conclusion,status)"
+          run_conclusion="$(jq -r '.conclusion' <<<"$run_json")"
+          run_status="$(jq -r '.status' <<<"$run_json")"
+          head_sha="$(jq -r '.headSha' <<<"$run_json")"
+          head_branch="$(jq -r '.headBranch' <<<"$run_json")"
+          if [[ "$run_conclusion" != "success" ]]; then
+            echo "Package build run ${PACKAGE_RUN_ID} did not succeed (status: ${run_status}, conclusion: ${run_conclusion}); refusing to publish." >&2
+            exit 1
+          fi
+          if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Package build run ${PACKAGE_RUN_ID} did not report a valid head SHA: ${head_sha:-<empty>}" >&2
+            exit 1
+          fi
+          build_tree_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${head_sha}" --jq .tree.sha)"
+          checkout_tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          echo "build_head_sha=${head_sha}"
+          echo "build_head_branch=${head_branch}"
+          echo "build_tree_sha=${build_tree_sha}"
+          echo "checkout_tree_sha=${checkout_tree_sha}"
+          if [[ "$build_tree_sha" != "$checkout_tree_sha" ]]; then
+            echo "Package build run tree ${build_tree_sha} does not match checkout tree ${checkout_tree_sha}; refusing to publish." >&2
             exit 1
           fi
           package_version="$(python3 - "$archive" <<'PY'
@@ -194,7 +232,7 @@ jobs:
               sing_box = package.extractfile("sing-box.sh").read().decode("utf-8")
           if "src/core.sh" not in members:
               raise SystemExit("verified package is missing src/core.sh")
-          if "core" + ".sh" in members:
+          if "core.sh" in members:
               raise SystemExit("verified package must not contain the removed root management script")
           for line in sing_box.splitlines():
               if line.startswith("is_sh_ver="):
@@ -223,14 +261,13 @@ jobs:
       - name: prepare release notes
         run: |
           set -euo pipefail
-          legacy_root="core".sh
           {
             echo "release_body<<RELEASE_BODY"
             echo "## one-singbox ${delivery_version}"
             echo
-            echo "- 仓库与 Release 包不再包含根路径 \`${legacy_root}\`；one-singbox 管理脚本的唯一源文件为 \`src/core.sh\`。"
-            echo "- 直接引用根路径 \`${legacy_root}\` 的非官方集成请改用唯一管理脚本源 \`src/core.sh\`。"
-            echo "- 旧安装会在更新过程中，或更新后的第一次 \`sb\` / \`sing-box\` 命令时清理历史根 \`${legacy_root}\`。"
+            echo "- 仓库与 Release 包不再包含根路径 \`core.sh\`；one-singbox 管理脚本的唯一源文件为 \`src/core.sh\`。"
+            echo "- 直接引用根路径 \`core.sh\` 的非官方集成请改用唯一管理脚本源 \`src/core.sh\`。"
+            echo "- 旧安装会在更新过程中，或更新后的第一次 \`sb\` / \`sing-box\` 命令时清理历史根 \`core.sh\`。"
             echo "- 清理失败只会警告，不阻断管理功能，也不会重启 sing-box 服务。"
             echo "RELEASE_BODY"
           } >> "$GITHUB_ENV"
@@ -267,7 +304,7 @@ jobs:
               members = package.getnames()
           if "src/core.sh" not in members:
               raise SystemExit("published asset is missing src/core.sh")
-          if "core" + ".sh" in members:
+          if "core.sh" in members:
               raise SystemExit("published asset must not contain the removed root management script")
           PY
           {

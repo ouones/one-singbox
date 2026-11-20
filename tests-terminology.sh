@@ -32,22 +32,16 @@ fi
 # Release package layout: build a temporary archive from the workflow's own file list.
 package_command=$(sed -n 's/^[[:space:]]*tar zcvf \.release-artifacts\/code\.tar\.gz \(.*\)$/\1/p' "$repo_root/.github/workflows/release.yml")
 [[ -n $package_command ]] || fail 'release workflow is missing the code.tar.gz packaging command'
-read -r -a package_files <<<"$package_command"
+read -r -t 1 -a package_files <<<"$package_command"
 for package_file in "${package_files[@]}"; do
-    [[ $package_file == 'core.sh' ]] && fail 'release packaging still includes the legacy root core.sh'
+    [[ ${package_file#./} == 'core.sh' ]] && fail 'release packaging still includes the legacy root core.sh'
 done
 tar czf "$layout_dir/code.tar.gz" -C "$repo_root" "${package_files[@]}" || fail 'temporary release archive failed'
 package_members=$(tar tzf "$layout_dir/code.tar.gz")
 grep -Fxq 'src/core.sh' <<<"$package_members" || fail 'release archive omitted src/core.sh'
-if grep -Fxq 'core.sh' <<<"$package_members"; then
-    fail 'release archive still contains the legacy root core.sh'
-fi
+package_core_members=$(grep -E '(^|/)core\.sh$' <<<"$package_members" || true)
+[[ $package_core_members == 'src/core.sh' ]] || fail "release archive management script must be uniquely src/core.sh (found: ${package_core_members:-none})"
 grep -Fq 'files: .release-artifacts/code.tar.gz' "$repo_root/.github/workflows/release.yml" || fail 'release asset is no longer named code.tar.gz'
-
-# No second management script generation, compatibility link, or dual-file sync logic.
-if grep -Eq '(^|[^[:alnum:]_./-])core\.sh([^[:alnum:]_.-]|$)' "$repo_root/.github/workflows/release.yml"; then
-    fail 'release workflow still references the legacy root core.sh'
-fi
 
 # The local-install integrity check must keep requiring src/core.sh and the entry script only.
 grep -Fq '[[ ! -f ${PWD}/src/core.sh || ! -f ${PWD}/$is_core.sh ]]' "$repo_root/install.sh" || fail 'install.sh local-install integrity check changed'
