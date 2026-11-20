@@ -213,16 +213,17 @@ jobs:
             echo "Package build run ${PACKAGE_RUN_ID} did not report a valid head SHA: ${head_sha:-<empty>}" >&2
             exit 1
           fi
-          build_tree_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${head_sha}" --jq .tree.sha)"
-          checkout_tree_sha="$(git rev-parse 'HEAD^{tree}')"
-          echo "build_head_sha=${head_sha}"
-          echo "build_head_branch=${head_branch}"
-          echo "build_tree_sha=${build_tree_sha}"
-          echo "checkout_tree_sha=${checkout_tree_sha}"
-          if [[ "$build_tree_sha" != "$checkout_tree_sha" ]]; then
-            echo "Package build run tree ${build_tree_sha} does not match checkout tree ${checkout_tree_sha}; refusing to publish." >&2
+          if ! git fetch --no-tags origin "$head_sha"; then
+            echo "Unable to fetch package build commit ${head_sha}; refusing to publish." >&2
             exit 1
           fi
+          echo "build_head_sha=${head_sha}"
+          echo "build_head_branch=${head_branch}"
+          if ! git diff --quiet "$head_sha" HEAD -- install.sh sing-box.sh src LICENSE README.md docs/usage.md assets/readme; then
+            echo "Packaged inputs in checkout differ from package build commit ${head_sha}; refusing to publish." >&2
+            exit 1
+          fi
+          echo "packaged_inputs=match"
           package_version="$(python3 - "$archive" <<'PY'
           import sys
           import tarfile
