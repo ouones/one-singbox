@@ -832,6 +832,5 @@ CASE
 }
 
 run_test_suite "$repo_root/src/core.sh" || fail "test suite failed for src/core.sh"
-run_test_suite "$repo_root/core.sh" || fail "test suite failed for core.sh"
 
 echo "PASS: tests-block-cn.sh completed successfully."

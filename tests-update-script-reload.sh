@@ -212,7 +212,6 @@ CASE
 }
 
 run_test_suite "$repo_root/src/core.sh" || fail "test suite failed for src/core.sh"
-run_test_suite "$repo_root/core.sh" || fail "test suite failed for core.sh"
 
 # The real entry must clean the legacy root core.sh copy without touching anything else.
 run_entry_cleanup_case() {

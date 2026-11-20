@@ -275,7 +275,6 @@ unset TEST_ACTIVE_PORT
 CASE
 }
 
-run_core_case "$repo_root/core.sh"
 run_core_case "$repo_root/src/core.sh"
 
 # 14. documentation checks
