@@ -102,6 +102,11 @@ fi
 is_http_port=80
 is_https_port=443
 
+# 清理旧版本遗留在安装目录根部的管理脚本副本。
+if [[ -e $is_sh_dir/core.sh ]]; then
+    rm -f "$is_sh_dir/core.sh" 2>/dev/null || warn "无法删除历史根管理脚本: $is_sh_dir/core.sh，该文件仍残留在安装目录中，可能因内容过期而干扰问题排查；请手动删除。"
+fi
+
 # core ver
 is_core_ver=$($is_core_bin version | head -n1 | cut -d " " -f3)
 
