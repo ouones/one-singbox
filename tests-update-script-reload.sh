@@ -226,6 +226,7 @@ run_entry_cleanup_case() {
     mkdir -p "$sh_dir/src" "$root/etc/sing-box/bin" "$root/etc/sing-box/conf" \
         "$root/usr/local/bin" "$root/var/log/sing-box" "$case_dir/bin"
     cp -R "$repo_root/src/." "$sh_dir/src/"
+    sed -i '/EUID != 0/d' "$sh_dir/src/core.sh"
     cp "$repo_root/sing-box.sh" "$entry"
     sed -i "s|^\. /etc/sing-box/sh/src/init.sh$|. $sh_dir/src/init.sh|" "$entry"
     grep -Fq ". $sh_dir/src/init.sh" "$entry" || fail "test fixture did not rewrite the entry script path"
