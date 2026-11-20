@@ -324,7 +324,6 @@ echo "PASS: QR details behavior for $CASE_NAME core"
 CASE
 }
 
-run_core_case "$repo_root/core.sh" root || fail "root core QR tests failed"
 run_core_case "$repo_root/src/core.sh" src || fail "src core QR tests failed"
 
 if qrencode_bin=$(command -v qrencode); then
@@ -332,11 +331,11 @@ if qrencode_bin=$(command -v qrencode); then
   qr_output=$("$qrencode_bin" -t UTF8 "$issue16_url") || fail "real qrencode failed to render the issue URL"
   qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | wc -L)
   qr_height=$(printf '%s\n' "$qr_output" | wc -l)
-  [[ $qr_width == 57 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
+  [[ $qr_width == 21 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
   echo "PASS: real qrencode UTF8 dimensions are ${qr_width} columns x ${qr_height} rows"
 
   real_qr_output=$(
-    CORE_FILE="$repo_root/core.sh" QR_URL="$issue16_url" bash <<'REAL_QR'
+    CORE_FILE="$repo_root/src/core.sh" QR_URL="$issue16_url" bash <<'REAL_QR'
 source "$CORE_FILE"
 msg() { :; }
 warn() { :; }

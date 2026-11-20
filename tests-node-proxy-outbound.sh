@@ -60,9 +60,8 @@ restart)
     [[ -f $RESTART_COUNT_FILE ]] && read -r count <"$RESTART_COUNT_FILE"
     count=$((count + 1))
     printf '%s\n' "$count" >"$RESTART_COUNT_FILE"
-    if [[ $count == 1 && ${RESTART_MOUNT_CONFIG:-} ]]; then
-        mount --bind "$RESTART_MOUNT_SOURCE" "$RESTART_MOUNT_CONFIG" || exit 1
-        mount -o remount,bind,ro "$RESTART_MOUNT_CONFIG" || exit 1
+    if [[ $count == 1 && ${RESTART_BLOCK_MARKER:-} ]]; then
+        : >"$RESTART_BLOCK_MARKER"
         exit 1
     fi
     [[ ,${RESTART_FAIL_AT:-0}, != *,$count,* ]] || exit 1
@@ -882,9 +881,8 @@ no-files-restart-fail)
 config-install-failure)
     cp "$meta_file" "$case_dir/meta.before"
     cp "$is_config_json" "$case_dir/config.before"
-    cp "$is_config_json" "$case_dir/config.mount"
     export TEST_CASE_DIR="$case_dir" TEST_SS_URI="$ss_uri"
-    unshare --mount --propagation private bash <<'READONLY'
+    bash <<'READONLY'
 set -o pipefail
 fail() {
     echo "FAIL(${CORE_FILE}): $1"
@@ -901,8 +899,14 @@ is_dont_show_info=1
 is_no_manage_msg=1
 export ip=203.0.113.10 is_dont_get_ip=1
 meta_file="$is_conf_dir/.quan-meta/node-one.json.meta.json"
-mount --bind "$case_dir/config.mount" "$is_config_json" || fail "could not bind mount the public config"
-mount -o remount,bind,ro "$is_config_json" || fail "could not make the public config mount read-only"
+# Simulate an unwritable public config without requiring mount namespace privileges.
+mv() {
+    local destination=${@: -1}
+    if [[ $destination == "$is_config_json" ]]; then
+        return 1
+    fi
+    command mv "$@"
+}
 if change_output=$(printf '5\n%s\n' "$TEST_SS_URI" | change node-one.json outbound 2>&1); then
     fail "public config replacement failure should fail the menu operation"
 fi
@@ -910,15 +914,15 @@ cmp -s "$case_dir/meta.before" "$meta_file" || fail "public config replacement f
 cmp -s "$case_dir/config.before" "$is_config_json" || fail "public config replacement failure must preserve the public config"
 [[ $(grep -c '^restart ' "$SERVICE_LOG" 2>/dev/null || true) == 0 ]] || fail "public config replacement failure must not restart the service"
 READONLY
-    [[ $? == 0 ]] || fail "read-only bind replacement failure test did not complete"
+    [[ $? == 0 ]] || fail "public config replacement failure test did not complete"
     exit 0
     ;;
 file-restore-failure)
     cp "$is_config_json" "$case_dir/config.before"
-    cp "$is_config_json" "$case_dir/config.mount"
     export TEST_CASE_DIR="$case_dir" TEST_SS_URI="$ss_uri"
-    export RESTART_MOUNT_CONFIG="$is_config_json" RESTART_MOUNT_SOURCE="$case_dir/config.mount"
-    unshare --mount --propagation private bash <<'RESTOREFAIL'
+    export RESTART_BLOCK_MARKER="$case_dir/config-restore-block"
+    rm -f "$RESTART_BLOCK_MARKER"
+    bash <<'RESTOREFAIL'
 set -o pipefail
 fail() {
     echo "FAIL(${CORE_FILE}): $1"
@@ -935,6 +939,14 @@ is_dont_show_info=1
 is_no_manage_msg=1
 export ip=203.0.113.10 is_dont_get_ip=1
 meta_file="$is_conf_dir/.quan-meta/node-one.json.meta.json"
+# Fail the config restore only after the first restart has already been attempted.
+mv() {
+    local destination=${@: -1}
+    if [[ $destination == "$is_config_json" && -f $RESTART_BLOCK_MARKER ]]; then
+        return 1
+    fi
+    command mv "$@"
+}
 cp "$meta_file" "$case_dir/meta.before"
 if change_output=$(printf '5\n%s\n' "$TEST_SS_URI" | change node-one.json outbound 2>&1); then
     fail "file restore failure should fail the menu operation"
@@ -1509,18 +1521,13 @@ CASE
 }
 
 if [[ ${1:-} ]]; then
-    run_core_case "$repo_root/core.sh" "$1" || exit 1
     run_core_case "$repo_root/src/core.sh" "$1" || exit 1
     echo "PASS: $1"
     exit 0
 fi
 
-run_core_case "$repo_root/core.sh" happy || exit 1
+run_core_case "$repo_root/src/core.sh" happy || exit 1
 for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback; do
-    echo "[core.sh: $scenario]"
-    run_core_case "$repo_root/core.sh" "$scenario" || exit 1
-done
-for scenario in happy parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback; do
     echo "[src/core.sh: $scenario]"
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done

@@ -212,6 +212,128 @@ CASE
 }
 
 run_test_suite "$repo_root/src/core.sh" || fail "test suite failed for src/core.sh"
-run_test_suite "$repo_root/core.sh" || fail "test suite failed for core.sh"
+
+# The real entry must clean the legacy root core.sh copy without touching anything else.
+run_entry_cleanup_case() {
+    local scenario=$1
+    local case_dir="$workdir/entry-$scenario"
+    local root="$case_dir/root"
+    local sh_dir="$root/etc/sing-box/sh"
+    local entry="$sh_dir/sing-box.sh"
+    local service_log="$case_dir/services.log"
+    local output="$case_dir/entry.out"
+
+    mkdir -p "$sh_dir/src" "$root/etc/sing-box/bin" "$root/etc/sing-box/conf" \
+        "$root/usr/local/bin" "$root/var/log/sing-box" "$case_dir/bin"
+    cp -R "$repo_root/src/." "$sh_dir/src/"
+    sed -i '/EUID != 0/d' "$sh_dir/src/core.sh"
+    cp "$repo_root/sing-box.sh" "$entry"
+    sed -i "s|^\. /etc/sing-box/sh/src/init.sh$|. $sh_dir/src/init.sh|" "$entry"
+    grep -Fq ". $sh_dir/src/init.sh" "$entry" || fail "test fixture did not rewrite the entry script path"
+    sed -i \
+        -e "s|^is_core_dir=/etc/|is_core_dir=$root/etc/|" \
+        -e "s|^is_log_dir=/var/log/|is_log_dir=$root/var/log/|" \
+        -e "s|^is_sh_bin=/usr/local/bin/|is_sh_bin=$root/usr/local/bin/|" \
+        "$sh_dir/src/init.sh"
+    grep -Fq "is_core_dir=$root/etc/" "$sh_dir/src/init.sh" || fail "test fixture did not rewrite init.sh paths"
+
+    printf 'tls certificate\n' >"$root/etc/sing-box/bin/tls.cer"
+    printf 'tls key\n' >"$root/etc/sing-box/bin/tls.key"
+    printf '200\n' >"$root/etc/sing-box/log-limit-mb"
+    printf '{"keep":true}\n' >"$root/etc/sing-box/config.json"
+    printf '{"node":"keep"}\n' >"$root/etc/sing-box/conf/node.json"
+    printf 'log line\n' >"$root/var/log/sing-box/access.log"
+    printf 'sibling\n' >"$sh_dir/core.sh.bak"
+
+    cat >"$root/etc/sing-box/bin/sing-box" <<'FAKE_CORE'
+#!/usr/bin/env bash
+case $1 in
+version) printf 'sing-box version 1.14.4\n' ;;
+*) exit 0 ;;
+esac
+FAKE_CORE
+    cat >"$case_dir/bin/caddy" <<'FAKE_CADDY'
+#!/usr/bin/env bash
+printf 'v2.7.6\n'
+FAKE_CADDY
+    cat >"$case_dir/bin/systemctl" <<'FAKE_SYSTEMCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$ENTRY_SERVICE_LOG"
+case $1 in
+is-active)
+    [[ $2 == --quiet ]] && exit 0
+    printf 'active\n'
+    ;;
+esac
+exit 0
+FAKE_SYSTEMCTL
+    chmod +x "$root/etc/sing-box/bin/sing-box" "$case_dir/bin/caddy" "$case_dir/bin/systemctl" "$entry"
+
+    case $scenario in
+    success)
+        printf 'legacy root script\n' >"$sh_dir/core.sh"
+        ;;
+    failure)
+        mkdir -p "$sh_dir/core.sh"
+        printf 'cannot remove\n' >"$sh_dir/core.sh/keep"
+        ;;
+    esac
+
+    : >"$service_log"
+    if ! ENTRY_SERVICE_LOG="$service_log" PATH="$case_dir/bin:$PATH" bash "$entry" version >"$output" 2>&1; then
+        fail "entry version command failed in the $scenario cleanup case: $(<"$output")"
+    fi
+    grep -Fq 'sing-box 1.14.4' "$output" \
+        || fail "entry version command did not complete in the $scenario cleanup case: $(<"$output")"
+    if ! ENTRY_SERVICE_LOG="$service_log" PATH="$case_dir/bin:$PATH" bash "$entry" status >"$case_dir/status.out" 2>&1; then
+        fail "entry status command failed in the $scenario cleanup case: $(<"$case_dir/status.out")"
+    fi
+    grep -Fq '运行中' "$case_dir/status.out" \
+        || fail "entry status output did not report 运行中 in the $scenario cleanup case: $(<"$case_dir/status.out")"
+    if ! ENTRY_SERVICE_LOG="$service_log" PATH="$case_dir/bin:$PATH" bash "$entry" relay list >"$case_dir/relay-list.out" 2>&1; then
+        fail "entry relay list command failed in the $scenario cleanup case: $(<"$case_dir/relay-list.out")"
+    fi
+    grep -Fq '端口转发' "$case_dir/relay-list.out" \
+        || fail "entry relay list output did not use 端口转发 in the $scenario cleanup case: $(<"$case_dir/relay-list.out")"
+    ! grep -Fq '配置迁移失败' "$output" \
+        || fail "entry cleanup was reported as a config migration failure in the $scenario case: $(<"$output")"
+    ! grep -Eq '^(restart|reload|start|stop|enable|disable)( |$)' "$service_log" \
+        || fail "entry cleanup changed the service state in the $scenario case: $(<"$service_log")"
+    [[ $(<"$root/etc/sing-box/bin/tls.cer") == 'tls certificate' ]] \
+        || fail "entry cleanup changed the TLS certificate in the $scenario case"
+    [[ $(<"$root/etc/sing-box/bin/tls.key") == 'tls key' ]] \
+        || fail "entry cleanup changed the TLS key in the $scenario case"
+    [[ $(<"$root/etc/sing-box/config.json") == '{"keep":true}' ]] \
+        || fail "entry cleanup changed config.json in the $scenario case"
+    [[ $(<"$root/etc/sing-box/conf/node.json") == '{"node":"keep"}' ]] \
+        || fail "entry cleanup changed node configuration in the $scenario case"
+    [[ $(<"$root/var/log/sing-box/access.log") == 'log line' ]] \
+        || fail "entry cleanup changed the log in the $scenario case"
+    [[ -f $sh_dir/src/core.sh ]] || fail "entry cleanup removed the managed core script in the $scenario case"
+    [[ -f $sh_dir/core.sh.bak ]] || fail "entry cleanup removed a sibling file in the $scenario case"
+
+    case $scenario in
+    success)
+        [[ ! -e $sh_dir/core.sh ]] || fail "entry did not remove the legacy root core.sh"
+        ;;
+    missing)
+        [[ ! -e $sh_dir/core.sh ]] || fail "missing-file fixture unexpectedly appeared"
+        ! grep -Fq '警告' "$output" \
+            || fail "entry warned when no legacy root core.sh existed: $(<"$output")"
+        ;;
+    failure)
+        [[ -d $sh_dir/core.sh ]] || fail "failure fixture changed unexpectedly"
+        grep -Fq '警告' "$output" || fail "cleanup failure did not use the warning channel: $(<"$output")"
+        grep -Fq "$sh_dir/core.sh" "$output" || fail "cleanup failure warning omitted the file path: $(<"$output")"
+        grep -Eq '残留|手动删除' "$output" \
+            || fail "cleanup failure warning omitted the residual impact: $(<"$output")"
+        ;;
+    esac
+    echo "PASS: entry cleanup $scenario"
+}
+
+run_entry_cleanup_case success || fail "legacy root core.sh cleanup failed"
+run_entry_cleanup_case missing || fail "missing legacy root core.sh handling failed"
+run_entry_cleanup_case failure || fail "legacy root core.sh cleanup failure handling failed"
 
 echo 'PASS: tests-update-script-reload.sh completed successfully.'

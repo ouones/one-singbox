@@ -11,6 +11,10 @@ _Avoid_：将项目称为 sing-box 内核，或使用容易被理解为 Web 后�
 **sing-box 内核**：
 由管理工具安装和管理的 sing-box 程序，与 one-singbox 管理脚本区分。
 
+**one-singbox 管理脚本**：
+提供 one-singbox 安装与终端管理功能的脚本，与 sing-box 内核区分。
+_Avoid_：用 sing-box 内核、内核脚本指代本概念
+
 **端口转发**：
 将本机监听端口上的 TCP/UDP 流量转发到固定目标地址和端口的用户功能。
 _Avoid_：端口中转（用户可见文案中）

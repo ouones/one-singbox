@@ -112,10 +112,10 @@ log_limit_remove
 [[ ! -e $workdir/init.d/sing-box-log-limit ]] || fail 'OpenRC uninstall cleanup'
 grep -qx 'del sing-box-log-limit default' "$workdir/service-calls" || fail 'OpenRC disable on uninstall'
 
-# Exercise the actual menu branches in both distributed core copies.
+# Exercise the actual menu branches in the single management script source.
 qrcode_dependency_checked() { return 0; }
 qrcode_dependency_install() { fail 'unexpected QR migration in isolated menu test'; }
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     source <(sed -n '/^service_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^core_status_read() {/,/^}/p' "$repo_root/src/init.sh")
     source <(sed -n '/^menu_select() {/,/^}/p' "$core_file")
@@ -245,7 +245,7 @@ if log_usage_read >/dev/null; then fail 'stat failure is not reported as zero us
 unset -f stat
 
 echo 200 >"$is_core_dir/log-limit-mb"
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
     is_log_dir="$workdir/usage-log"
     head -c 1048576 /dev/zero >"$is_log_dir/access.log"
     head -c 524288 /dev/zero >"$is_log_dir/error.log"

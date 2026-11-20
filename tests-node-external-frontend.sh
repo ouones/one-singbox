@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 repo_root=$(cd "$(dirname "$0")" && pwd)
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
-CORE_FILE=$core_file REPO_ROOT=$repo_root bash <<'CASE' || exit 1
+CORE_FILE="$repo_root/src/core.sh" REPO_ROOT=$repo_root bash <<'CASE' || exit 1
 set -o pipefail
 fail() { printf 'FAIL(%s): %s\n' "$CORE_FILE" "$*"; exit 1; }
 workdir=$(mktemp -d)
@@ -103,5 +102,4 @@ main del VLESS-REALITY-12346.json >/dev/null || fail 'delete'
 [[ -s $workdir/caddy/conf.d/caddy.example.conf ]] || fail 'Caddy site missing'
 flock -n "$is_core_dir/.frontend-state/lock" -c true || fail 'Caddy did not release shared lock'
 CASE
-done
 echo 'PASS: ordinary Reality lifecycle remains independent of external frontend'

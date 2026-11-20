@@ -140,8 +140,12 @@ grep -Fq 'apt-get install -y qrencode' "$workdir/install-missing.out" || fail "m
 
 # The release workflow archives all of src, including the shared module.
 archive=$workdir/code.tar.gz
-tar czf "$archive" -C "$repo_root" install.sh core.sh sing-box.sh src LICENSE README.md || fail "temporary release archive failed"
+tar czf "$archive" -C "$repo_root" install.sh sing-box.sh src LICENSE README.md || fail "temporary release archive failed"
 tar tzf "$archive" | grep -Fx 'src/qrcode-deps.sh' >/dev/null || fail "release archive omitted src/qrcode-deps.sh"
+tar tzf "$archive" | grep -Fx 'src/core.sh' >/dev/null || fail "release archive omitted src/core.sh"
+if tar tzf "$archive" | grep -Fx 'core.sh' >/dev/null; then
+  fail "release archive still contains the legacy root core.sh"
+fi
 
 # Install fixture uses the real install.sh flow while rewriting only fixed filesystem roots into a temp root.
 rewrite_paths() {
@@ -167,10 +171,10 @@ run_install_case() {
   local archive_dir="$case_dir/core"
   local core_archive="$case_dir/sing-box.tar.gz"
   mkdir -p "$app_dir" "$bin" "$archive_dir/sing-box-v1.14.0" "$root/usr/bin" "$root/root" "$root/usr/local/bin" "$root/lib/systemd/system" "$root/etc/init.d"
-  cp "$repo_root/install.sh" "$repo_root/core.sh" "$repo_root/sing-box.sh" "$repo_root/README.md" "$repo_root/LICENSE" "$app_dir/"
+  cp "$repo_root/install.sh" "$repo_root/sing-box.sh" "$repo_root/README.md" "$repo_root/LICENSE" "$app_dir/"
   cp -R "$repo_root/src" "$app_dir/src"
+  [[ ! -e $app_dir/core.sh ]] || fail "$case_name app directory still contains the legacy root core.sh"
   rewrite_paths "$app_dir/install.sh" "$root"
-  rewrite_paths "$app_dir/core.sh" "$root"
   rewrite_paths "$app_dir/src/core.sh" "$root"
   rewrite_paths "$app_dir/src/systemd.sh" "$root"
   rewrite_paths "$app_dir/src/log.sh" "$root"
@@ -303,6 +307,11 @@ NOOP
   fi
   # The existing installer exits with the status of its false "no error" condition; inspect its result and artifacts.
   [[ $(<"$case_dir/install.out") != *"安装过程出现错误"* ]] || fail "$case_name body install reported failure: $(cat "$case_dir/install.out")"
+  [[ -f $root/etc/sing-box/sh/src/core.sh ]] || fail "$case_name install did not place the management script under src/"
+  [[ ! -e $root/etc/sing-box/sh/core.sh ]] || fail "$case_name install kept a legacy root core.sh in the script directory"
+  if grep -Fq '无法删除历史根管理脚本' "$case_dir/install.out"; then
+    fail "$case_name install warned about a legacy root core.sh that never existed"
+  fi
   [[ -f $root/etc/sing-box/qrcode-dependency-checked ]] || fail "$case_name install did not write the checked marker"
   compgen -G "$root/etc/sing-box/conf/*.json" >/dev/null || fail "$case_name install did not create its first node"
   if [[ $mode == success ]]; then
@@ -324,7 +333,8 @@ run_install_case mandatory-failure fail 1
 
 update_workdir=$workdir/update
 update_root=$update_workdir/root
-update_core=$update_root/etc/sing-box/sh/core.sh
+update_core=$update_root/etc/sing-box/sh/src/core.sh
+update_legacy_core=$update_root/etc/sing-box/sh/core.sh
 update_runner=$update_workdir/run-update.sh
 update_archive=$update_workdir/code.tar.gz
 update_package_dir=$update_workdir/release
@@ -335,20 +345,29 @@ prepare_update_fixture() {
   mkdir -p "$update_root/etc/sing-box/bin" "$update_root/etc/sing-box/sh" \
     "$update_root/etc/sing-box/conf" "$update_root/usr/local/bin" \
     "$update_root/var/log/sing-box" "$update_package_dir"
-  cp "$repo_root/core.sh" "$update_core"
   cp -R "$repo_root/src" "$update_root/etc/sing-box/sh/src"
   rewrite_paths "$update_core" "$update_root"
+  rewrite_paths "$update_root/etc/sing-box/sh/src/init.sh" "$update_root"
+  rewrite_paths "$update_root/etc/sing-box/sh/src/log.sh" "$update_root"
+  # The old installation used to ship a root copy next to src/; simulate that legacy file explicitly.
+  printf 'legacy root script\n' >"$update_legacy_core"
 
   cat >"$update_root/etc/sing-box/bin/sing-box" <<'CORE'
 #!/usr/bin/env bash
-[[ $1 == version ]] && printf 'sing-box version 1.14.0\n'
+case $1 in
+  version) printf 'sing-box version 1.14.0\n' ;;
+  check) exit 0 ;;
+  *) exit 0 ;;
+esac
 CORE
-  cat >"$update_root/usr/local/bin/sing-box" <<'SCRIPT'
-#!/usr/bin/env bash
-exit 0
-SCRIPT
+  cp "$repo_root/sing-box.sh" "$update_root/usr/local/bin/sing-box"
+  sed -i "s|^\. /etc/sing-box/sh/src/init.sh$|. $update_root/etc/sing-box/sh/src/init.sh|" "$update_root/usr/local/bin/sing-box"
+  grep -Fq ". $update_root/etc/sing-box/sh/src/init.sh" "$update_root/usr/local/bin/sing-box" || fail "update fixture did not rewrite the installed entry path"
   cp "$update_root/usr/local/bin/sing-box" "$update_root/usr/local/bin/sb"
   chmod +x "$update_root/etc/sing-box/bin/sing-box" "$update_root/usr/local/bin/sing-box" "$update_root/usr/local/bin/sb"
+  printf 'tls certificate\n' >"$update_root/etc/sing-box/bin/tls.cer"
+  printf 'tls key\n' >"$update_root/etc/sing-box/bin/tls.key"
+  printf '%s\n' '{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"rule_set":[]},"http_clients":[{"tag":"direct-client","detour":"direct"}]}' >"$update_root/etc/sing-box/config.json"
   printf '%s\n' '{"keep":true}' >"$update_root/etc/sing-box/conf/keep.json"
   printf '100\n' >"$update_root/etc/sing-box/log-limit-mb"
   : >"$update_service_log"
@@ -425,7 +444,57 @@ run_active_update() {
   fi
 }
 
+run_update_entry_case() {
+  local scenario=$1
+  local output=$update_workdir/entry-$scenario.out
+  case $scenario in
+    missing)
+      rm -rf "$update_legacy_core"
+      ;;
+    failure)
+      rm -rf "$update_legacy_core"
+      mkdir -p "$update_legacy_core"
+      printf 'cannot remove\n' >"$update_legacy_core/keep"
+      ;;
+    *)
+      fail "unknown entry cleanup scenario: $scenario"
+      ;;
+  esac
+  : >"$update_service_log"
+  if ! QRCODE_TEST_SERVICE_LOG=$update_service_log \
+      PATH="$qrcode_test_bin:$PATH" bash "$update_root/usr/local/bin/sing-box" version >"$output" 2>&1; then
+    fail "installed entry version failed in the $scenario cleanup case: $(<"$output")"
+  fi
+  grep -Fq 'sing-box 1.14.0' "$output" || fail "installed entry did not complete in the $scenario cleanup case: $(<"$output")"
+  if grep -Fq '配置迁移失败' "$output"; then
+    fail "entry cleanup was reported as a config migration failure in the $scenario case: $(<"$output")"
+  fi
+  if grep -Eq '^(restart|reload|start|stop|enable|disable)( |$)' "$update_service_log"; then
+    fail "entry cleanup changed the service state in the $scenario case: $(<"$update_service_log")"
+  fi
+  case $scenario in
+    missing)
+      [[ ! -e $update_legacy_core ]] || fail "missing-file fixture unexpectedly appeared"
+      if grep -Fq '无法删除历史根管理脚本' "$output"; then
+        fail "entry warned when no legacy root core.sh existed: $(<"$output")"
+      fi
+      ;;
+    failure)
+      [[ -d $update_legacy_core ]] || fail "failure fixture changed unexpectedly"
+      grep -Fq '警告' "$output" || fail "cleanup failure did not use the warning channel: $(<"$output")"
+      grep -Fq "$update_legacy_core" "$output" || fail "cleanup failure warning omitted the file path: $(<"$output")"
+      if ! grep -Eq '残留|手动删除' "$output"; then
+        fail "cleanup failure warning omitted the residual impact: $(<"$output")"
+      fi
+      rm -rf "$update_legacy_core"
+      ;;
+  esac
+  echo "PASS: installed entry cleanup $scenario"
+}
+
 prepare_update_fixture
+[[ -f $update_legacy_core ]] || fail "update fixture did not create the legacy root core.sh"
+[[ -f $update_core ]] || fail "update fixture did not install the management script under src/"
 rm -f "$qrcode_test_bin/qrencode" "$QRCODE_TEST_INSTALLED_MARKER" "$update_root/etc/sing-box/sh/qrcode-dependency-checked"
 : >"$update_package_log"
 run_active_update v1.34 success update sh v1.34 >"$update_workdir/same-version.out" 2>&1 || fail "same-version update command failed"
@@ -446,6 +515,10 @@ run_active_update v1.35 success update.sh >"$update_workdir/new-version.out" 2>&
 [[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "new-version update.sh skipped dependency installation"
 grep -Fq '更新成功' "$update_workdir/new-version.out" || fail "new-version update.sh did not finish the script update"
 [[ $(<"$update_root/etc/sing-box/sh/update.marker") == 'new script release' ]] || fail "new-version update.sh did not extract the release"
+[[ ! -e $update_legacy_core ]] || fail "script update did not remove the legacy root core.sh"
+if grep -Fq '无法删除历史根管理脚本' "$update_workdir/new-version.out"; then
+  fail "successful script update warned about legacy root core.sh cleanup"
+fi
 
 rm -f "$qrcode_test_bin/qrencode"
 : >"$update_package_log"
@@ -457,7 +530,7 @@ rm -f "$qrcode_test_bin/qrencode"
 : >"$update_package_log"
 run_active_update v1.37 fail update.sh >"$update_workdir/qr-failure.out" 2>&1 || fail "QR package failure stopped the script update"
 [[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "failed active update did not mark the check complete"
-grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/qr-failure.out" || fail "failed active update omitted the QR failure result"
+grep -Fq '二维码工具 qrencode 自动安装失败' "$update_workdir/qr-failure.out" || fail "failed active update omitted the QR failure result"
 grep -Fq 'apt-get install -y qrencode' "$update_workdir/qr-failure.out" || fail "failed active update omitted manual package guidance"
 grep -Fq '更新成功' "$update_workdir/qr-failure.out" || fail "QR failure overwrote the script update result"
 [[ $(<"$update_root/etc/sing-box/sh/update.marker") == 'new script release' ]] || fail "QR failure prevented the script release from being extracted"
@@ -476,7 +549,7 @@ run_active_update v1.34 success U >"$update_workdir/already-installed.out" 2>&1 
 rm -f "$qrcode_test_bin/qrencode"
 : >"$update_package_log"
 run_active_update v1.38 missing update.sh >"$update_workdir/install-unverified.out" 2>&1 || fail "unverified QR install stopped the script update"
-grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/install-unverified.out" || fail "unverified QR install did not report failure"
+grep -Fq '二维码工具 qrencode 自动安装失败' "$update_workdir/install-unverified.out" || fail "unverified QR install did not report failure"
 grep -Fq 'apt-get install -y qrencode' "$update_workdir/install-unverified.out" || fail "unverified QR install omitted manual guidance"
 grep -Fq '更新成功' "$update_workdir/install-unverified.out" || fail "unverified QR install overwrote the script update result"
 [[ ! -x $qrcode_test_bin/qrencode ]] || fail "unverified QR install unexpectedly created the command"
@@ -509,6 +582,10 @@ if grep -Eq '^restart ' "$update_service_log"; then
 fi
 echo 'PASS: active script update aliases, version branches, nonblocking failures, and retries'
 
+# The installed entry must stay non-blocking when the legacy root file is absent or cannot be removed.
+run_update_entry_case missing || fail "missing legacy root core.sh handling failed"
+run_update_entry_case failure || fail "legacy root core.sh cleanup failure handling failed"
+
 homepage_runner=$update_workdir/run-homepage.sh
 cat >"$homepage_runner" <<'RUNNER'
 #!/usr/bin/env bash
@@ -516,20 +593,33 @@ source "$QRCODE_TEST_CORE"
 is_sh_ver=v1.34
 relay_menu_pending=0
 [[ ${1:-} == relay ]] && relay_menu_pending=1
-ask() {
-  case $1 in
-    mainmenu) REPLY=9 ;;
-    list)
-      if [[ $relay_menu_pending == 1 ]]; then
-        REPLY=4
-        relay_menu_pending=0
-      else
-        REPLY=99
-      fi
-      ;;
-  esac
+# The homepage fixture sources the management core directly, so provide the
+# init-time status reader and deterministic menu navigation it would normally get.
+core_status_read() { is_core_status=running; }
+menu_pause() { :; }
+menu_select() {
+  local menu_kind=$1 menu_var=$2
+  shift 2
+  if [[ $menu_var == is_main_pick ]]; then
+    REPLY=q
+    return 3
+  fi
+  if [[ $menu_var == is_relay_action ]]; then
+    if [[ $relay_menu_pending == 1 ]]; then
+      REPLY=4
+      relay_menu_pending=0
+    else
+      REPLY=0
+    fi
+    [[ $REPLY == 0 ]] && return 2
+    return 0
+  fi
+  return 1
 }
 main "$@"
+if [[ ${1:-} == relay ]]; then
+  main
+fi
 RUNNER
 chmod +x "$homepage_runner"
 
@@ -566,11 +656,14 @@ run_src_homepage() {
 homepage_release=$update_workdir/homepage-release
 homepage_archive=$update_workdir/homepage-release.tar.gz
 mkdir -p "$homepage_release"
-cp "$repo_root/core.sh" "$homepage_release/core.sh"
 cp -R "$repo_root/src" "$homepage_release/src"
-rewrite_paths "$homepage_release/core.sh" "$update_root"
 rewrite_paths "$homepage_release/src/core.sh" "$update_root"
-tar czf "$homepage_archive" -C "$homepage_release" core.sh src || fail "could not create homepage release archive"
+rewrite_paths "$homepage_release/src/init.sh" "$update_root"
+rewrite_paths "$homepage_release/src/log.sh" "$update_root"
+tar czf "$homepage_archive" -C "$homepage_release" src || fail "could not create homepage release archive"
+if tar tzf "$homepage_archive" | grep -Fx 'core.sh' >/dev/null; then
+  fail "homepage release archive still contains the legacy root core.sh"
+fi
 old_homepage_script_dir=$update_root/etc/sing-box/sh
 printf 'old core before file-only update\n' >"$update_core"
 rm -rf "$old_homepage_script_dir/src"
@@ -595,15 +688,15 @@ run_update_homepage non-home success version || fail "non-home version command f
 run_update_homepage first-homepage-failure fail || fail "QR install failure stopped the first homepage"
 [[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "failed homepage attempt did not write the QR marker"
 [[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 2 ]] || fail "failed homepage install was not retried after index refresh"
-grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted the QR warning"
+grep -Fq '二维码工具 qrencode 自动安装失败' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted the QR warning"
 grep -Fq 'apt-get install -y qrencode' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted manual install guidance"
 grep -Fq '主动更新脚本' "$update_workdir/first-homepage-failure.out" || fail "failed homepage attempt omitted the active update retry path"
-grep -Fq '日志用量' "$update_workdir/first-homepage-failure.out" || fail "failed QR install prevented the homepage from displaying"
+grep -Fq '日志占用' "$update_workdir/first-homepage-failure.out" || fail "failed QR install prevented the homepage from displaying"
 failed_homepage_log_lines=$(wc -l <"$update_package_log")
 run_update_homepage second-homepage success main || fail "second homepage failed"
 [[ $(wc -l <"$update_package_log") == "$failed_homepage_log_lines" ]] || fail "second ordinary homepage retried the failed QR install"
-grep -Fq '日志用量' "$update_workdir/second-homepage.out" || fail "second homepage did not display"
-! grep -Fq '二维码依赖 qrencode 自动补齐失败' "$update_workdir/second-homepage.out" || fail "second homepage repeated the QR failure warning"
+grep -Fq '日志占用' "$update_workdir/second-homepage.out" || fail "second homepage did not display"
+! grep -Fq '二维码工具 qrencode 自动安装失败' "$update_workdir/second-homepage.out" || fail "second homepage repeated the QR failure warning"
 echo 'PASS: failed homepage migration is nonblocking and ordinary homepages do not retry'
 
 # An explicit update still repairs the dependency after a homepage failure marker exists.
@@ -635,7 +728,7 @@ for entry in no-args explicit-main relay-return src-core; do
   fi
   [[ -f $update_root/etc/sing-box/qrcode-dependency-checked ]] || fail "$entry homepage did not mark the QR check complete"
   [[ $(grep -Fc "$qrcode_test_bin/apt-get install -y qrencode" "$update_package_log") == 1 ]] || fail "$entry homepage did not install qrencode once"
-  grep -Fq '日志用量' "$update_workdir/$entry.out" || fail "$entry test did not display the actual homepage"
+  grep -Fq '日志占用' "$update_workdir/$entry.out" || fail "$entry test did not display the actual homepage"
 done
 echo 'PASS: no-argument, explicit main, and relay-return homepage entries run the migration'
 
@@ -650,7 +743,7 @@ echo 'PASS: file-only update preserves an existing QR marker'
 
 # The marker written by a real install suppresses the legacy homepage migration.
 new_install_root=$workdir/install-install-success/root
-new_install_core=$new_install_root/etc/sing-box/sh/core.sh
+new_install_core=$new_install_root/etc/sing-box/sh/src/core.sh
 new_install_bin=$workdir/install-install-success/bin
 new_install_log=$workdir/install-install-success/packages.log
 new_install_service_log=$workdir/install-install-success/services.log
@@ -660,6 +753,6 @@ new_install_log_lines=$(wc -l <"$new_install_log")
 run_homepage "$workdir/new-install-homepage.out" "$new_install_core" "$new_install_bin" "$new_install_log" "$new_install_service_log" "$new_install_marker" "$new_install_bin/bash-env" success || fail "homepage after real install failed"
 [[ -f $new_install_root/etc/sing-box/qrcode-dependency-checked ]] || fail "real install marker was missing before homepage"
 [[ $(wc -l <"$new_install_log") == "$new_install_log_lines" ]] || fail "homepage retried QR installation after a real install"
-grep -Fq '日志用量' "$workdir/new-install-homepage.out" || fail "real install homepage did not display"
+grep -Fq '日志占用' "$workdir/new-install-homepage.out" || fail "real install homepage did not display"
 echo 'PASS: the marker from a real install prevents a redundant homepage install'
 echo 'PASS: QR dependency lifecycle tests'
