@@ -7,14 +7,18 @@
 | 项目 | 值 |
 |---|---|
 | 构建方式 | GitHub Actions `release.yml` 的 `build-test-package` job，只构建一次 |
-| Workflow run | `44729407983`（分支 `delivery/issue-97`，提交 `8ae5405`） |
-| 内部产物 | `release-test-package` artifact |
+| Workflow run | `44735309522`（分支 `delivery/issue-97`，提交 `7e4634b`） |
+| 内部产物 | `release-test-package` artifact（含 `code.tar.gz` 与 `code.tar.gz.sha256`） |
 | 资产名 | `code.tar.gz` |
-| 大小 | 3,062,092 字节 |
-| SHA-256 | `b4d087f84816a4f8cec7b11a5da2905d61819094bcf2019c5661a6e7d33f1e3c` |
+| 大小 | 3,063,255 字节 |
+| SHA-256 | `391824a90525792681aa9b8cbee704bd0a6c30ea20b5594b2fa4038a525031aa` |
 | 包内布局 | 包含 `src/core.sh`；不包含根 `core.sh` |
 
 全新安装、`install.sh -l`、v1.56 升级、v1.57 升级与运行冒烟全部核对并使用上述同一个文件与摘要。
+
+## 全量回归
+
+在腾讯云 VPS 的隔离容器中对集成分支 `9dff16d`（与最终测试包的打包输入一致；其后仅有 workflow 校验方式与证据文档变更）运行全部 22 个 `tests-*.sh`，全部 rc=0，包括 21 个管理脚本测试与 `tests-skill-inventory.sh`。测试过程仅使用临时容器、临时目录与临时端口，结束后自动清理。
 
 ## 隔离环境
 
