@@ -42,6 +42,11 @@
 | 真实代理流量冒烟 | PASS | 全新安装及 v1.57 升级后，以本地 VLESS-REALITY 客户端经 SOCKS 访问本地 HTTP 目标，返回 `gate-smoke-ok` |
 | 测试结束清理 | PASS | 无遗留 `osb-gate-*` 容器；临时目录与临时端口已移除；宿主机线上服务状态未变化 |
 
+## 发布锁定演练
+
+- 以错误摘要 `0000…0000` 触发 `publish` workflow（run `44735659320`），流程在下载测试包后、创建 Release 前拒绝发布，日志明确输出 `Recorded package SHA-256 does not match the package_sha256 input; refusing to publish.`。
+- 未创建任何 Release；正式发布必须使用上表中的 run `44735309522` 产物与 SHA-256。
+
 ## 结论
 
 **PASS — 硬门禁通过。** 未出现“外部网络故障导致验证未完成”的情况，测试包摘要与所有验收用例一致，允许进入合并与正式发布流程；正式发布必须复用本文档记录的同一个 `code.tar.gz` 与 SHA-256。
