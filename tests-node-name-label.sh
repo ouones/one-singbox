@@ -9,7 +9,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-source <(sed '/EUID != 0/d' "$repo_root/core.sh")
+source <(sed '/EUID != 0/d' "$repo_root/src/core.sh")
 is_core_dir="$workdir/core"
 manage() { :; }
 mkdir -p "$workdir/bin"
@@ -105,8 +105,8 @@ new_label=$(node_name_for_link "$is_config_file")
   exit 1
 }
 
-grep -q 'is_node_name=$(node_name_for_link "${is_config_file:-$is_config_name}")' "$repo_root/core.sh" || {
-  echo "FAIL: core.sh no longer wires URL node label with config fallback"
+grep -q 'is_node_name=$(node_name_for_link "${is_config_file:-$is_config_name}")' "$repo_root/src/core.sh" || {
+  echo "FAIL: src/core.sh no longer wires URL node label with config fallback"
   exit 1
 }
 

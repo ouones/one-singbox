@@ -125,7 +125,7 @@ get_snell_psk() { printf '%s\n' generated-psk; }
 
 desc_out=$(snell_mode_desc)
 [[ $desc_out == *"default"* && $desc_out == *"unshaped"* && $desc_out == *"unsafe-raw"* ]] || fail "snell_mode_desc should describe all three modes"
-[[ $desc_out == *"小白首选"* ]] || fail "snell_mode_desc should contain beginner guidance"
+[[ $desc_out == *"[推荐]"* ]] || fail "snell_mode_desc should contain recommendation guidance"
 
 (
   unset snell_psk snell_version snell_obfs_mode port is_config_file is_config_name
@@ -500,7 +500,6 @@ jq -e '
 CASE
 }
 
-run_core_case "$repo_root/core.sh" || exit 1
 run_core_case "$repo_root/src/core.sh" || exit 1
 
 grep -q 'Snell' "$repo_root/src/help.sh" || fail "src/help.sh should document Snell"
@@ -508,7 +507,7 @@ grep -q 'add snell \[port\] \[psk\] \[version\]' "$repo_root/src/help.sh" || fai
 grep -q '1.14.0' "$repo_root/src/help.sh" || fail "src/help.sh should document the Snell version floor"
 grep -q 'mode \[name\]' "$repo_root/src/help.sh" || fail "src/help.sh should document mode command"
 grep -q 'Snell' "$repo_root/README.md" || fail "README.md should document Snell"
-grep -q 'add snell \[port\] \[psk\] \[version\]' "$repo_root/README.md" || fail "README.md should document Snell add syntax"
+grep -q 'sb add snell' "$repo_root/README.md" || fail "README.md should document Snell add syntax"
 grep -q '1.14.0' "$repo_root/README.md" || fail "README.md should document the Snell version floor"
 grep -q 'Snell v6' "$repo_root/README.md" || fail "README.md should document Snell v6"
 

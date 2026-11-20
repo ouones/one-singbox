@@ -273,7 +273,7 @@ expect_case() {
   echo "PASS: ${core##*/} $scenario"
 }
 
-for core_file in "$repo_root/core.sh" "$repo_root/src/core.sh"; do
+for core_file in "$repo_root/src/core.sh"; do
   expect_case "$core_file" create-de-first '{"countryCode":"DE"}' www.uni-frankfurt.de
   expect_case "$core_file" create-de-last '{"countryCode":"DE"}' dff.film last
   expect_case "$core_file" create-sg '{"countryCode":"SG"}' trinitycollege.edu.sg
