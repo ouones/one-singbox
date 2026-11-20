@@ -8,6 +8,53 @@ fail() {
     exit 1
 }
 
+layout_dir=$(mktemp -d)
+trap 'rm -rf "$layout_dir"' EXIT
+
+# Repository layout: only src/core.sh may remain as the management script source.
+if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked_paths=$(git -C "$repo_root" ls-files)
+else
+    # The isolated test environment receives a source archive without .git metadata.
+    tracked_paths=$(cd "$repo_root" && find . -type f -not -path './.git/*' | sed 's|^\./||')
+fi
+grep -Fxq 'core.sh' <<<"$tracked_paths" && fail 'repository root core.sh is still tracked'
+grep -Fxq 'code.tar.gz' <<<"$tracked_paths" && fail 'stale repository root code.tar.gz is still tracked'
+core_paths=$(grep -E '(^|/)core\.sh$' <<<"$tracked_paths" || true)
+[[ $core_paths == 'src/core.sh' ]] || fail "management script source must be uniquely src/core.sh (found: ${core_paths:-none})"
+if backup_paths=$(grep -E '(^|/)core\.sh\.(bak|orig|old|save)$' <<<"$tracked_paths"); then
+    fail "management script backup copies are still present: $backup_paths"
+fi
+if checksum_paths=$(grep -E '(^|/)(core\.sha256|core\.sh\.sha256|core\.sh\.md5)$' <<<"$tracked_paths"); then
+    fail "dual-file checksum artifacts are still present: $checksum_paths"
+fi
+
+# Release package layout: build a temporary archive from the workflow's own file list.
+package_command=$(sed -n 's/^[[:space:]]*tar zcvf \.release-artifacts\/code\.tar\.gz \(.*\)$/\1/p' "$repo_root/.github/workflows/release.yml")
+[[ -n $package_command ]] || fail 'release workflow is missing the code.tar.gz packaging command'
+read -r -a package_files <<<"$package_command"
+for package_file in "${package_files[@]}"; do
+    [[ $package_file == 'core.sh' ]] && fail 'release packaging still includes the legacy root core.sh'
+done
+tar czf "$layout_dir/code.tar.gz" -C "$repo_root" "${package_files[@]}" || fail 'temporary release archive failed'
+package_members=$(tar tzf "$layout_dir/code.tar.gz")
+grep -Fxq 'src/core.sh' <<<"$package_members" || fail 'release archive omitted src/core.sh'
+if grep -Fxq 'core.sh' <<<"$package_members"; then
+    fail 'release archive still contains the legacy root core.sh'
+fi
+grep -Fq 'files: .release-artifacts/code.tar.gz' "$repo_root/.github/workflows/release.yml" || fail 'release asset is no longer named code.tar.gz'
+
+# No second management script generation, compatibility link, or dual-file sync logic.
+if grep -Eq '(^|[^[:alnum:]_./-])core\.sh([^[:alnum:]_.-]|$)' "$repo_root/.github/workflows/release.yml"; then
+    fail 'release workflow still references the legacy root core.sh'
+fi
+
+# The local-install integrity check must keep requiring src/core.sh and the entry script only.
+grep -Fq '[[ ! -f ${PWD}/src/core.sh || ! -f ${PWD}/$is_core.sh ]]' "$repo_root/install.sh" || fail 'install.sh local-install integrity check changed'
+if grep -Fq '${PWD}/core.sh' "$repo_root/install.sh"; then
+    fail 'install.sh local-install still requires the legacy root core.sh'
+fi
+
 for file in README.md docs/usage.md src/help.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '端口中转' "$repo_root/$file"); then
         fail "$file still contains the deprecated term: $legacy"
