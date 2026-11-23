@@ -1324,7 +1324,7 @@ block-cn-whitelist-binding-and-atomic-switch)
 EOF
 
     cat >"$is_config_json" <<'EOF'
-{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"domain_suffix":["netflix.com"],"action":"route","outbound":"netflix-proxy"},{"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"},{"tag":"netflix-proxy","type":"direct"}]}
+{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"domain_suffix":["netflix.com"],"action":"route","outbound":"netflix-proxy"},{"inbound":["node-one.json"],"domain":["custom.example"],"action":"route","outbound":"direct"},{"inbound":["node-one.json","unmanaged-inbound.json"],"action":"route","outbound":"direct"},{"inbound":["node-one.json"],"action":"route","outbound":"direct"},{"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"},{"tag":"netflix-proxy","type":"direct"}]}
 EOF
 
     sync_runtime_node_outbound_modes || fail "initial sync failed"
@@ -1342,13 +1342,19 @@ EOF
     jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "direct_v4_pref") | not' "$is_config_json" >/dev/null || fail "old direct route and direct whitelist must be removed"
     jq -e '.route.rules | any(.inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and .domain == null and .ip_is_private == null and .rule_set == null)' "$is_config_json" >/dev/null || fail "node-one default route must route to managed_node_ss_node-one_json"
     jq -e '.outbounds | any(.tag == "managed_node_ss_node-one_json")' "$is_config_json" >/dev/null || fail "SS outbound object must be present in outbounds"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .domain == ["custom.example"] and .action == "route" and .outbound == "direct")' "$is_config_json" >/dev/null || fail "domain-matched custom direct rule must be preserved"
+    jq -e '.route.rules | any(.inbound == ["node-one.json"] and .domain == null and .action == "route" and .outbound == "direct")' "$is_config_json" >/dev/null || fail "legacy inbound direct fallback must be preserved"
+    jq -e '.route.rules | any(.inbound == ["node-one.json", "unmanaged-inbound.json"] and .domain == null and .action == "route" and .outbound == "direct")' "$is_config_json" >/dev/null || fail "mixed inbound direct fallback must preserve its inbound scope"
 
-    # 断言 4：规则顺序：嗅探 -> 用户自定义 Netflix -> 白名单(SS) -> 私网拦截 -> 中国路由拦截 -> 默认路由(SS) -> 全局 fallback
+    # 断言 4：规则顺序：嗅探 -> 用户规则 -> 白名单(SS) -> 私网/CN 拦截 -> 默认路由(SS) -> inbound fallbacks -> global fallback
     jq -e '
         ([.route.rules[] | .action == "sniff"] | index(true))
         < ([.route.rules[] | .outbound == "netflix-proxy"] | index(true))
         and
         ([.route.rules[] | .outbound == "netflix-proxy"] | index(true))
+        < ([.route.rules[] | .inbound == ["node-one.json"] and .domain == ["custom.example"] and .outbound == "direct"] | index(true))
+        and
+        ([.route.rules[] | .inbound == ["node-one.json"] and .domain == ["custom.example"] and .outbound == "direct"] | index(true))
         < ([.route.rules[] | (.domain // [] | any(. == "connectivitycheck.gstatic.com")) and .outbound == "managed_node_ss_node-one_json"] | index(true))
         and
         ([.route.rules[] | (.domain // [] | any(. == "connectivitycheck.gstatic.com")) and .outbound == "managed_node_ss_node-one_json"] | index(true))
@@ -1361,7 +1367,13 @@ EOF
         < ([.route.rules[] | .inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and .domain == null] | index(true))
         and
         ([.route.rules[] | .inbound == ["node-one.json"] and .outbound == "managed_node_ss_node-one_json" and .domain == null] | index(true))
-        < ([.route.rules[] | .outbound == "direct"] | index(true))
+        < ([.route.rules[] | .inbound == ["node-one.json", "unmanaged-inbound.json"] and .outbound == "direct" and .domain == null] | index(true))
+        and
+        ([.route.rules[] | .inbound == ["node-one.json", "unmanaged-inbound.json"] and .outbound == "direct" and .domain == null] | index(true))
+        < ([.route.rules[] | .inbound == ["node-one.json"] and .outbound == "direct" and .domain == null] | index(true))
+        and
+        ([.route.rules[] | .inbound == ["node-one.json"] and .outbound == "direct" and .domain == null] | index(true))
+        < ([.route.rules[] | .inbound == null and .outbound == "direct"] | index(true))
     ' "$is_config_json" >/dev/null || fail "rule ordering violation when block-cn enabled and SS outbound applied: $(jq -c '.route.rules' "$is_config_json")"
 
     # 断言 5：在屏蔽回国开启下，直接将 node-one 从 SS 切换至 VLESS 出站
