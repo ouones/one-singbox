@@ -603,7 +603,7 @@ run_slice6_help_and_gate() {
     grep -Fq 'relay note [local-port] [备注内容 | --clear]' <<<"$help_out" || fail "sb help missing relay note usage: $help_out"
     grep -Fq 'one-singbox' <<<"$help_out" || fail "sb help missing one-singbox term"
     ! grep -Eq '管理面板|端口中转|中转' <<<"$help_out" || fail "sb help contains forbidden terminology: $help_out"
-    grep -Fq 'tests-relay-note.sh' "$repo_dir/.github/workflows/pr-check.yml" || fail "pr-check.yml missing tests-relay-note.sh"
+    grep -Fq 'scripts/run-offline-tests.sh' "$repo_dir/.github/workflows/pr-check.yml" || fail "pr-check.yml missing scripts/run-offline-tests.sh"
 }
 
 run_slice1_add_and_info "$repo_root/src/core.sh"
