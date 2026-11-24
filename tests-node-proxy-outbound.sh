@@ -1482,6 +1482,37 @@ EOF
     rm -f "$is_core_dir/.block-cn-enabled" "$is_core_dir/.cn-whitelist.json"
     exit 0
     ;;
+fallback-suffix-rule-order)
+    cat >"$is_conf_dir/node-two.json" <<'EOF'
+{"inbounds":[{"tag":"node-two.json","type":"shadowsocks","listen":"::","listen_port":23456,"method":"aes-128-gcm","password":"pwd"}]}
+EOF
+    jq -n '{node_name:"node-b",outbound_mode:"SS 出站",outbound_proxy:{name:"UpstreamB",config:{type:"shadowsocks",server:"198.51.100.1",server_port:8388,method:"aes-128-gcm",password:"pwdB"}}}' >"$is_conf_dir/.quan-meta/node-two.json.meta.json"
+
+    cat >"$is_config_json" <<'EOF'
+{"dns":{},"route":{"default_domain_resolver":"local","rules":[{"inbound":["node-one.json","unmanaged-inbound.json"],"action":"route","outbound":"direct"},{"inbound":["node-two.json"],"domain":["custom.example"],"action":"route","outbound":"direct"}]},"outbounds":[{"tag":"direct","type":"direct"}]}
+EOF
+
+    sync_runtime_node_outbound_modes || fail "sync failed"
+
+    jq -e '.route.rules | any(.inbound == ["node-one.json","unmanaged-inbound.json"] and .outbound == "direct" and .domain == null)' "$is_config_json" >/dev/null || fail "mixed inbound direct fallback must be preserved"
+    jq -e '.route.rules | any(.inbound == ["node-two.json"] and .domain == ["custom.example"] and .outbound == "direct")' "$is_config_json" >/dev/null || fail "custom domain rule after the fallback must be preserved"
+
+    # #95：兜底之后的普通自定义规则必须仍排在对应节点的默认受管出站之前
+    jq -e '
+        ([.route.rules[] | .inbound == ["node-two.json"] and .domain == ["custom.example"] and .outbound == "direct"] | index(true)) as $custom
+        | ([.route.rules[] | .inbound == ["node-two.json"] and .outbound == "managed_node_ss_node-two_json" and .domain == null and .ip_is_private == null and .rule_set == null] | index(true)) as $default
+        | $custom != null and $default != null and $custom < $default
+    ' "$is_config_json" >/dev/null || fail "custom rule after mixed inbound direct fallback must precede the node default route: $(jq -c '.route.rules' "$is_config_json")"
+
+    # 宽泛 direct 兜底仍必须排在所有受管节点规则之后
+    jq -e '
+        ([.route.rules[] | .inbound == ["node-two.json"] and .outbound == "managed_node_ss_node-two_json" and .domain == null and .ip_is_private == null and .rule_set == null] | index(true)) as $default
+        | ([.route.rules[] | .inbound == ["node-one.json","unmanaged-inbound.json"] and .outbound == "direct" and .domain == null] | index(true)) as $fallback
+        | $default != null and $fallback != null and $default < $fallback
+    ' "$is_config_json" >/dev/null || fail "mixed inbound direct fallback must remain after managed node routes: $(jq -c '.route.rules' "$is_config_json")"
+
+    exit 0
+    ;;
 *)
     fail "unknown test scenario: $TEST_SCENARIO"
     ;;
@@ -1539,7 +1570,7 @@ if [[ ${1:-} ]]; then
 fi
 
 run_core_case "$repo_root/src/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback fallback-suffix-rule-order; do
     echo "[src/core.sh: $scenario]"
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
