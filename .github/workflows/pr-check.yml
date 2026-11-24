@@ -35,6 +35,7 @@ jobs:
           sudo -n bash tests-menu-navigation.sh
           sudo -n bash tests-node-external-frontend.sh
           sudo -n bash tests-node-name-label.sh
+          bash tests-node-note.sh
           sudo -n bash tests-node-proxy-outbound.sh
           bash tests-update-script-reload.sh
           bash tests-block-cn.sh

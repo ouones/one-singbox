@@ -186,6 +186,8 @@ info_list=(
     "PSK"
     "混淆模式 (obfs_mode)"
     "运行模式 (mode)"
+    "出口方式"
+    "备注"
 )
 change_labels=(
     "协议|更改协议"
@@ -209,6 +211,7 @@ change_labels=(
     "Snell 版本|更改 Snell 版本"
     "混淆模式|更改 Snell 混淆模式"
     "运行模式|更改 Snell 运行模式"
+    "备注|更改备注"
 )
 # shuf fallback for systems without shuf (e.g., Alpine BusyBox)
 if ! type -P shuf &>/dev/null; then
@@ -856,6 +859,122 @@ meta_move() {
     local status=$?
     shared_config_unlock
     return "$status"
+}
+
+meta_del_unlocked() {
+    local cfg=$1
+    local key=$2
+    local f
+    f=$(meta_file "$cfg")
+    [[ -f "$f" ]] || return 0
+    if jq --arg k "$key" 'del(.[$k])' "$f" >"$f.tmp"; then
+        if jq -e 'length == 0' "$f.tmp" >/dev/null 2>&1; then
+            rm -f "$f.tmp" "$f"
+        else
+            mv -f "$f.tmp" "$f"
+        fi
+    else
+        rm -f "$f.tmp"
+        return 1
+    fi
+}
+
+meta_del() {
+    shared_config_lock || return 1
+    meta_del_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
+note_trim() {
+    local val=${1-}
+    val=${val//$'\r'/ }
+    val=${val//$'\n'/ }
+    val=${val#"${val%%[![:space:]]*}"}
+    val=${val%"${val##*[![:space:]]}"}
+    printf '%s\n' "$val"
+}
+
+note_get() {
+    local cfg=$1 raw
+    [[ $cfg ]] || return 0
+    raw=$(meta_get "$cfg" '.note')
+    [[ $raw ]] || return 0
+    note_trim "$raw"
+}
+
+note_set() {
+    local cfg=$1 val
+    [[ $cfg ]] || return 1
+    val=$(note_trim "${2-}")
+    if [[ -z $val ]]; then
+        note_clear "$cfg"
+        return $?
+    fi
+    meta_set "$cfg" note "$val"
+}
+
+note_clear() {
+    local cfg=$1
+    [[ $cfg ]] || return 1
+    meta_del "$cfg" note
+}
+
+note_summary() {
+    local text limit=${2:-30}
+    text=$(note_trim "${1-}")
+    [[ -z $text ]] && return 0
+    if ((${#text} <= limit)); then
+        printf '%s\n' "$text"
+        return 0
+    fi
+    jq -rn --arg s "$text" --argjson limit "$limit" 'if ($s | length) > $limit then ($s[0:$limit] + "...") else $s end' 2>/dev/null || printf '%s...\n' "${text:0:limit}"
+}
+
+note_read_line() {
+    local target_var=$1
+    local raw= status=0
+    local IFS=
+    if [[ -t 0 ]]; then
+        interactive_read -r raw || status=$?
+    else
+        interactive_read -t 3 -r raw || status=$?
+    fi
+    if ((status > 128)); then
+        printf -v "$target_var" '%s' ''
+        return 1
+    fi
+    printf -v "$target_var" '%s' "$raw"
+    [[ $status == 0 || -n $raw ]]
+}
+
+note_edit_interactive() {
+    local cfg=$1 current= raw_input= trimmed=
+    [[ $cfg ]] || return 1
+    current=$(note_get "$cfg")
+    if [[ $current ]]; then
+        printf '\n当前备注: %s\n' "$current"
+    else
+        printf '\n当前备注: (无)\n'
+    fi
+    echo -ne "请输入新备注 (直接回车保持不变，输入 - 或 clear 清空):"
+    if ! note_read_line raw_input; then
+        msg "\n备注保持不变.\n"
+        return 0
+    fi
+    trimmed=$(note_trim "$raw_input")
+    if [[ -z $trimmed ]]; then
+        msg "\n备注保持不变.\n"
+        return 0
+    fi
+    if [[ $trimmed == - || $trimmed == clear ]]; then
+        note_clear "$cfg" || err "清空备注失败."
+        msg "\n已清空备注.\n"
+        return 0
+    fi
+    note_set "$cfg" "$trimmed" || err "保存备注失败."
+    printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed"
 }
 
 meta_rm_unlocked() {
@@ -3665,6 +3784,9 @@ change() {
         mode | snell-mode)
             is_change_id=20
             ;;
+        note)
+            is_change_id=21
+            ;;
         *)
             [[ $is_try_change ]] && return
             err "无法识别 ($2) 更改类型."
@@ -4031,7 +4153,26 @@ change() {
         # view current share link
         url_qr url
         ;;
+    21)
+        # note
+        [[ $is_config_file ]] || return 1
+        if (($# < 3)) || { (($# == 3)) && [[ -z $3 ]]; }; then
+            note_edit_interactive "$is_config_file" || return $?
+        elif (($# == 3)) && [[ $3 == '--clear' ]]; then
+            note_clear "$is_config_file" || err "清空备注失败."
+            msg "\n已清空备注.\n"
+        else
+            local IFS=' '
+            local raw_note="${*:3}" trimmed_note
+            trimmed_note=$(note_trim "$raw_note")
+            [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
+            note_set "$is_config_file" "$trimmed_note" || err "保存备注失败."
+            printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
+        fi
+        info
+        ;;
     esac
+    is_change_id=
 }
 
 # delete config.
@@ -4604,7 +4745,7 @@ add() {
 # get config info
 # or somes required args
 get() {
-    local get_status
+    local get_status is_cfg_item is_cfg_note is_cfg_summary is_file_display_list
     case $1 in
     addr)
         is_public_port=$port
@@ -4641,10 +4782,28 @@ get() {
         [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
-            menu_select parent is_config_file "\n选择节点:\n" "${is_all_json[@]}"
+            is_file_display_list=()
+            for is_cfg_item in "${is_all_json[@]}"; do
+                is_cfg_note=
+                if declare -F note_get >/dev/null 2>&1; then
+                    is_cfg_note=$(note_get "$is_cfg_item")
+                fi
+                if [[ $is_cfg_note ]]; then
+                    is_cfg_summary=$is_cfg_note
+                    if declare -F note_summary >/dev/null 2>&1; then
+                        is_cfg_summary=$(note_summary "$is_cfg_note")
+                    fi
+                    is_file_display_list+=("$is_cfg_item  [备注: $is_cfg_summary]")
+                else
+                    is_file_display_list+=("$is_cfg_item")
+                fi
+            done
+            menu_select parent is_config_file "\n选择节点:\n" "${is_file_display_list[@]}"
             get_status=$?
             [[ $get_status == 2 ]] && return 2
             [[ $get_status == 0 ]] || return 1
+            is_config_file=${is_all_json[REPLY - 1]}
+            export is_config_file
         }
         ;;
     info)
@@ -5030,6 +5189,22 @@ info() {
         is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#$is_node_name"
         ;;
     esac
+    is_can_change+=(21)
+    local info_cfg=${is_config_file:-$is_config_name}
+    local info_outbound_display= info_note=
+    if declare -F current_outbound_mode_display >/dev/null 2>&1; then
+        info_outbound_display=$(current_outbound_mode_display "$info_cfg")
+    fi
+    [[ $info_outbound_display ]] || info_outbound_display='IPv4 优先'
+    is_info_show+=(26)
+    is_info_str+=("$info_outbound_display")
+    if declare -F note_get >/dev/null 2>&1; then
+        info_note=$(note_get "$info_cfg")
+    fi
+    if [[ $info_note ]]; then
+        is_info_show+=(27)
+        is_info_str+=("$info_note")
+    fi
     [[ $is_dont_show_info || $is_gen || $is_dont_auto_exit ]] && return # dont show info
     msg "-------------- $is_config_name -------------"
     for ((i = 0; i < ${#is_info_show[@]}; i++)); do
@@ -5766,7 +5941,8 @@ main() {
         block_cn_cli "${@:2}"
         ;;
     c | config | change)
-        change ${@:2}
+        is_change_id=
+        change "${@:2}"
         ;;
     # client | genc)
     #     create client $2
@@ -5911,12 +6087,13 @@ main() {
         relay_main "${@:2}"
         ;;
     *)
+        is_change_id=
         is_try_change=1
-        change test $1
+        change test "$1"
         if [[ $is_change_id ]]; then
             unset is_try_change
             [[ $2 ]] && {
-                change $2 $1 ${@:3}
+                change "$2" "$1" "${@:3}"
             } || {
                 change
             }
