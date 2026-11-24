@@ -186,6 +186,8 @@ info_list=(
     "PSK"
     "混淆模式 (obfs_mode)"
     "运行模式 (mode)"
+    "出口方式"
+    "备注"
 )
 change_labels=(
     "协议|更改协议"
@@ -209,6 +211,7 @@ change_labels=(
     "Snell 版本|更改 Snell 版本"
     "混淆模式|更改 Snell 混淆模式"
     "运行模式|更改 Snell 运行模式"
+    "备注|更改备注"
 )
 # shuf fallback for systems without shuf (e.g., Alpine BusyBox)
 if ! type -P shuf &>/dev/null; then
@@ -856,6 +859,151 @@ meta_move() {
     local status=$?
     shared_config_unlock
     return "$status"
+}
+
+meta_del_unlocked() {
+    local cfg=$1
+    local key=$2
+    local f
+    f=$(meta_file "$cfg")
+    [[ -f "$f" ]] || return 0
+    if jq --arg k "$key" 'del(.[$k])' "$f" >"$f.tmp"; then
+        if jq -e 'length == 0' "$f.tmp" >/dev/null 2>&1; then
+            rm -f "$f.tmp" "$f"
+        else
+            mv -f "$f.tmp" "$f"
+        fi
+    else
+        rm -f "$f.tmp"
+        return 1
+    fi
+}
+
+meta_del() {
+    shared_config_lock || return 1
+    meta_del_unlocked "$@"
+    local status=$?
+    shared_config_unlock
+    return "$status"
+}
+
+note_trim() {
+    local val=${1-}
+    val=${val//$'\r'/ }
+    val=${val//$'\n'/ }
+    val=${val#"${val%%[![:space:]]*}"}
+    val=${val%"${val##*[![:space:]]}"}
+    printf '%s\n' "$val"
+}
+
+note_get() {
+    local cfg=$1 raw
+    [[ $cfg ]] || return 0
+    raw=$(meta_get "$cfg" '.note')
+    [[ $raw ]] || return 0
+    note_trim "$raw"
+}
+
+note_set() {
+    local cfg=$1 val
+    [[ $cfg ]] || return 1
+    val=$(note_trim "${2-}")
+    if [[ -z $val ]]; then
+        note_clear "$cfg"
+        return $?
+    fi
+    meta_set "$cfg" note "$val"
+}
+
+note_clear() {
+    local cfg=$1
+    [[ $cfg ]] || return 1
+    meta_del "$cfg" note
+}
+
+note_summary() {
+    local text limit=${2:-30}
+    text=$(note_trim "${1-}")
+    [[ -z $text ]] && return 0
+    if ((${#text} <= limit)); then
+        printf '%s\n' "$text"
+        return 0
+    fi
+    jq -rn --arg s "$text" --argjson limit "$limit" 'if ($s | length) > $limit then ($s[0:$limit] + "...") else $s end' 2>/dev/null || printf '%s...\n' "${text:0:limit}"
+}
+
+note_read_line() {
+    local target_var=$1
+    local raw= status=0 read_timeout=${ONE_SINGBOX_READ_TIMEOUT:-3}
+    local IFS=
+    if [[ -t 0 ]]; then
+        interactive_read -r raw || status=$?
+    else
+        interactive_read -t "$read_timeout" -r raw || status=$?
+    fi
+    if ((status > 128)); then
+        printf -v "$target_var" '%s' ''
+        return 1
+    fi
+    printf -v "$target_var" '%s' "$raw"
+    [[ $status == 0 || -n $raw ]]
+}
+
+note_edit_interactive() {
+    local cfg=$1 current= raw_input= trimmed=
+    [[ $cfg ]] || return 1
+    current=$(note_get "$cfg")
+    if [[ $current ]]; then
+        printf '\n当前备注: %s\n' "$current"
+    else
+        printf '\n当前备注: (无)\n'
+    fi
+    echo -ne "请输入新备注 (直接回车保持不变，输入 - 或 clear 清空):"
+    if ! note_read_line raw_input; then
+        msg "\n备注保持不变.\n"
+        return 0
+    fi
+    trimmed=$(note_trim "$raw_input")
+    if [[ -z $trimmed ]]; then
+        msg "\n备注保持不变.\n"
+        return 0
+    fi
+    if [[ $trimmed == - || $trimmed == clear ]]; then
+        note_clear "$cfg" || err "清空备注失败."
+        msg "\n已清空备注.\n"
+        return 0
+    fi
+    note_set "$cfg" "$trimmed" || err "保存备注失败."
+    printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed"
+}
+
+note_apply_cli() {
+    local cfg=${1-}
+    [[ $cfg ]] || return 1
+    if (($# < 2)) || { (($# == 2)) && [[ -z $2 ]]; }; then
+        note_edit_interactive "$cfg" || return $?
+    elif (($# == 2)) && [[ $2 == '--clear' ]]; then
+        note_clear "$cfg" || err "清空备注失败."
+        msg "\n已清空备注.\n"
+    else
+        local IFS=' '
+        local raw_note="${*:2}" trimmed_note
+        trimmed_note=$(note_trim "$raw_note")
+        [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
+        note_set "$cfg" "$trimmed_note" || err "保存备注失败."
+        printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
+    fi
+}
+
+note_format_list_label() {
+    local cfg=$1 base_label=$2 note= summary=
+    [[ $cfg ]] && note=$(note_get "$cfg")
+    if [[ $note ]]; then
+        summary=$(note_summary "$note")
+        printf '%s  [备注: %s]\n' "$base_label" "${summary:-$note}"
+    else
+        printf '%s\n' "$base_label"
+    fi
 }
 
 meta_rm_unlocked() {
@@ -3665,6 +3813,9 @@ change() {
         mode | snell-mode)
             is_change_id=20
             ;;
+        note)
+            is_change_id=21
+            ;;
         *)
             [[ $is_try_change ]] && return
             err "无法识别 ($2) 更改类型."
@@ -4031,7 +4182,13 @@ change() {
         # view current share link
         url_qr url
         ;;
+    21)
+        # note
+        note_apply_cli "$is_config_file" "${@:3}" || return $?
+        info
+        ;;
     esac
+    is_change_id=
 }
 
 # delete config.
@@ -4071,7 +4228,10 @@ del() {
         is_conf_dir_empty=1
     fi
     unset is_dont_get_ip
-    [[ $is_dont_auto_exit ]] && unset is_config_file
+    if [[ $is_dont_auto_exit ]]; then
+        unset is_config_file
+    fi
+    return 0
 }
 
 # uninstall
@@ -4212,6 +4372,8 @@ service_action_result() {
 # add a config
 add() {
     local caddy_shared_lock= protocol_choice_status ss_method_status
+    is_custom_node_name=
+    is_custom_node_note=
     [[ ! $1 && ! $is_change ]] && unset is_new_protocol
     if [[ ! $is_change ]]; then
         is_servername=
@@ -4589,11 +4751,26 @@ add() {
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
+        if declare -F note_read_line >/dev/null 2>&1; then
+            echo -ne "输入备注 (可选，直接回车跳过):"
+            if note_read_line is_custom_node_note; then
+                if declare -F note_trim >/dev/null 2>&1; then
+                    is_custom_node_note=$(note_trim "$is_custom_node_note")
+                fi
+            else
+                is_custom_node_note=
+            fi
+        fi
     fi
 
     # create json
     create server $is_new_protocol
-    [[ $is_custom_node_name && $is_config_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
+    if [[ ! $is_change && ! $is_gen && $is_config_name ]]; then
+        [[ $is_custom_node_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
+        if [[ $is_custom_node_note ]] && declare -F note_set >/dev/null 2>&1; then
+            note_set "$is_config_name" "$is_custom_node_note"
+        fi
+    fi
 
     # show config info.
     info
@@ -4604,7 +4781,7 @@ add() {
 # get config info
 # or somes required args
 get() {
-    local get_status
+    local get_status is_cfg_item is_file_display_list
     case $1 in
     addr)
         is_public_port=$port
@@ -4641,10 +4818,20 @@ get() {
         [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
-            menu_select parent is_config_file "\n选择节点:\n" "${is_all_json[@]}"
+            is_file_display_list=()
+            for is_cfg_item in "${is_all_json[@]}"; do
+                if declare -F note_format_list_label >/dev/null 2>&1; then
+                    is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
+                else
+                    is_file_display_list+=("$is_cfg_item")
+                fi
+            done
+            menu_select parent is_config_file "\n选择节点:\n" "${is_file_display_list[@]}"
             get_status=$?
             [[ $get_status == 2 ]] && return 2
             [[ $get_status == 0 ]] || return 1
+            is_config_file=${is_all_json[REPLY - 1]}
+            export is_config_file
         }
         ;;
     info)
@@ -5030,6 +5217,18 @@ info() {
         is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#$is_node_name"
         ;;
     esac
+    is_can_change+=(21)
+    local info_cfg=${is_config_file:-$is_config_name}
+    local info_outbound_display info_note
+    info_outbound_display=$(current_outbound_mode_display "$info_cfg")
+    [[ $info_outbound_display ]] || info_outbound_display='IPv4 优先'
+    is_info_show+=(26)
+    is_info_str+=("$info_outbound_display")
+    info_note=$(note_get "$info_cfg")
+    if [[ $info_note ]]; then
+        is_info_show+=(27)
+        is_info_str+=("$info_note")
+    fi
     [[ $is_dont_show_info || $is_gen || $is_dont_auto_exit ]] && return # dont show info
     msg "-------------- $is_config_name -------------"
     for ((i = 0; i < ${#is_info_show[@]}; i++)); do
@@ -5489,17 +5688,28 @@ relay_warn_security() {
 }
 
 relay_info_show() {
-    local l_port=$1 r_addr=$2 r_port=$3
+    local l_port=$1 r_addr=$2 r_port=$3 r_note=
+    if declare -F note_get >/dev/null 2>&1; then
+        r_note=$(note_get "relay-${l_port}.json")
+    fi
     msg "类型: TCP/UDP 端口转发"
     msg "监听地址: ::"
     msg "监听端口: $l_port"
     msg "目标地址: $r_addr"
     msg "目标端口: $r_port"
+    if [[ $r_note ]]; then
+        printf '备注: %s\n' "$r_note"
+    fi
 }
 
 relay_add() {
-    local local_port=$1 remote_addr=$2 remote_port=$3
+    local local_port=${1-} remote_addr=${2-} remote_port=${3-} relay_note= interactive_add=0 raw_note=
+    if (($# >= 4)); then
+        local IFS=' '
+        relay_note=$(note_trim "${*:4}")
+    fi
     if [[ ! $local_port ]]; then
+        interactive_add=1
         while :; do
             get_port
             local_port=$tmp_port
@@ -5516,16 +5726,25 @@ relay_add() {
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
 
     if [[ ! $remote_addr ]]; then
+        interactive_add=1
         ask string remote_addr "输入目标地址 (IPv4、IPv6 或域名):"
     fi
     remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [[ -n $remote_addr ]] || err "目标地址不能为空."
 
     if [[ ! $remote_port ]]; then
+        interactive_add=1
         ask string remote_port "输入目标端口 (1-65535):"
     fi
     remote_port=$(echo "$remote_port" | tr -d ' ')
     [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
+
+    if ((interactive_add == 1 && $# < 4)); then
+        echo -ne "输入备注 (可选，直接回车跳过):"
+        if note_read_line raw_note; then
+            relay_note=$(note_trim "$raw_note")
+        fi
+    fi
 
     local relay_file="$is_conf_dir/relay-${local_port}.json"
     local tmp_file
@@ -5564,6 +5783,9 @@ relay_add() {
     fi
 
     shared_config_unlock
+    if [[ $relay_note ]]; then
+        note_set "relay-${local_port}.json" "$relay_note" || err "保存备注失败."
+    fi
     manage restart &
     if [[ $is_main_start ]]; then
         msg "\n$(_green '端口转发配置添加成功!')"
@@ -5600,7 +5822,7 @@ relay_info() {
 }
 
 relay_list() {
-    local files count=0 file l_port r_addr r_port
+    local files count=0 file l_port r_addr r_port cfg_name base_label
     shopt -s nullglob
     files=("$is_conf_dir"/relay-*.json)
     shopt -u nullglob
@@ -5621,7 +5843,13 @@ relay_list() {
         l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
         r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
         r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
-        msg "监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+        cfg_name=${file##*/}
+        base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+        if declare -F note_format_list_label >/dev/null 2>&1; then
+            printf '%s\n' "$(note_format_list_label "$cfg_name" "$base_label")"
+        else
+            msg "$base_label"
+        fi
         ((count++))
     done
     msg "------------------------------------"
@@ -5660,6 +5888,14 @@ relay_delete() {
         fi
     fi
     rm -f "$backup_file"
+    if declare -F meta_rm_unlocked >/dev/null 2>&1; then
+        if ! declare -F meta_file >/dev/null 2>&1 || [[ -f $(meta_file "relay-${local_port}.json") ]]; then
+            meta_rm_unlocked "relay-${local_port}.json" || {
+                shared_config_unlock
+                err "删除端口转发元数据失败: relay-${local_port}.json"
+            }
+        fi
+    fi
     [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
         [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
     }
@@ -5670,6 +5906,29 @@ relay_delete() {
     else
         _green "\n已删除端口转发配置: relay-${local_port}.json\n"
     fi
+}
+
+relay_note() {
+    local local_port=${1-} relay_cfg relay_file
+    if [[ ! $local_port ]]; then
+        if ! relay_menu_has_entries; then
+            relay_list
+            return 1
+        fi
+        relay_list
+        # Existing relays may be listening; only validate the port format here.
+        local is_cant_test_port=1
+        ask string local_port "输入要编辑备注的监听端口:"
+    fi
+    local_port=$(printf '%s' "$local_port" | tr -d '[:space:]')
+    local_port=${local_port#relay-}
+    local_port=${local_port%.json}
+    [[ $local_port ]] || err "监听端口不能为空."
+    relay_cfg="relay-${local_port}.json"
+    relay_file="$is_conf_dir/$relay_cfg"
+    [[ -f $relay_file ]] || err "未找到端口转发配置 ($relay_cfg)."
+
+    note_apply_cli "$relay_cfg" "${@:2}"
 }
 
 relay_menu_has_entries() {
@@ -5690,7 +5949,7 @@ relay_menu_empty_state() {
 relay_menu() {
     local choice_status
     while :; do
-        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "删除"
+        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "备注" "删除"
         choice_status=$?
         [[ $choice_status == 2 ]] && return
         [[ $choice_status == 0 ]] || return 1
@@ -5706,6 +5965,10 @@ relay_menu() {
             menu_action relay_info
             ;;
         4)
+            relay_menu_empty_state && continue
+            menu_action relay_note
+            ;;
+        5)
             relay_menu_empty_state && continue
             menu_action relay_delete
             ;;
@@ -5724,6 +5987,9 @@ relay_main() {
     info)
         relay_info "${@:2}"
         ;;
+    note)
+        relay_note "${@:2}"
+        ;;
     del | delete | rm)
         relay_delete "${@:2}"
         ;;
@@ -5731,7 +5997,7 @@ relay_main() {
         relay_menu
         ;;
     *)
-        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|delete]"
+        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|note|delete]"
         ;;
     esac
 }
@@ -5766,7 +6032,8 @@ main() {
         block_cn_cli "${@:2}"
         ;;
     c | config | change)
-        change ${@:2}
+        is_change_id=
+        change "${@:2}"
         ;;
     # client | genc)
     #     create client $2
@@ -5911,12 +6178,13 @@ main() {
         relay_main "${@:2}"
         ;;
     *)
+        is_change_id=
         is_try_change=1
-        change test $1
+        change test "$1"
         if [[ $is_change_id ]]; then
             unset is_try_change
             [[ $2 ]] && {
-                change $2 $1 ${@:3}
+                change "$2" "$1" "${@:3}"
             } || {
                 change
             }

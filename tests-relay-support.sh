@@ -140,7 +140,7 @@ jq -e '
 grep -q "restart" "$manage_log" || fail "manage restart should be called on successful add"
 
 # 1.1 Successful relay add with interactive Enter allocating auto port
-auto_add_out=$(printf "\n203.0.113.50\n20050\n" | (main relay add) 2>&1)
+auto_add_out=$(printf "\n203.0.113.50\n20050\n\n" | (main relay add) 2>&1)
 [[ $auto_add_out == *"自动分配本地端口"* ]] || fail "relay add with Enter should output auto port message: $auto_add_out"
 auto_port=$(echo "$auto_add_out" | grep -o '自动分配本地端口: [0-9]\+' | awk '{print $2}')
 [[ -n $auto_port ]] || fail "failed to parse auto allocated port from: $auto_add_out"
@@ -149,7 +149,7 @@ auto_port=$(echo "$auto_add_out" | grep -o '自动分配本地端口: [0-9]\+' |
 # 1.2 Interactive relay add with manually typed port (even matching auto port candidate) must not emit auto allocation message
 (
     get_port() { tmp_port=10003; }
-    manual_typed_out=$(printf "10003\n203.0.113.51\n20051\n" | (main relay add) 2>&1)
+    manual_typed_out=$(printf "10003\n203.0.113.51\n20051\n\n" | (main relay add) 2>&1)
     [[ $manual_typed_out != *"自动分配本地端口"* ]] || exit 10
     [[ -f "$is_conf_dir/relay-10003.json" ]] || exit 11
 ) || fail "relay add with manually typed port should not emit auto allocation message even if matching auto_port"
@@ -236,7 +236,7 @@ if (main relay unknown) >/dev/null 2>&1; then
 fi
 
 # 13.1. relay_menu option 2 is the port-forwarding list and does not prompt for local_port
-del_option=4
+del_option=5
 ret_option=0
 
 menu_out=$(
