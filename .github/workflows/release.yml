@@ -4,36 +4,12 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      action:
-        description: 'build-test-package builds the locked test package; publish releases a verified package.'
-        required: true
-        default: build-test-package
-        type: choice
-        options:
-          - build-test-package
-          - publish
-      package_run_id:
-        description: 'Run id that produced release-test-package (required for publish).'
-        required: false
-        type: string
-      package_sha256:
-        description: 'SHA-256 recorded by that build-test-package run (required for publish).'
-        required: false
-        type: string
-
-concurrency:
-  group: main-release
-  queue: max
 
 permissions:
   contents: write
-  actions: read
 
 jobs:
   build:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -61,35 +37,18 @@ jobs:
           bash tests-skill-inventory.sh
           bash tests-terminology.sh
 
-  build-test-package:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-test-package'
+  release:
+    needs: build
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: checkout
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - name: offline regression and Bash syntax gate
-        run: |
-          set -euo pipefail
-          shell_count=0
-          while IFS= read -r -d '' shell_file; do
-            bash -n "$shell_file"
-            shell_count=$((shell_count + 1))
-          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
-          if ((shell_count == 0)); then
-            echo "No Bash scripts found for syntax validation." >&2
-            exit 1
-          fi
-          sudo -n bash tests-menu-navigation.sh
-          sudo -n bash tests-node-external-frontend.sh
-          sudo -n bash tests-node-name-label.sh
-          sudo -n bash tests-node-proxy-outbound.sh
-          bash tests-update-script-reload.sh
-          bash tests-block-cn.sh
-          bash tests-skill-inventory.sh
-          bash tests-terminology.sh
       - name: read and validate delivery version
+        id: version
         run: |
           set -euo pipefail
           version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
@@ -97,190 +56,56 @@ jobs:
             echo "Delivery version in sing-box.sh must be v1.N, got: ${version:-<empty>}" >&2
             exit 1
           fi
-          if git rev-parse --quiet --verify "refs/tags/${version}" >/dev/null; then
-            echo "Tag ${version} already exists; refusing to build a duplicate test package." >&2
-            exit 1
-          fi
           echo "delivery_version=${version}" >> "$GITHUB_ENV"
-      - name: build test package once
+          if git ls-remote --exit-code --tags origin "refs/tags/${version}" >/dev/null; then
+            echo "Tag ${version} already exists; skipping release for this merge." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: build release package
+        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           mkdir -p .release-artifacts
           tar zcvf .release-artifacts/code.tar.gz install.sh sing-box.sh src LICENSE README.md docs/usage.md assets/readme
-      - name: verify test package layout
+      - name: verify package layout
+        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           archive=.release-artifacts/code.tar.gz
           members="$(tar tzf "$archive")"
           if ! grep -Fxq 'src/core.sh' <<< "$members"; then
-            echo "Test package is missing src/core.sh." >&2
+            echo "Release package is missing src/core.sh." >&2
             exit 1
           fi
           if grep -Fxq 'core.sh' <<< "$members"; then
-            echo "Test package must not contain the removed root management script." >&2
+            echo "Release package must not contain the removed root management script." >&2
             exit 1
           fi
       - name: record package checksum
+        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           sha256sum .release-artifacts/code.tar.gz > .release-artifacts/code.tar.gz.sha256
           checksum="$(cut -d ' ' -f1 .release-artifacts/code.tar.gz.sha256)"
           {
-            echo '### Release test package'
+            echo '### Release package'
             echo
             echo "- version: ${delivery_version}"
-            echo "- artifact: release-test-package"
             echo "- sha256: ${checksum}"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: upload test package
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-test-package
-          path: |
-            .release-artifacts/code.tar.gz
-            .release-artifacts/code.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 7
-
-  publish:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'publish'
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PACKAGE_RUN_ID: ${{ github.event.inputs.package_run_id }}
-      PACKAGE_SHA256: ${{ github.event.inputs.package_sha256 }}
-    steps:
-      - name: checkout
-        uses: actions/checkout@v3
-      - name: validate publish inputs
-        run: |
-          set -euo pipefail
-          if [[ -z "${PACKAGE_RUN_ID}" ]]; then
-            echo "package_run_id is required for publish." >&2
-            exit 1
-          fi
-          if [[ ! "${PACKAGE_RUN_ID}" =~ ^[0-9]+$ ]]; then
-            echo "package_run_id must be a numeric workflow run id." >&2
-            exit 1
-          fi
-          if [[ ! "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "package_sha256 must be a lowercase SHA-256 hex digest." >&2
-            exit 1
-          fi
-      - name: download verified test package
-        run: |
-          set -euo pipefail
-          rm -rf .release-artifacts
-          mkdir -p .release-artifacts
-          gh run download "$PACKAGE_RUN_ID" -n release-test-package -D .release-artifacts
-      - name: verify downloaded package identity
-        run: |
-          set -euo pipefail
-          archive=.release-artifacts/code.tar.gz
-          checksum_file=.release-artifacts/code.tar.gz.sha256
-          if [[ ! -f "$archive" ]]; then
-            echo "release-test-package did not contain the code.tar.gz asset." >&2
-            exit 1
-          fi
-          if [[ ! -f "$checksum_file" ]]; then
-            echo "release-test-package did not contain the code.tar.gz.sha256 asset." >&2
-            exit 1
-          fi
-          recorded_sha256="$(cut -d ' ' -f1 "$checksum_file")"
-          if [[ "$recorded_sha256" != "$PACKAGE_SHA256" ]]; then
-            echo "Recorded package SHA-256 does not match the package_sha256 input; refusing to publish." >&2
-            echo "expected: ${PACKAGE_SHA256}" >&2
-            echo "recorded: ${recorded_sha256}" >&2
-            exit 1
-          fi
-          actual_sha256="$(sha256sum "$archive" | cut -d ' ' -f1)"
-          if [[ "$actual_sha256" != "$PACKAGE_SHA256" ]]; then
-            echo "Package SHA-256 mismatch; refusing to publish." >&2
-            echo "expected: ${PACKAGE_SHA256}" >&2
-            echo "actual:   ${actual_sha256}" >&2
-            exit 1
-          fi
-          run_json="$(gh run view "$PACKAGE_RUN_ID" --json headSha,headBranch,conclusion,status)"
-          run_conclusion="$(jq -r '.conclusion' <<<"$run_json")"
-          run_status="$(jq -r '.status' <<<"$run_json")"
-          head_sha="$(jq -r '.headSha' <<<"$run_json")"
-          head_branch="$(jq -r '.headBranch' <<<"$run_json")"
-          if [[ "$run_conclusion" != "success" ]]; then
-            echo "Package build run ${PACKAGE_RUN_ID} did not succeed (status: ${run_status}, conclusion: ${run_conclusion}); refusing to publish." >&2
-            exit 1
-          fi
-          if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Package build run ${PACKAGE_RUN_ID} did not report a valid head SHA: ${head_sha:-<empty>}" >&2
-            exit 1
-          fi
-          if ! git fetch --no-tags origin "$head_sha"; then
-            echo "Unable to fetch package build commit ${head_sha}; refusing to publish." >&2
-            exit 1
-          fi
-          echo "build_head_sha=${head_sha}"
-          echo "build_head_branch=${head_branch}"
-          if ! git diff --quiet "$head_sha" HEAD -- install.sh sing-box.sh src LICENSE README.md docs/usage.md assets/readme; then
-            echo "Packaged inputs in checkout differ from package build commit ${head_sha}; refusing to publish." >&2
-            exit 1
-          fi
-          echo "packaged_inputs=match"
-          package_version="$(python3 - "$archive" <<'PY'
-          import sys
-          import tarfile
-
-          with tarfile.open(sys.argv[1], "r:gz") as package:
-              members = package.getnames()
-              sing_box = package.extractfile("sing-box.sh").read().decode("utf-8")
-          if "src/core.sh" not in members:
-              raise SystemExit("verified package is missing src/core.sh")
-          if "core.sh" in members:
-              raise SystemExit("verified package must not contain the removed root management script")
-          for line in sing_box.splitlines():
-              if line.startswith("is_sh_ver="):
-                  print(line.split("=", 1)[1].strip())
-                  break
-          else:
-              raise SystemExit("package sing-box.sh is missing is_sh_ver")
-          PY
-          )"
-          tree_version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
-          if [[ ! "$package_version" =~ ^v1\.[0-9]+$ ]]; then
-            echo "Package sing-box.sh has an invalid delivery version: ${package_version:-<empty>}" >&2
-            exit 1
-          fi
-          if [[ "$package_version" != "$tree_version" ]]; then
-            echo "Package version ${package_version} does not match the current tree version ${tree_version}." >&2
-            exit 1
-          fi
-          existing_tag="$(git ls-remote --tags origin "refs/tags/${package_version}")"
-          if [[ -n "$existing_tag" ]]; then
-            echo "Tag ${package_version} already exists; refusing to publish." >&2
-            exit 1
-          fi
-          echo "delivery_version=${package_version}" >> "$GITHUB_ENV"
-          echo "verified_sha256=${actual_sha256}" >> "$GITHUB_ENV"
-      - name: prepare release notes
-        run: |
-          set -euo pipefail
-          {
-            echo "release_body<<RELEASE_BODY"
-            echo "## one-singbox ${delivery_version}"
-            echo
-            echo "- 仓库与 Release 包不再包含根路径 \`core.sh\`；one-singbox 管理脚本的唯一源文件为 \`src/core.sh\`。"
-            echo "- 直接引用根路径 \`core.sh\` 的非官方集成请改用唯一管理脚本源 \`src/core.sh\`。"
-            echo "- 旧安装会在更新过程中，或更新后的第一次 \`sb\` / \`sing-box\` 命令时清理历史根 \`core.sh\`。"
-            echo "- 清理失败只会警告，不阻断管理功能，也不会重启 sing-box 服务。"
-            echo "RELEASE_BODY"
-          } >> "$GITHUB_ENV"
-      - name: publish verified package
+      - name: publish release
+        if: steps.version.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v1
         with:
           files: .release-artifacts/code.tar.gz
           tag_name: ${{ env.delivery_version }}
           target_commitish: ${{ github.sha }}
           prerelease: false
-          body: ${{ env.release_body }}
+          generate_release_notes: true
       - name: re-download and verify published asset
+        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           published_dir=.release-artifacts/published
@@ -292,8 +117,9 @@ jobs:
             echo "Published release is missing the code.tar.gz asset." >&2
             exit 1
           fi
+          expected_sha256="$(cut -d ' ' -f1 .release-artifacts/code.tar.gz.sha256)"
           published_sha256="$(sha256sum "$archive" | cut -d ' ' -f1)"
-          if [[ "$published_sha256" != "$PACKAGE_SHA256" ]]; then
+          if [[ "$published_sha256" != "$expected_sha256" ]]; then
             echo "Published asset SHA-256 mismatch; the release is not the verified package." >&2
             exit 1
           fi
