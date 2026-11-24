@@ -934,12 +934,12 @@ note_summary() {
 
 note_read_line() {
     local target_var=$1
-    local raw= status=0
+    local raw= status=0 read_timeout=${ONE_SINGBOX_READ_TIMEOUT:-3}
     local IFS=
     if [[ -t 0 ]]; then
         interactive_read -r raw || status=$?
     else
-        interactive_read -t 3 -r raw || status=$?
+        interactive_read -t "$read_timeout" -r raw || status=$?
     fi
     if ((status > 128)); then
         printf -v "$target_var" '%s' ''

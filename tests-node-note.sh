@@ -356,15 +356,15 @@ timeout 2 bash -c '
 ' _ "$CORE_FILE" "$case_dir" >"$case_dir/eof.out" 2>&1 || fail "main note hung or failed on /dev/null"
 [[ $(note_get node-a.json) == '防挂死保留' ]] || fail "/dev/null altered note"
 
-timeout 5 bash -c '
+timeout 3 bash -c '
     source <(sed "/EUID != 0/d" "$1")
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
-    export ip=203.0.113.10 is_dont_get_ip=1
+    export ip=203.0.113.10 is_dont_get_ip=1 ONE_SINGBOX_READ_TIMEOUT=0.2
     render_qrcode() { :; }
     manage() { :; }
     main note node-a.json
-' _ "$CORE_FILE" "$case_dir" < <(sleep 6) >"$case_dir/pipe-timeout.out" 2>&1 || fail "main note hung on silent pipe"
+' _ "$CORE_FILE" "$case_dir" < <(exec >/dev/null 2>&1; command sleep 1) >"$case_dir/pipe-timeout.out" 2>&1 || fail "main note hung on silent pipe"
 [[ $(note_get node-a.json) == '防挂死保留' ]] || fail "silent pipe timeout altered note"
 
 [[ $(cat "$is_conf_dir/node-a.json") == "$before_a" ]] || fail "interactive note edits mutated node json"
@@ -719,7 +719,7 @@ cli_out=$(timeout 2 bash -c '
     render_qrcode() { :; }
     manage() { :; }
     main add ss 31101 pass-cli aes-128-gcm
-' _ "$CORE_FILE" "$case_dir" < <(sleep 6) 2>&1) || fail "non-interactive CLI add hung or failed: $cli_out"
+' _ "$CORE_FILE" "$case_dir" < <(exec >/dev/null 2>&1; command sleep 2) 2>&1) || fail "non-interactive CLI add hung or failed: $cli_out"
 ! grep -Fq '输入备注' <<<"$cli_out" || fail "non-interactive CLI add emitted note prompt: $cli_out"
 ! grep -Fq '输入节点名称' <<<"$cli_out" || fail "non-interactive CLI add emitted node name prompt: $cli_out"
 jq -e '.outbound_mode == "V4优先" and (has("note") | not) and (has("node_name") | not)' "$is_conf_dir/.quan-meta/Shadowsocks-31101.json.meta.json" >/dev/null || fail "non-interactive CLI add wrote unexpected note or node_name"
@@ -739,7 +739,7 @@ gen_out=$(is_main_start=1 main gen ss 31103 pass-gen aes-128-gcm </dev/null 2>&1
 eof_out=$(is_main_start=1 add ss 31104 pass-eof aes-128-gcm <<<$'MyEofNode' 2>&1) || fail "interactive add EOF at note failed: $eof_out"
 jq -e '.node_name == "MyEofNode" and .outbound_mode == "V4优先" and (has("note") | not)' "$is_conf_dir/.quan-meta/Shadowsocks-31104.json.meta.json" >/dev/null || fail "interactive add EOF wrote unexpected note"
 
-pipe_out=$(timeout 5 bash -c '
+pipe_out=$(timeout 3 bash -c '
     source <(sed "/EUID != 0/d" "$1")
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
@@ -749,10 +749,11 @@ pipe_out=$(timeout 5 bash -c '
     is_main_start=1
     ip=203.0.113.10
     is_dont_get_ip=1
+    export ONE_SINGBOX_READ_TIMEOUT=0.2
     render_qrcode() { :; }
     manage() { :; }
     add ss 31105 pass-pipe aes-128-gcm
-' _ "$CORE_FILE" "$case_dir" < <(printf 'MyPipeNode\n'; sleep 6) 2>&1) || fail "interactive add hung on silent pipe at note prompt: $pipe_out"
+' _ "$CORE_FILE" "$case_dir" < <(printf 'MyPipeNode\n'; exec >/dev/null 2>&1; command sleep 1) 2>&1) || fail "interactive add hung on silent pipe at note prompt: $pipe_out"
 jq -e '.node_name == "MyPipeNode" and .outbound_mode == "V4优先" and (has("note") | not)' "$is_conf_dir/.quan-meta/Shadowsocks-31105.json.meta.json" >/dev/null || fail "interactive add silent pipe timeout wrote unexpected note"
 CASE
 }

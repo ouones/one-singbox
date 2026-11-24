@@ -125,7 +125,7 @@ add_plain_out=$(timeout 2 bash -c '
     systemctl() { return 0; }
     is_port_used() { :; }
     main relay add 10000 203.0.113.10 20000
-' _ "$CORE_FILE" "$case_dir" "$FAKE_CORE" < <(command sleep 5) 2>&1) || fail "CLI 3-arg relay add blocked or failed: $add_plain_out"
+' _ "$CORE_FILE" "$case_dir" "$FAKE_CORE" < <(exec >/dev/null 2>&1; command sleep 2) 2>&1) || fail "CLI 3-arg relay add blocked or failed: $add_plain_out"
 [[ ! -f "$is_conf_dir/.quan-meta/relay-10000.json.meta.json" ]] || fail "CLI 3-arg relay add without note created metadata"
 [[ $add_plain_out != *'输入备注'* ]] || fail "CLI 3-arg relay add prompted for note: $add_plain_out"
 [[ $add_plain_out != *'备注:'* ]] || fail "CLI 3-arg relay add output should omit 备注 when empty: $add_plain_out"
@@ -166,19 +166,19 @@ grep -Fq '输入备注 (可选，直接回车跳过):' <<<"$skip_out" || fail "i
 [[ $skip_out != *'备注:'* ]] || fail "interactive skip echo showed 备注: $skip_out"
 
 # 6. Interactive add with silent open pipe after 3 inputs does not hang indefinitely (anti-hang guard).
-timeout 5 bash -c '
+timeout 3 bash -c '
     source <(sed "/EUID != 0/d" "$1")
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     is_config_json="$2/config.json"
     is_core_bin="$3"
     is_core_ver=1.14.0
-    export ip=203.0.113.10 is_dont_get_ip=1
+    export ip=203.0.113.10 is_dont_get_ip=1 ONE_SINGBOX_READ_TIMEOUT=0.2
     manage() { :; }
     systemctl() { return 0; }
     is_port_used() { :; }
     main relay add
-' _ "$CORE_FILE" "$case_dir" "$FAKE_CORE" < <(printf '10006\n203.0.113.16\n20006\n'; command sleep 6) >"$case_dir/slice1-timeout.out" 2>&1 || fail "interactive relay add hung on silent pipe after target port"
+' _ "$CORE_FILE" "$case_dir" "$FAKE_CORE" < <(printf '10006\n203.0.113.16\n20006\n'; exec >/dev/null 2>&1; command sleep 1) >"$case_dir/slice1-timeout.out" 2>&1 || fail "interactive relay add hung on silent pipe after target port"
 [[ -f "$is_conf_dir/relay-10006.json" ]] || fail "anti-hang relay add did not create relay-10006.json"
 [[ ! -f "$is_conf_dir/.quan-meta/relay-10006.json.meta.json" ]] || fail "anti-hang timeout created metadata"
 CASE
@@ -303,12 +303,13 @@ timeout 2 bash -c '
 ' _ "$REPO_DIR/src/core.sh" "$case_dir" >"$case_dir/slice3-eof.out" 2>&1 || fail "relay note hung or failed on /dev/null"
 [[ $(note_get relay-12000.json) == '防挂死保留' ]] || fail "/dev/null altered relay note"
 
-timeout 5 bash -c '
+timeout 3 bash -c '
     source <(sed "/EUID != 0/d" "$1")
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
+    export ONE_SINGBOX_READ_TIMEOUT=0.2
     main relay note 12000
-' _ "$REPO_DIR/src/core.sh" "$case_dir" < <(command sleep 6) >"$case_dir/slice3-pipe.out" 2>&1 || fail "relay note hung on silent pipe"
+' _ "$REPO_DIR/src/core.sh" "$case_dir" < <(exec >/dev/null 2>&1; command sleep 1) >"$case_dir/slice3-pipe.out" 2>&1 || fail "relay note hung on silent pipe"
 [[ $(note_get relay-12000.json) == '防挂死保留' ]] || fail "silent pipe altered relay note"
 
 # 6. Omitting port lists relays and accepts active listening port without leaking is_cant_test_port.
