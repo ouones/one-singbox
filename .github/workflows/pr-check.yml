@@ -20,25 +20,5 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: offline regression and Bash syntax gate
-        run: |
-          set -euo pipefail
-          shell_count=0
-          while IFS= read -r -d '' shell_file; do
-            bash -n "$shell_file"
-            shell_count=$((shell_count + 1))
-          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
-          if ((shell_count == 0)); then
-            echo "No Bash scripts found for syntax validation." >&2
-            exit 1
-          fi
-          sudo -n bash tests-menu-navigation.sh
-          sudo -n bash tests-node-external-frontend.sh
-          sudo -n bash tests-node-name-label.sh
-          bash tests-node-note.sh
-          bash tests-relay-note.sh
-          sudo -n bash tests-node-proxy-outbound.sh
-          bash tests-update-script-reload.sh
-          bash tests-block-cn.sh
-          bash tests-skill-inventory.sh
-          bash tests-terminology.sh
+      - name: offline regression and static checks
+        run: sudo -n bash scripts/run-offline-tests.sh --jobs 2
