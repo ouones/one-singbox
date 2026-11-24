@@ -1482,7 +1482,7 @@ EOF
     rm -f "$is_core_dir/.block-cn-enabled" "$is_core_dir/.cn-whitelist.json"
     exit 0
     ;;
-fallback-suffix-rule-order)
+direct-fallback-rule-order)
     cat >"$is_conf_dir/node-two.json" <<'EOF'
 {"inbounds":[{"tag":"node-two.json","type":"shadowsocks","listen":"::","listen_port":23456,"method":"aes-128-gcm","password":"pwd"}]}
 EOF
@@ -1570,7 +1570,7 @@ if [[ ${1:-} ]]; then
 fi
 
 run_core_case "$repo_root/src/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback fallback-suffix-rule-order; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback direct-fallback-rule-order; do
     echo "[src/core.sh: $scenario]"
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
