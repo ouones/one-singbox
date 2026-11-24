@@ -69,78 +69,6 @@ SYS
 }
 export -f setup_lifecycle_test_bin
 
-run_slice1_helpers() {
-    local core_file=$1
-    CORE_FILE="$core_file" WORKDIR="$workdir" bash <<'CASE' || exit 1
-set -o pipefail
-
-fail() {
-    echo "FAIL(${CORE_FILE}): $*" >&2
-    exit 1
-}
-
-source <(sed '/EUID != 0/d' "$CORE_FILE")
-case_dir="$WORKDIR/slice1"
-mkdir -p "$case_dir/core" "$case_dir/conf"
-is_core_dir="$case_dir/core"
-is_conf_dir="$case_dir/conf"
-is_config_json="$case_dir/config.json"
-is_dont_auto_exit=1
-export ip=203.0.113.10 is_dont_get_ip=1
-
-manage_log="$case_dir/manage.log"
-: >"$manage_log"
-manage() { printf '%s\n' "$*" >>"$manage_log"; }
-systemctl() { printf '%s\n' "$*" >>"$manage_log"; return 0; }
-
-printf '{"inbounds":[{"tag":"node-a.json","type":"shadowsocks","listen_port":12345}]}\n' >"$is_conf_dir/node-a.json"
-printf '{"outbounds":[{"tag":"direct","type":"direct"}]}\n' >"$is_config_json"
-before_node=$(cat "$is_conf_dir/node-a.json")
-before_cfg=$(cat "$is_config_json")
-
-# 1. note_trim normalizes surrounding whitespace and line breaks without dropping internal spaces or leading dash.
-[[ $(note_trim $'  \t美国  落地 节点 \r\n ') == '美国  落地 节点' ]] || fail "note_trim failed to normalize surrounding whitespace"
-[[ $(note_trim '  -flag-like  ') == '-flag-like' ]] || fail "note_trim failed on leading dash"
-[[ -z $(note_trim $'  \t \r\n ') ]] || fail "note_trim on whitespace-only should be empty"
-
-# 2. note_set / note_get / note_clear / meta_del preserve sibling metadata and remove empty .meta.json files.
-note_set node-a.json '  东京 IPLC  ' || fail "note_set failed on clean node"
-meta_path="$is_conf_dir/.quan-meta/node-a.json.meta.json"
-[[ -f $meta_path ]] || fail "meta file was not created by note_set"
-[[ $(jq -r '.note' "$meta_path") == '东京 IPLC' ]] || fail "stored note was not trimmed: $(cat "$meta_path")"
-[[ $(note_get node-a.json) == '东京 IPLC' ]] || fail "note_get mismatch"
-
-note_clear node-a.json || fail "note_clear failed"
-[[ ! -e $meta_path ]] || fail "clearing the only metadata key must remove empty meta file"
-[[ -z $(note_get node-a.json) ]] || fail "note_get after clear should be empty"
-
-jq -n '{node_name:"KeepName",outbound_mode:"V6优先"}' >"$meta_path"
-note_set node-a.json '  香港 备用  ' || fail "note_set with sibling metadata failed"
-jq -e '.node_name == "KeepName" and .outbound_mode == "V6优先" and .note == "香港 备用"' "$meta_path" >/dev/null || fail "note_set clobbered sibling metadata"
-
-note_set node-a.json '   ' || fail "note_set with whitespace should succeed by clearing"
-jq -e '.node_name == "KeepName" and .outbound_mode == "V6优先" and (has("note") | not)' "$meta_path" >/dev/null || fail "whitespace note_set did not delete .note while preserving siblings"
-
-meta_del node-a.json node_name || fail "meta_del node_name failed"
-meta_del node-a.json outbound_mode || fail "meta_del outbound_mode failed"
-[[ ! -e $meta_path ]] || fail "meta_del of last remaining key must delete empty meta file"
-
-# 3. note_summary truncates by Unicode characters (30 chars) even under LC_ALL=C.
-cjk30='一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十'
-cjk31="${cjk30}甲"
-mixed30='ab一二三四五六七八九十一二三四五六七八九十一二三四五六七八'
-mixed31="${mixed30}9"
-[[ $(note_summary "$cjk30") == "$cjk30" ]] || fail "30 CJK chars must not be truncated"
-[[ $(note_summary "$cjk31") == "${cjk30}..." ]] || fail "31 CJK chars should truncate to 30 chars + ..."
-[[ $(note_summary "$mixed30") == "$mixed30" ]] || fail "30 mixed chars must not be truncated"
-[[ $(note_summary "$mixed31") == "${mixed30}..." ]] || fail "31 mixed chars should truncate to 30 chars + ..."
-
-[[ $(cat "$is_conf_dir/node-a.json") == "$before_node" ]] || fail "note helpers mutated node json"
-[[ $(cat "$is_config_json") == "$before_cfg" ]] || fail "note helpers mutated runtime config.json"
-[[ ! -s $manage_log ]] || fail "note helpers triggered service management"
-CASE
-}
-
 run_slice2_info_display() {
     local core_file=$1
     CORE_FILE="$core_file" WORKDIR="$workdir" bash <<'CASE' || exit 1
@@ -280,6 +208,37 @@ INPUT
 grep -Fq '1) node-a.json  [备注: 一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十...]' <<<"$del_out" || fail "node_menu delete list missing note summary: $del_out"
 grep -Fq '将删除节点“node-a.json”及其配置文件 node-a.json' <<<"$del_out" || fail "delete confirmation received polluted filename: $del_out"
 [[ -f "$is_conf_dir/node-a.json" ]] || fail "canceled delete removed node-a.json"
+
+# 3. 30 Unicode character truncation boundary (CJK & mixed ASCII+CJK) holds even under LC_ALL=C.
+cjk30='一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十'
+cjk31="${cjk30}甲"
+mixed30='ab一二三四五六七八九十一二三四五六七八九十一二三四五六七八'
+mixed31="${mixed30}9"
+
+(is_main_start= main note node-a.json "$cjk30") >/dev/null || fail "main note cjk30 failed"
+(is_main_start= main note node-b.json "$mixed30") >/dev/null || fail "main note mixed30 failed"
+exact30_out=$(
+    export LC_ALL=C
+    is_config_file=
+    get file <<<$'1\n' 2>&1
+) || fail "get file for 30-char boundary failed: $exact30_out"
+grep -Fxq "1) node-a.json  [备注: ${cjk30}]" <<<"$exact30_out" || fail "30 CJK chars must not be truncated in list: $exact30_out"
+grep -Fxq "2) node-b.json  [备注: ${mixed30}]" <<<"$exact30_out" || fail "30 mixed chars must not be truncated in list: $exact30_out"
+
+(is_main_start= main note node-a.json "$cjk31") >/dev/null || fail "main note cjk31 failed"
+(is_main_start= main note node-b.json "$mixed31") >/dev/null || fail "main note mixed31 failed"
+over30_out=$(
+    export LC_ALL=C
+    is_config_file=
+    get file <<<$'1\n' 2>&1
+) || fail "get file for 31-char boundary failed: $over30_out"
+grep -Fxq "1) node-a.json  [备注: ${cjk30}...]" <<<"$over30_out" || fail "31 CJK chars should truncate to 30 chars + ... under LC_ALL=C: $over30_out"
+grep -Fxq "2) node-b.json  [备注: ${mixed30}...]" <<<"$over30_out" || fail "31 mixed chars should truncate to 30 chars + ... under LC_ALL=C: $over30_out"
+
+info31_a=$(is_main_start= info node-a.json 2>&1) || fail "info cjk31 failed"
+grep -Fq "$cjk31" <<<"$info31_a" || fail "info truncated 31-char CJK note: $info31_a"
+info31_b=$(is_main_start= info node-b.json 2>&1) || fail "info mixed31 failed"
+grep -Fq "$mixed31" <<<"$info31_b" || fail "info truncated 31-char mixed note: $info31_b"
 CASE
 }
 
@@ -390,16 +349,22 @@ timeout 2 bash -c '
     source <(sed "/EUID != 0/d" "$1")
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
-    note_edit_interactive node-a.json </dev/null
-' _ "$CORE_FILE" "$case_dir" >"$case_dir/eof.out" 2>&1 || fail "note_edit_interactive hung or failed on /dev/null"
+    export ip=203.0.113.10 is_dont_get_ip=1
+    render_qrcode() { :; }
+    manage() { :; }
+    main note node-a.json </dev/null
+' _ "$CORE_FILE" "$case_dir" >"$case_dir/eof.out" 2>&1 || fail "main note hung or failed on /dev/null"
 [[ $(note_get node-a.json) == '防挂死保留' ]] || fail "/dev/null altered note"
 
 timeout 5 bash -c '
     source <(sed "/EUID != 0/d" "$1")
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
-    note_edit_interactive node-a.json
-' _ "$CORE_FILE" "$case_dir" < <(sleep 6) >"$case_dir/pipe-timeout.out" 2>&1 || fail "note_edit_interactive hung on silent pipe"
+    export ip=203.0.113.10 is_dont_get_ip=1
+    render_qrcode() { :; }
+    manage() { :; }
+    main note node-a.json
+' _ "$CORE_FILE" "$case_dir" < <(sleep 6) >"$case_dir/pipe-timeout.out" 2>&1 || fail "main note hung on silent pipe"
 [[ $(note_get node-a.json) == '防挂死保留' ]] || fail "silent pipe timeout altered note"
 
 [[ $(cat "$is_conf_dir/node-a.json") == "$before_a" ]] || fail "interactive note edits mutated node json"
@@ -456,9 +421,15 @@ before_cfg=$(cat "$is_config_json")
 [[ -z $(note_get node-a.json) ]] || fail "main change note --clear did not clear note"
 [[ ! -e "$is_conf_dir/.quan-meta/node-a.json.meta.json" ]] || fail "main change note --clear left empty meta file"
 
-# 3. sb note <node> with quoted value, 'auto', unquoted words, and --clear.
+# 3. sb note <node> with quoted value, tabs/CRLF normalization, leading dash, 'auto', unquoted words, and --clear.
 (main note node-a.json '  美国   BGP * 测试  ') >/dev/null || fail "main note quoted failed"
 [[ $(note_get node-a.json) == '美国   BGP * 测试' ]] || fail "main note quoted mismatch: '$(note_get node-a.json)'"
+
+(main note node-a.json $'  \t美国  落地 节点 \r\n ') >/dev/null || fail "main note surrounding tabs/CRLF failed"
+[[ $(jq -r '.note' "$is_conf_dir/.quan-meta/node-a.json.meta.json") == '美国  落地 节点' ]] || fail "main note did not normalize surrounding whitespace and line breaks"
+
+(main note node-a.json '  -flag-like  ') >/dev/null || fail "main note leading dash failed"
+[[ $(jq -r '.note' "$is_conf_dir/.quan-meta/node-a.json.meta.json") == '-flag-like' ]] || fail "main note altered leading dash"
 
 (main note node-a.json auto) >/dev/null || fail "main note literal 'auto' failed"
 [[ $(note_get node-a.json) == 'auto' ]] || fail "main note treated 'auto' as keyword instead of literal note: '$(note_get node-a.json)'"
@@ -468,6 +439,7 @@ before_cfg=$(cat "$is_config_json")
 
 (main note node-a.json --clear) >/dev/null || fail "main note --clear failed"
 [[ -z $(note_get node-a.json) ]] || fail "main note --clear did not clear"
+[[ ! -e "$is_conf_dir/.quan-meta/node-a.json.meta.json" ]] || fail "main note --clear left empty meta file"
 
 # 4. Omitting note text enters interactive edit; omitting node selects node first.
 (main note node-b.json <<<$'交互快捷备注\n') >/dev/null || fail "main note <node> interactive failed"
@@ -483,19 +455,34 @@ INPUT
 ) || fail "main note (no node) failed: $omit_node_out"
 [[ $(note_get node-b.json) == '无节点快捷备注' ]] || fail "main note (no node) did not save note to chosen node"
 
-# 5. Whitespace-only CLI note is rejected without clearing existing note.
-if (main note node-b.json '   ') >/dev/null 2>&1; then
-    fail "whitespace-only CLI note should fail instead of silently clearing"
-fi
-[[ $(note_get node-b.json) == '无节点快捷备注' ]] || fail "rejected whitespace-only CLI note modified existing note"
+# 5. Whitespace-only CLI note (spaces, tabs, CRLF) is rejected without clearing existing note.
+for ws in '   ' $'  \t \r\n '; do
+    if (main note node-b.json "$ws") >/dev/null 2>&1; then
+        fail "whitespace-only CLI note should fail instead of silently clearing"
+    fi
+    [[ $(note_get node-b.json) == '无节点快捷备注' ]] || fail "rejected whitespace-only CLI note modified existing note"
+done
 
-# 6. Stale is_change_id does not leak into subsequent main calls in the same shell.
+# 6. Setting and --clear-ing note via CLI preserves sibling metadata while removing .note key.
+mkdir -p "$is_conf_dir/.quan-meta"
+jq -n '{node_name:"KeepName",outbound_mode:"V6优先"}' >"$is_conf_dir/.quan-meta/node-a.json.meta.json"
+set_sib_out=$(main note node-a.json '  香港 备用  ' 2>&1) || fail "main note with sibling metadata failed: $set_sib_out"
+jq -e '.node_name == "KeepName" and .outbound_mode == "V6优先" and .note == "香港 备用"' "$is_conf_dir/.quan-meta/node-a.json.meta.json" >/dev/null || fail "main note clobbered sibling metadata"
+grep -Fq 'IPv6 优先' <<<"$set_sib_out" && grep -Fq '香港 备用' <<<"$set_sib_out" || fail "main note info missing sibling outbound or note: $set_sib_out"
+
+clear_sib_out=$(main note node-a.json --clear 2>&1) || fail "main note --clear with sibling metadata failed: $clear_sib_out"
+jq -e '.node_name == "KeepName" and .outbound_mode == "V6优先" and (has("note") | not)' "$is_conf_dir/.quan-meta/node-a.json.meta.json" >/dev/null || fail "main note --clear failed to preserve sibling metadata"
+! grep -Eq '备注[[:space:]]*=' <<<"$clear_sib_out" || fail "info after --clear still showed 备注 field: $clear_sib_out"
+sib_info_after=$(info node-a.json 2>&1) || fail "info node-a after --clear failed: $sib_info_after"
+! grep -Fq '备注' <<<"$sib_info_after" || fail "info node-a after --clear still showed 备注: $sib_info_after"
+
+# 7. Stale is_change_id does not leak into subsequent main calls in the same shell.
 main note node-a.json '不串台' >/dev/null || fail "same-shell main note failed"
 if (main unknown_subcommand) >/dev/null 2>&1; then
     fail "unknown subcommand succeeded due to leaked is_change_id"
 fi
 
-# 7. Real sing-box.sh -> src/init.sh entry preserves quoted spaces and glob characters.
+# 8. Real sing-box.sh -> src/init.sh entry preserves quoted spaces and glob characters.
 entry_root="$case_dir/entry"
 mkdir -p "$entry_root/etc/sing-box/sh/src" "$entry_root/etc/sing-box/bin" "$entry_root/etc/sing-box/conf" "$entry_root/var/log/sing-box" "$entry_root/usr/local/bin" "$entry_root/bin"
 cp -R "$REPO_DIR/src/." "$entry_root/etc/sing-box/sh/src/"
@@ -1060,7 +1047,6 @@ jq -e '.node_name == "FreshAlias" and .outbound_mode == "V4优先" and (has("not
 CASE
 }
 
-run_slice1_helpers "$repo_root/src/core.sh"
 run_slice2_info_display "$repo_root/src/core.sh"
 run_slice3_node_selection_list "$repo_root/src/core.sh"
 run_slice4_interactive_edit "$repo_root/src/core.sh"

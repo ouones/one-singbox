@@ -977,6 +977,35 @@ note_edit_interactive() {
     printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed"
 }
 
+note_apply_cli() {
+    local cfg=${1-}
+    [[ $cfg ]] || return 1
+    if (($# < 2)) || { (($# == 2)) && [[ -z $2 ]]; }; then
+        note_edit_interactive "$cfg" || return $?
+    elif (($# == 2)) && [[ $2 == '--clear' ]]; then
+        note_clear "$cfg" || err "清空备注失败."
+        msg "\n已清空备注.\n"
+    else
+        local IFS=' '
+        local raw_note="${*:2}" trimmed_note
+        trimmed_note=$(note_trim "$raw_note")
+        [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
+        note_set "$cfg" "$trimmed_note" || err "保存备注失败."
+        printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
+    fi
+}
+
+note_format_list_label() {
+    local cfg=$1 base_label=$2 note= summary=
+    [[ $cfg ]] && note=$(note_get "$cfg")
+    if [[ $note ]]; then
+        summary=$(note_summary "$note")
+        printf '%s  [备注: %s]\n' "$base_label" "${summary:-$note}"
+    else
+        printf '%s\n' "$base_label"
+    fi
+}
+
 meta_rm_unlocked() {
     local cfg=$1
     local f
@@ -4155,20 +4184,7 @@ change() {
         ;;
     21)
         # note
-        [[ $is_config_file ]] || return 1
-        if (($# < 3)) || { (($# == 3)) && [[ -z $3 ]]; }; then
-            note_edit_interactive "$is_config_file" || return $?
-        elif (($# == 3)) && [[ $3 == '--clear' ]]; then
-            note_clear "$is_config_file" || err "清空备注失败."
-            msg "\n已清空备注.\n"
-        else
-            local IFS=' '
-            local raw_note="${*:3}" trimmed_note
-            trimmed_note=$(note_trim "$raw_note")
-            [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
-            note_set "$is_config_file" "$trimmed_note" || err "保存备注失败."
-            printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
-        fi
+        note_apply_cli "$is_config_file" "${@:3}" || return $?
         info
         ;;
     esac
@@ -4765,7 +4781,7 @@ add() {
 # get config info
 # or somes required args
 get() {
-    local get_status is_cfg_item is_cfg_note is_cfg_summary is_file_display_list
+    local get_status is_cfg_item is_file_display_list
     case $1 in
     addr)
         is_public_port=$port
@@ -4804,16 +4820,8 @@ get() {
             [[ $is_dont_auto_exit ]] && return
             is_file_display_list=()
             for is_cfg_item in "${is_all_json[@]}"; do
-                is_cfg_note=
-                if declare -F note_get >/dev/null 2>&1; then
-                    is_cfg_note=$(note_get "$is_cfg_item")
-                fi
-                if [[ $is_cfg_note ]]; then
-                    is_cfg_summary=$is_cfg_note
-                    if declare -F note_summary >/dev/null 2>&1; then
-                        is_cfg_summary=$(note_summary "$is_cfg_note")
-                    fi
-                    is_file_display_list+=("$is_cfg_item  [备注: $is_cfg_summary]")
+                if declare -F note_format_list_label >/dev/null 2>&1; then
+                    is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
                 else
                     is_file_display_list+=("$is_cfg_item")
                 fi
@@ -5211,16 +5219,12 @@ info() {
     esac
     is_can_change+=(21)
     local info_cfg=${is_config_file:-$is_config_name}
-    local info_outbound_display= info_note=
-    if declare -F current_outbound_mode_display >/dev/null 2>&1; then
-        info_outbound_display=$(current_outbound_mode_display "$info_cfg")
-    fi
+    local info_outbound_display info_note
+    info_outbound_display=$(current_outbound_mode_display "$info_cfg")
     [[ $info_outbound_display ]] || info_outbound_display='IPv4 优先'
     is_info_show+=(26)
     is_info_str+=("$info_outbound_display")
-    if declare -F note_get >/dev/null 2>&1; then
-        info_note=$(note_get "$info_cfg")
-    fi
+    info_note=$(note_get "$info_cfg")
     if [[ $info_note ]]; then
         is_info_show+=(27)
         is_info_str+=("$info_note")
@@ -5818,7 +5822,7 @@ relay_info() {
 }
 
 relay_list() {
-    local files count=0 file l_port r_addr r_port cfg_name r_note r_summary
+    local files count=0 file l_port r_addr r_port cfg_name base_label
     shopt -s nullglob
     files=("$is_conf_dir"/relay-*.json)
     shopt -u nullglob
@@ -5840,18 +5844,11 @@ relay_list() {
         r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
         r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
         cfg_name=${file##*/}
-        r_note=
-        if declare -F note_get >/dev/null 2>&1; then
-            r_note=$(note_get "$cfg_name")
-        fi
-        if [[ $r_note ]]; then
-            r_summary=$r_note
-            if declare -F note_summary >/dev/null 2>&1; then
-                r_summary=$(note_summary "$r_note")
-            fi
-            printf '监听端口 %s -> 目标 %s:%s (TCP/UDP)  [备注: %s]\n' "$l_port" "$r_addr" "$r_port" "$r_summary"
+        base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+        if declare -F note_format_list_label >/dev/null 2>&1; then
+            printf '%s\n' "$(note_format_list_label "$cfg_name" "$base_label")"
         else
-            msg "监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+            msg "$base_label"
         fi
         ((count++))
     done
@@ -5914,7 +5911,7 @@ relay_delete() {
 relay_note() {
     local local_port=${1-} relay_cfg relay_file
     if [[ ! $local_port ]]; then
-        if declare -F relay_menu_has_entries >/dev/null 2>&1 && ! relay_menu_has_entries; then
+        if ! relay_menu_has_entries; then
             relay_list
             return 1
         fi
@@ -5931,19 +5928,7 @@ relay_note() {
     relay_file="$is_conf_dir/$relay_cfg"
     [[ -f $relay_file ]] || err "未找到端口转发配置 ($relay_cfg)."
 
-    if (($# < 2)) || { (($# == 2)) && [[ -z $2 ]]; }; then
-        note_edit_interactive "$relay_cfg" || return $?
-    elif (($# == 2)) && [[ $2 == '--clear' ]]; then
-        note_clear "$relay_cfg" || err "清空备注失败."
-        msg "\n已清空备注.\n"
-    else
-        local IFS=' '
-        local raw_note="${*:2}" trimmed_note
-        trimmed_note=$(note_trim "$raw_note")
-        [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
-        note_set "$relay_cfg" "$trimmed_note" || err "保存备注失败."
-        printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
-    fi
+    note_apply_cli "$relay_cfg" "${@:2}"
 }
 
 relay_menu_has_entries() {
