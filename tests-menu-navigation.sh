@@ -393,7 +393,7 @@ is_main_start=1
 
 output=$(printf '2\n\n0\n5\n' | relay_menu)
 [[ $output == *'暂无端口转发，请先添加'* ]] || fail "empty relay state is explained: $output"
-[[ $(cat "$menu_file") == $'添加\n列表\n查看\n删除' ]] || fail "relay menu uses concise action labels in order: $(cat "$menu_file")"
+[[ $(cat "$menu_file") == $'添加\n列表\n查看\n备注\n删除' ]] || fail "relay menu uses concise action labels in order: $(cat "$menu_file")"
 [[ $output == *'0) 返回上级'* ]] || fail "relay menu shows the shared return item: $output"
 [[ $output == *'按回车返回菜单'* ]] || fail "empty relay state remains visible until return: $output"
 [[ $(grep -o '请选择端口转发操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to relay menu: $output"
@@ -414,6 +414,7 @@ fail() {
 source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^note_trim() {/,/^}/p; /^note_read_line() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_add() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
@@ -443,7 +444,7 @@ mkdir -p "$is_conf_dir"
 is_core_bin=/bin/true
 is_main_start=1
 
-output=$(printf '1\n\n203.0.113.50\n20050\n\n0\n5\n' | relay_menu)
+output=$(printf '1\n\n203.0.113.50\n20050\n\n\n0\n5\n' | relay_menu)
 [[ $output == *'输入监听端口'* && $output == *'回车自动分配'* ]] || fail "add explains the auto-assigned listener port: $output"
 [[ $output == *'输入目标地址'* && $output == *'输入目标端口'* ]] || fail "add labels both target inputs: $output"
 [[ $output == *'自动分配本地端口: 12000'* ]] || fail "Enter still selects and reports the automatic listener port: $output"
@@ -541,13 +542,13 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 JSON
 is_main_start=1
 
-output=$(printf '4\n10000\nn\n\n0\n5\n' | relay_menu)
+output=$(printf '5\n10000\nn\n\n0\n5\n' | relay_menu)
 [[ $output == *'输入要删除的监听端口'* ]] || fail "delete requests the listener port by name: $output"
 [[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
 [[ $output == *'已取消删除端口转发'* ]] || fail "cancel is reported without deleting the relay: $output"
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
-output=$(printf '4\n10000\ny\n\n0\n5\n' | relay_menu)
+output=$(printf '5\n10000\ny\n\n0\n5\n' | relay_menu)
 [[ $output == *'将删除监听端口 10000 → 203.0.113.60:20060 的端口转发'* && $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "confirmed deletion explains the forwarding target and scope: $output"
 [[ $output == *'已删除端口转发配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
 [[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'

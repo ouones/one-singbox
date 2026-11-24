@@ -5664,17 +5664,28 @@ relay_warn_security() {
 }
 
 relay_info_show() {
-    local l_port=$1 r_addr=$2 r_port=$3
+    local l_port=$1 r_addr=$2 r_port=$3 r_note=
+    if declare -F note_get >/dev/null 2>&1; then
+        r_note=$(note_get "relay-${l_port}.json")
+    fi
     msg "类型: TCP/UDP 端口转发"
     msg "监听地址: ::"
     msg "监听端口: $l_port"
     msg "目标地址: $r_addr"
     msg "目标端口: $r_port"
+    if [[ $r_note ]]; then
+        printf '备注: %s\n' "$r_note"
+    fi
 }
 
 relay_add() {
-    local local_port=$1 remote_addr=$2 remote_port=$3
+    local local_port=${1-} remote_addr=${2-} remote_port=${3-} relay_note= interactive_add=0 raw_note=
+    if (($# >= 4)); then
+        local IFS=' '
+        relay_note=$(note_trim "${*:4}")
+    fi
     if [[ ! $local_port ]]; then
+        interactive_add=1
         while :; do
             get_port
             local_port=$tmp_port
@@ -5691,16 +5702,25 @@ relay_add() {
     config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
 
     if [[ ! $remote_addr ]]; then
+        interactive_add=1
         ask string remote_addr "输入目标地址 (IPv4、IPv6 或域名):"
     fi
     remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [[ -n $remote_addr ]] || err "目标地址不能为空."
 
     if [[ ! $remote_port ]]; then
+        interactive_add=1
         ask string remote_port "输入目标端口 (1-65535):"
     fi
     remote_port=$(echo "$remote_port" | tr -d ' ')
     [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
+
+    if ((interactive_add == 1 && $# < 4)); then
+        echo -ne "输入备注 (可选，直接回车跳过):"
+        if note_read_line raw_note; then
+            relay_note=$(note_trim "$raw_note")
+        fi
+    fi
 
     local relay_file="$is_conf_dir/relay-${local_port}.json"
     local tmp_file
@@ -5739,6 +5759,9 @@ relay_add() {
     fi
 
     shared_config_unlock
+    if [[ $relay_note ]]; then
+        note_set "relay-${local_port}.json" "$relay_note" || err "保存备注失败."
+    fi
     manage restart &
     if [[ $is_main_start ]]; then
         msg "\n$(_green '端口转发配置添加成功!')"
@@ -5775,7 +5798,7 @@ relay_info() {
 }
 
 relay_list() {
-    local files count=0 file l_port r_addr r_port
+    local files count=0 file l_port r_addr r_port cfg_name r_note r_summary
     shopt -s nullglob
     files=("$is_conf_dir"/relay-*.json)
     shopt -u nullglob
@@ -5796,7 +5819,20 @@ relay_list() {
         l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
         r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
         r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
-        msg "监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+        cfg_name=${file##*/}
+        r_note=
+        if declare -F note_get >/dev/null 2>&1; then
+            r_note=$(note_get "$cfg_name")
+        fi
+        if [[ $r_note ]]; then
+            r_summary=$r_note
+            if declare -F note_summary >/dev/null 2>&1; then
+                r_summary=$(note_summary "$r_note")
+            fi
+            printf '监听端口 %s -> 目标 %s:%s (TCP/UDP)  [备注: %s]\n' "$l_port" "$r_addr" "$r_port" "$r_summary"
+        else
+            msg "监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+        fi
         ((count++))
     done
     msg "------------------------------------"
@@ -5835,6 +5871,14 @@ relay_delete() {
         fi
     fi
     rm -f "$backup_file"
+    if declare -F meta_rm_unlocked >/dev/null 2>&1; then
+        if ! declare -F meta_file >/dev/null 2>&1 || [[ -f $(meta_file "relay-${local_port}.json") ]]; then
+            meta_rm_unlocked "relay-${local_port}.json" || {
+                shared_config_unlock
+                err "删除端口转发元数据失败: relay-${local_port}.json"
+            }
+        fi
+    fi
     [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
         [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
     }
@@ -5844,6 +5888,41 @@ relay_delete() {
         _green "\n已删除端口转发配置: relay-${local_port}.json\n"
     else
         _green "\n已删除端口转发配置: relay-${local_port}.json\n"
+    fi
+}
+
+relay_note() {
+    local local_port=${1-} relay_cfg relay_file
+    if [[ ! $local_port ]]; then
+        if declare -F relay_menu_has_entries >/dev/null 2>&1 && ! relay_menu_has_entries; then
+            relay_list
+            return 1
+        fi
+        relay_list
+        # Existing relays may be listening; only validate the port format here.
+        local is_cant_test_port=1
+        ask string local_port "输入要编辑备注的监听端口:"
+    fi
+    local_port=$(printf '%s' "$local_port" | tr -d '[:space:]')
+    local_port=${local_port#relay-}
+    local_port=${local_port%.json}
+    [[ $local_port ]] || err "监听端口不能为空."
+    relay_cfg="relay-${local_port}.json"
+    relay_file="$is_conf_dir/$relay_cfg"
+    [[ -f $relay_file ]] || err "未找到端口转发配置 ($relay_cfg)."
+
+    if (($# < 2)) || { (($# == 2)) && [[ -z $2 ]]; }; then
+        note_edit_interactive "$relay_cfg" || return $?
+    elif (($# == 2)) && [[ $2 == '--clear' ]]; then
+        note_clear "$relay_cfg" || err "清空备注失败."
+        msg "\n已清空备注.\n"
+    else
+        local IFS=' '
+        local raw_note="${*:2}" trimmed_note
+        trimmed_note=$(note_trim "$raw_note")
+        [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
+        note_set "$relay_cfg" "$trimmed_note" || err "保存备注失败."
+        printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
     fi
 }
 
@@ -5865,7 +5944,7 @@ relay_menu_empty_state() {
 relay_menu() {
     local choice_status
     while :; do
-        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "删除"
+        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "备注" "删除"
         choice_status=$?
         [[ $choice_status == 2 ]] && return
         [[ $choice_status == 0 ]] || return 1
@@ -5881,6 +5960,10 @@ relay_menu() {
             menu_action relay_info
             ;;
         4)
+            relay_menu_empty_state && continue
+            menu_action relay_note
+            ;;
+        5)
             relay_menu_empty_state && continue
             menu_action relay_delete
             ;;
@@ -5899,6 +5982,9 @@ relay_main() {
     info)
         relay_info "${@:2}"
         ;;
+    note)
+        relay_note "${@:2}"
+        ;;
     del | delete | rm)
         relay_delete "${@:2}"
         ;;
@@ -5906,7 +5992,7 @@ relay_main() {
         relay_menu
         ;;
     *)
-        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|delete]"
+        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|note|delete]"
         ;;
     esac
 }
