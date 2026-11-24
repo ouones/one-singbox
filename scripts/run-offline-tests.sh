@@ -287,7 +287,7 @@ run_one_test() {
     local rc_file="$work/.logs/${test_file}.rc"
     local start=$SECONDS rc=0
 
-    if timeout 300 bash "$test_file" >"$log_file" 2>&1; then
+    if env --default-signal=INT,QUIT timeout 300 bash "$test_file" >"$log_file" 2>&1; then
         rc=0
     else
         rc=$?
