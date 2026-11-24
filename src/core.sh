@@ -4212,7 +4212,10 @@ del() {
         is_conf_dir_empty=1
     fi
     unset is_dont_get_ip
-    [[ $is_dont_auto_exit ]] && unset is_config_file
+    if [[ $is_dont_auto_exit ]]; then
+        unset is_config_file
+    fi
+    return 0
 }
 
 # uninstall
@@ -4353,6 +4356,8 @@ service_action_result() {
 # add a config
 add() {
     local caddy_shared_lock= protocol_choice_status ss_method_status
+    is_custom_node_name=
+    is_custom_node_note=
     [[ ! $1 && ! $is_change ]] && unset is_new_protocol
     if [[ ! $is_change ]]; then
         is_servername=
@@ -4730,11 +4735,26 @@ add() {
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
+        if declare -F note_read_line >/dev/null 2>&1; then
+            echo -ne "输入备注 (可选，直接回车跳过):"
+            if note_read_line is_custom_node_note; then
+                if declare -F note_trim >/dev/null 2>&1; then
+                    is_custom_node_note=$(note_trim "$is_custom_node_note")
+                fi
+            else
+                is_custom_node_note=
+            fi
+        fi
     fi
 
     # create json
     create server $is_new_protocol
-    [[ $is_custom_node_name && $is_config_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
+    if [[ ! $is_change && ! $is_gen && $is_config_name ]]; then
+        [[ $is_custom_node_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
+        if [[ $is_custom_node_note ]] && declare -F note_set >/dev/null 2>&1; then
+            note_set "$is_config_name" "$is_custom_node_note"
+        fi
+    fi
 
     # show config info.
     info

@@ -23,9 +23,9 @@ node_port_used() { :; }
 create() { printf '%s %s %s\n' "$2" "$port" "${is_config_file:-empty}" >"$case_dir/result"; }
 # Supply SS method and password only for that protocol.
 if [[ $CHOICE == 8 ]]; then
-  input=$'3\n\n1\n8\n30001\n1\n\nnewname\n\n0\n'
+  input=$'3\n\n1\n8\n30001\n1\n\nnewname\n\n\n0\n'
 else
-  input=$'3\n\n1\n18\n30001\nnewname\n\n0\n'
+  input=$'3\n\n1\n18\n30001\nnewname\n\n\n0\n'
 fi
 node_menu <<<"$input" >"$case_dir/output" 2>&1
 read -r protocol selected_port selected_file <"$case_dir/result"
@@ -55,10 +55,12 @@ node_menu >"$case_dir/output" 2>&1 <<'INPUT'
 30001
 first
 
+
 1
 18
 30002
 second
+
 
 0
 INPUT
