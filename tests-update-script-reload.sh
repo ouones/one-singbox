@@ -213,6 +213,92 @@ CASE
 
 run_test_suite "$repo_root/src/core.sh" || fail "test suite failed for src/core.sh"
 
+# A successful interactive script update must reload the installed entry so the
+# old panel is never redrawn; the CLI path must keep its non-menu behavior.
+run_interactive_menu_reload_case() {
+    local core_file=$1
+    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+set -o pipefail
+
+fail() {
+    echo "FAIL(${CORE_FILE} interactive reload): $*"
+    exit 1
+}
+
+source <(sed -n '/^is_reload_exit_code=/p' "$CORE_FILE")
+source <(sed -n '/^_green() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^update() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
+
+case_dir=$(mktemp -d)
+trap 'rm -rf "$case_dir"' EXIT
+
+cat >"$case_dir/reloaded-entry" <<'ENTRY'
+#!/usr/bin/env bash
+[[ $1 == __post-update ]] && exit 0
+printf 'NEW_PANEL_LOADED\n'
+exit 0
+ENTRY
+chmod +x "$case_dir/reloaded-entry"
+
+msg() { printf '%b\n' "$*"; }
+show_list() { printf '%s\n' "$@"; }
+is_err='错误'
+# Pipe-driven test input is intentional; -t bounds any missing input so CI cannot hang.
+interactive_read() { builtin read -t 3 "$@"; }
+qrcode_dependency_install() { :; }
+get_latest_version() { latest_ver=v1.59; }
+load() { :; }
+download() { :; }
+migrate_runtime_config() { return 0; }
+manage() { return 0; }
+is_core=sing-box
+is_core_name=sing-box
+is_core_ver=1.14.0
+is_core_repo=SagerNet/sing-box
+is_script_name=one-singbox
+is_sh_ver=v1.58
+is_sh_repo=ouones/one-singbox
+is_sh_bin="$case_dir/reloaded-entry"
+is_config_json="$case_dir/no-config.json"
+
+run_interactive_update_menu() {
+    update_menu
+    printf 'OLD_PANEL_REDRAWN\n'
+}
+
+output=$(printf '2\ny\n' | run_interactive_update_menu 2>&1); status=$?
+[[ $status == 0 ]] || fail "reloaded entry exit status leaked: $status output=$output"
+[[ $output == *'更新成功'* ]] || fail "update success is reported: $output"
+[[ $output == *'NEW_PANEL_LOADED'* ]] || fail "interactive update did not reload the installed entry: $output"
+[[ $output != *'OLD_PANEL_REDRAWN'* ]] || fail "interactive update continued the old panel after success: $output"
+[[ $output != *'按回车返回菜单'* ]] || fail "interactive reload must not wait for Enter: $output"
+
+output=$(printf '' | update sh v1.59 2>&1); status=$?
+[[ $status == 0 ]] || fail "CLI update returns the reload code: $status output=$output"
+[[ $output == *'更新成功'* ]] || fail "CLI update still reports success: $output"
+[[ $output != *'NEW_PANEL_LOADED'* ]] || fail "CLI update unexpectedly reloaded the panel: $output"
+
+run_interactive_core_update() {
+    menu_action menu_system_impact "sing-box 内核" "下载并替换 sing-box 内核程序" "是" update core v1.15.0
+    printf 'OLD_PANEL_REDRAWN\n'
+}
+
+output=$(printf 'y\n' | run_interactive_core_update 2>&1); status=$?
+[[ $status == 0 ]] || fail "core update changed its exit status: $status output=$output"
+[[ $output == *'更新成功'* ]] || fail "core update still reports success: $output"
+[[ $output != *'NEW_PANEL_LOADED'* ]] || fail "core update must not reload the panel: $output"
+[[ $output == *'OLD_PANEL_REDRAWN'* ]] || fail "core update must return to the existing panel: $output"
+echo 'PASS: interactive script update reloads the installed panel entry'
+CASE
+}
+
+run_interactive_menu_reload_case "$repo_root/src/core.sh" || fail "interactive reload test failed"
+
 # The real entry must clean the legacy root core.sh copy without touching anything else.
 run_entry_cleanup_case() {
     local scenario=$1
