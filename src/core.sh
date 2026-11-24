@@ -5146,6 +5146,9 @@ url_qr() {
     fi
 }
 
+# Internal exit code: a successful interactive script update must reload the new panel.
+is_reload_exit_code=75
+
 # update core, sh, caddy
 update() {
     case $1 in
@@ -5221,6 +5224,10 @@ update() {
     esac
     msg "更新成功, 当前 $is_show_name 版本: $(_green $is_new_ver)\n"
     msg "$(_green 请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver)\n"
+    if [[ $is_update_name == 'sh' && ${is_interactive_operation:-0} == 1 ]]; then
+        msg "正在重新加载新版本面板...\n"
+        return "$is_reload_exit_code"
+    fi
 }
 
 menu_pause() {
@@ -5232,6 +5239,7 @@ menu_action() {
     local action_status
     run_interactive_operation "$@"
     action_status=$?
+    [[ $action_status == "$is_reload_exit_code" ]] && exec "$is_sh_bin"
     [[ $action_status == 2 ]] || menu_pause
     return "$action_status"
 }
