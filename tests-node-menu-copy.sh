@@ -27,6 +27,7 @@ node_menu >"$case_dir/tls-output" 2>&1 <<'INPUT'
 example.com
 tls-node
 
+
 0
 INPUT
 tls_output=$(cat "$case_dir/tls-output")
@@ -43,6 +44,7 @@ node_menu >"$case_dir/socks-output" 2>&1 <<'INPUT'
 alice
 
 socks-node
+
 
 0
 INPUT
@@ -61,6 +63,7 @@ node_menu >"$case_dir/ss-output" 2>&1 <<'INPUT'
 1
 
 ss-node
+
 
 0
 INPUT
@@ -136,6 +139,7 @@ add direct >"$case_dir/direct-output" 2>&1 <<'INPUT'
 203.0.113.20
 8080
 direct-node
+
 INPUT
 direct_output=$(cat "$case_dir/direct-output")
 [[ $direct_output == *'输入目标地址 (IPv4、IPv6 或域名):'* ]] || fail "Direct add asks for its target address: $direct_output"
