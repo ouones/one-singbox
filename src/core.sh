@@ -1426,10 +1426,9 @@ render_runtime_node_outbound_modes() {
         | if $has_direct then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
         | .route.rules = (
-            ([$existing_rules[] | is_broad_direct_rule] | index(true)) as $direct_fallback
-            | (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
-            | ($existing_rules | if $direct_fallback == null then . else .[:$direct_fallback] end) as $custom_rules
-            | ($existing_rules | if $direct_fallback == null then [] else .[$direct_fallback:] end) as $fallback_rules
+            (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
+            | ([$existing_rules[] | select(is_broad_direct_rule)]) as $fallback_rules
+            | ([$existing_rules[] | select(is_broad_direct_rule | not)]) as $custom_rules
             | $sniff_rules + $custom_rules + $managed_node_rules + $fallback_rules
           )
     ' "$source_config" >"$output" || {
