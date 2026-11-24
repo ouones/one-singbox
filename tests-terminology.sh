@@ -92,8 +92,8 @@ help_output=$(
     set +u
     show_help ''
 )
-[[ $help_output == *'relay add [local-port] [remote-addr] [remote-port]'* ]] || fail 'help is missing the relay add syntax'
-[[ $help_output == *'relay list'* && $help_output == *'relay info [local-port]'* && $help_output == *'relay delete [local-port]'* ]] || fail 'help is missing a relay subcommand'
+[[ $help_output == *'relay add [local-port] [remote-addr] [remote-port] [note]'* ]] || fail 'help is missing the relay add syntax'
+[[ $help_output == *'relay list'* && $help_output == *'relay info [local-port]'* && $help_output == *'relay note [local-port] [备注内容 | --clear]'* && $help_output == *'relay delete [local-port]'* ]] || fail 'help is missing a relay subcommand'
 [[ $help_output == *'端口转发'* ]] || fail 'help does not use 端口转发'
 [[ $help_output != *'中转'* ]] || fail "help still mixes relay wording: $help_output"
 
@@ -133,7 +133,7 @@ status=$?
 [[ $status != 0 ]] || fail 'unknown relay subcommand must still fail'
 [[ $error_output == *'端口转发'* ]] || fail "relay error should use 端口转发: $error_output"
 [[ $error_output != *'中转'* ]] || fail "relay error still mixes wording: $error_output"
-[[ $error_output == *'relay [add|list|info|delete]'* ]] || fail "relay command syntax changed: $error_output"
+[[ $error_output == *'relay [add|list|info|note|delete]'* ]] || fail "relay command syntax changed: $error_output"
 [[ $error_output != *'按回车返回'* ]] || fail 'relay error CLI must not pause'
 
 cat >"$is_conf_dir/relay-10000.json" <<'JSON'

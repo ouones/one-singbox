@@ -187,5 +187,10 @@ load log.sh
 log_limit_init || warn "无法启用日志容量维护。请从“系统工具”重新设置日志占用上限。"
 
 load core.sh
-[[ ! $args ]] && args=main
-main $args
+if declare -p args 2>/dev/null | grep -q '^declare -a '; then
+    ((${#args[@]} == 0)) && args=(main)
+    main "${args[@]}"
+else
+    [[ ! $args ]] && args=main
+    main $args
+fi
