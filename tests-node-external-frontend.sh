@@ -11,7 +11,7 @@ is_core_dir=$workdir/core
 is_conf_dir=$workdir/conf
 is_config_json=$workdir/config.json
 is_core_bin=$workdir/sing-box
-is_dont_auto_exit=1
+is_dont_auto_exit=
 export ip=203.0.113.10 is_dont_get_ip=1
 mkdir -p "$is_conf_dir" "$is_core_dir"
 printf '%s\n' '#!/bin/bash' '[[ $1 == generate ]] && printf "Private key: private-key-value\\nPublic key: public-key-value\\n"' '[[ $1 == check && -f ${REJECT_CHECK_FILE:-/nonexistent} ]] && exit 1' 'exit 0' >"$is_core_bin"

@@ -106,14 +106,15 @@ systemctl() {
 }
 sleep() { :; }
 
+is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
 is_core_bin="$FAKE_CORE"
 is_core_ver=1.14.0
 ip=203.0.113.10
 is_dont_show_info=1
-is_dont_auto_exit=1
-mkdir -p "$is_conf_dir/.quan-meta"
+is_dont_auto_exit=
+mkdir -p "$is_core_dir" "$is_conf_dir/.quan-meta"
 manage_log="$case_dir/manage.log"
 : >"$manage_log"
 manage() { printf "%s\n" "$*" >>"$manage_log"; }

@@ -61,9 +61,21 @@ _wget() {
 # apt-get, yum, zypper or apk
 cmd=$(type -P apt-get || type -P yum || type -P zypper || type -P apk)
 
+_init_pre_core_dir=${is_core_dir:-}
+_init_pre_core_bin=${is_core_bin:-}
+_init_pre_conf_dir=${is_conf_dir:-}
+_init_pre_log_dir=${is_log_dir:-}
+_init_pre_sh_bin=${is_sh_bin:-}
+_init_pre_sh_dir=${is_sh_dir:-}
+_init_pre_config_json=${is_config_json:-}
+_init_pre_caddy_dir=${is_caddy_dir:-}
+_init_pre_tls_cer=${is_tls_cer:-}
+_init_pre_tls_key=${is_tls_key:-}
+
 is_core=sing-box
 is_core_name=sing-box
 is_core_dir=/etc/$is_core
+[[ $_init_pre_core_dir ]] && is_core_dir=$_init_pre_core_dir
 is_core_bin=$is_core_dir/bin/$is_core
 is_core_repo=SagerNet/$is_core
 is_conf_dir=$is_core_dir/conf
@@ -74,6 +86,7 @@ is_sh_repo=ouones/one-singbox
 is_pkg="wget unzip tar qrencode bash"
 is_config_json=$is_core_dir/config.json
 is_caddy_dir=/etc/caddy
+[[ $_init_pre_caddy_dir ]] && is_caddy_dir=$_init_pre_caddy_dir
 is_caddy_bin=$(type -P caddy)
 [[ ! $is_caddy_bin ]] && is_caddy_bin=/usr/local/bin/caddy
 is_caddy_repo=caddyserver/caddy
@@ -86,6 +99,18 @@ is_http_port=80
 is_https_port=443
 is_tls_cer=$is_core_dir/bin/tls.cer
 is_tls_key=$is_core_dir/bin/tls.key
+
+[[ $_init_pre_core_bin ]] && is_core_bin=$_init_pre_core_bin
+[[ $_init_pre_conf_dir ]] && is_conf_dir=$_init_pre_conf_dir
+[[ $_init_pre_log_dir ]] && is_log_dir=$_init_pre_log_dir
+[[ $_init_pre_sh_bin ]] && is_sh_bin=$_init_pre_sh_bin
+[[ $_init_pre_sh_dir ]] && is_sh_dir=$_init_pre_sh_dir
+[[ $_init_pre_config_json ]] && is_config_json=$_init_pre_config_json
+[[ $_init_pre_tls_cer ]] && is_tls_cer=$_init_pre_tls_cer
+[[ $_init_pre_tls_key ]] && is_tls_key=$_init_pre_tls_key
+unset _init_pre_core_dir _init_pre_core_bin _init_pre_conf_dir _init_pre_log_dir \
+    _init_pre_sh_bin _init_pre_sh_dir _init_pre_config_json _init_pre_caddy_dir \
+    _init_pre_tls_cer _init_pre_tls_key
 
 export LC_ALL=C
 
@@ -202,9 +227,19 @@ core_status_read() {
     esac
 }
 
+require_root_for_system_exec() {
+    if [[ $EUID != 0 && ${is_core_dir:-} == "/etc/${is_core:-sing-box}" ]]; then
+        err "请以 root 用户重新运行此脚本。"
+        return 1
+    fi
+    return 0
+}
+
 is_init_loaded=1
 
 init_entry() {
+    require_root_for_system_exec || exit 1
+
     # 清理旧版本遗留在安装目录根部的管理脚本副本。
     if [[ -e $is_sh_dir/core.sh ]]; then
         rm -f "$is_sh_dir/core.sh" 2>/dev/null || warn "无法删除历史根管理脚本: $is_sh_dir/core.sh，该文件仍残留在安装目录中，可能因内容过期而干扰问题排查；请手动删除。"

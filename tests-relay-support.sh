@@ -102,7 +102,7 @@ is_config_json="$case_dir/config.json"
 is_core_bin="$FAKE_CORE"
 is_core_ver=1.14.0
 is_dont_show_info=1
-is_dont_auto_exit=1
+is_dont_auto_exit=
 export ip=203.0.113.10 is_dont_get_ip=1
 mkdir -p "$is_conf_dir"
 manage_log="$case_dir/manage.log"
