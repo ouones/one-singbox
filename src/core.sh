@@ -2403,6 +2403,9 @@ url_percent_decode() {
 
 parse_uri_query() {
     local query=$1 allow_ech_pem=${2:-0} pair key raw_value value
+    unset uri_query_map uri_query_keys
+    declare -gA uri_query_map=()
+    declare -ga uri_query_keys=()
     uri_query_json='{}'
     [[ $query ]] || return 0
     while :; do
@@ -2423,8 +2426,9 @@ parse_uri_query() {
         else
             value=$(url_percent_decode "$raw_value") || return 1
         fi
-        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$uri_query_json") != true ]] || return 1
-        uri_query_json=$(jq -c --arg key "$key" --arg value "$value" '. + {($key):$value}' <<<"$uri_query_json") || return 1
+        [[ ! ${uri_query_map[$key]+_} ]] || return 1
+        uri_query_map[$key]=$value
+        uri_query_keys+=("$key")
         [[ $query ]] || break
     done
 }
@@ -2453,13 +2457,13 @@ parse_uri_authority() {
 }
 
 uri_query_alias_value() {
-    local query=$1 normalize=$2 key value selected= selected_key= selected_set=0
-    shift 2
+    local normalize=$1 key value selected= selected_key= selected_set=0
+    shift
     uri_alias_value=
     uri_alias_present=0
     for key in "$@"; do
-        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$query") == true ]] || continue
-        value=$(jq -r --arg key "$key" '.[$key]' <<<"$query") || return 1
+        [[ ${uri_query_map[$key]+_} ]] || continue
+        value=${uri_query_map[$key]}
         case $normalize in
         boolean)
             case $value in
@@ -2715,8 +2719,8 @@ normalize_vless_ech_config() {
 
 normalize_vless_certificate_sha256() {
     local input=$1 pin raw padding mod decoded_len canonical normalized hex_escaped i
-    local -a pins=()
-    vless_certificate_sha256_json='[]'
+    local -a pins=() normalized_pins=()
+    vless_certificate_sha256_csv=
     [[ $input ]] || return 0
     [[ $input != ,* && $input != *, && $input != *,,* ]] || return 1
     IFS=, read -r -a pins <<<"$input"
@@ -2746,8 +2750,10 @@ normalize_vless_certificate_sha256() {
             [[ $decoded_len == 32 ]] || return 1
             normalized=$canonical
         fi
-        vless_certificate_sha256_json=$(jq -cn --argjson current "$vless_certificate_sha256_json" --arg value "$normalized" '$current + [$value]') || return 1
+        normalized_pins+=("$normalized")
     done
+    local IFS=,
+    vless_certificate_sha256_csv="${normalized_pins[*]}"
 }
 
 vless_core_supports_certificate_sha256() {
@@ -2758,26 +2764,10 @@ vless_core_supports_certificate_sha256() {
     ((major > 1 || (major == 1 && minor >= 15)))
 }
 
-parse_vless_uri() {
-    local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
-    local fragment_present=0 remark_name key encryption transport transport_original transport_type security flow
-    local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
-    local public_key public_key_present short_id short_id_present insecure=false insecure_present
-    local packet_encoding packet_encoding_present utls_enabled=false
-    local ech ech_present ech_config= ech_enabled=0 pcs pcs_enabled=0 vcn spx
-    local vless_certificate_sha256_json='[]'
-    local transport_config_json='{}' path path_present host host_present host_json
-    local header_type header_type_present quic_security quic_security_present quic_key quic_key_present
-    local canonical_public_key public_key_length ed eh mode grpc_authority transport_parameter
-    local ed_present eh_present mode_present authority_present
-    local ws_path=/ ws_host= ws_host_present=0 ws_early_data= ws_early_data_present=0 ws_early_data_header= ws_early_data_header_present=0
-    local grpc_service_name= grpc_service_name_present=0 grpc_default_authority
-
-    outbound_proxy_parse_error="VLESS 链接格式或参数无效"
-    outbound_proxy_name=
-    outbound_proxy_config_json=
-    uri_query_json='{}'
-    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
+parse_vless_uri_common() {
+    local auth authority raw_port key
+    uri=${uri#"${uri%%[![:space:]]*}"}
+    uri=${uri%"${uri##*[![:space:]]}"}
     [[ $uri == vless://* ]] || return 1
     uri=${uri#vless://}
     if [[ $uri == *#* ]]; then
@@ -2797,7 +2787,7 @@ parse_vless_uri() {
             return 1
         }
     else
-        uri_query_json='{}'
+        parse_uri_query "" 1
     fi
     [[ $uri == *@* ]] || {
         outbound_proxy_parse_error="VLESS 链接缺少 UUID 或服务器地址"
@@ -2832,7 +2822,7 @@ parse_vless_uri() {
         return 1
     }
 
-    while IFS= read -r key; do
+    for key in "${uri_query_keys[@]}"; do
         case $key in
         remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | ed | eh | serviceName | service_name | mode | authority | headerType | quicSecurity | key | ech | pcs | vcn | spx | spiderX) ;;
         *)
@@ -2840,14 +2830,14 @@ parse_vless_uri() {
             return 1
             ;;
         esac
-    done < <(jq -r 'keys[]' <<<"$uri_query_json")
+    done
 
-    encryption=$(jq -r '.encryption // "none"' <<<"$uri_query_json")
+    encryption=${uri_query_map[encryption]-none}
     [[ ! $encryption || $encryption == none ]] || {
         outbound_proxy_parse_error="VLESS encryption 仅支持 none"
         return 1
     }
-    transport_original=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
+    transport_original=${uri_query_map[type]-tcp}
     transport=$transport_original
     case $transport in
     tcp | raw | ws | grpc | h2 | http | httpupgrade | quic) ;;
@@ -2856,7 +2846,7 @@ parse_vless_uri() {
         return 1
         ;;
     esac
-    security=$(jq -r '.security // "none"' <<<"$uri_query_json")
+    security=${uri_query_map[security]-none}
     [[ ! $security ]] && security=none
     [[ $security == none || $security == tls || $security == reality ]] || {
         outbound_proxy_parse_error="VLESS security=$security 暂不支持"
@@ -2870,7 +2860,7 @@ parse_vless_uri() {
         outbound_proxy_parse_error="VLESS QUIC 仅支持 sing-box 原生 TLS；无 TLS 或跨内核 Reality QUIC 不受支持"
         return 1
     fi
-    flow=$(jq -r '.flow // ""' <<<"$uri_query_json")
+    flow=${uri_query_map[flow]-}
     [[ ! $flow || $flow == xtls-rprx-vision ]] || {
         outbound_proxy_parse_error="VLESS flow=$flow 暂不支持"
         return 1
@@ -2879,25 +2869,37 @@ parse_vless_uri() {
         outbound_proxy_parse_error="VLESS Vision 仅支持 TCP/raw，不能用于 WebSocket 或 gRPC"
         return 1
     fi
+}
 
-    path=$(jq -r '.path // ""' <<<"$uri_query_json")
-    path_present=$(jq -r 'has("path") | if . then 1 else 0 end' <<<"$uri_query_json")
-    host=$(jq -r '.host // ""' <<<"$uri_query_json")
-    host_present=$(jq -r 'has("host") | if . then 1 else 0 end' <<<"$uri_query_json")
-    ed=$(jq -r '.ed // ""' <<<"$uri_query_json")
-    ed_present=$(jq -r 'has("ed") | if . then 1 else 0 end' <<<"$uri_query_json")
-    eh=$(jq -r '.eh // ""' <<<"$uri_query_json")
-    eh_present=$(jq -r 'has("eh") | if . then 1 else 0 end' <<<"$uri_query_json")
-    uri_query_alias_value "$uri_query_json" raw serviceName service_name || return 1
+parse_vless_transport_params() {
+    local path path_present=0 host host_present=0 ed ed_present=0 eh eh_present=0
+    local mode mode_present=0 header_type header_type_present=0
+    local quic_security quic_security_present=0 quic_key quic_key_present=0
+    local transport_parameter
+
+    path=${uri_query_map[path]-}
+    [[ ${uri_query_map[path]+_} ]] && path_present=1
+    host=${uri_query_map[host]-}
+    [[ ${uri_query_map[host]+_} ]] && host_present=1
+    ed=${uri_query_map[ed]-}
+    [[ ${uri_query_map[ed]+_} ]] && ed_present=1
+    eh=${uri_query_map[eh]-}
+    [[ ${uri_query_map[eh]+_} ]] && eh_present=1
+    uri_query_alias_value raw serviceName service_name || return 1
     grpc_service_name=$uri_alias_value
     grpc_service_name_present=$uri_alias_present
-    mode=$(jq -r '.mode // ""' <<<"$uri_query_json")
-    mode_present=$(jq -r 'has("mode")' <<<"$uri_query_json")
-    grpc_authority=$(jq -r '.authority // ""' <<<"$uri_query_json")
-    authority_present=$(jq -r 'has("authority")' <<<"$uri_query_json")
-    header_type=$(jq -r '.headerType // "none"' <<<"$uri_query_json")
-    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
-    if [[ $header_type_present == true && $header_type != none ]]; then
+    mode=${uri_query_map[mode]-}
+    [[ ${uri_query_map[mode]+_} ]] && mode_present=1
+    grpc_authority=${uri_query_map[authority]-}
+    [[ ${uri_query_map[authority]+_} ]] && authority_present=1
+    header_type=${uri_query_map[headerType]-none}
+    [[ ${uri_query_map[headerType]+_} ]] && header_type_present=1
+    quic_security=${uri_query_map[quicSecurity]-}
+    [[ ${uri_query_map[quicSecurity]+_} ]] && quic_security_present=1
+    quic_key=${uri_query_map[key]-}
+    [[ ${uri_query_map[key]+_} ]] && quic_key_present=1
+
+    if [[ $header_type_present == 1 && $header_type != none ]]; then
         if [[ $header_type == http ]]; then
             outbound_proxy_parse_error="VLESS headerType=http 的 TCP HTTP 伪装与 sing-box 原生传输不等价"
         else
@@ -2905,9 +2907,10 @@ parse_vless_uri() {
         fi
         return 1
     fi
+
     case $transport in
     ws)
-        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+        if [[ $grpc_service_name_present == 1 || $mode_present == 1 || $authority_present == 1 ]]; then
             outbound_proxy_parse_error="VLESS WebSocket 不能使用 gRPC 参数 serviceName、mode 或 authority"
             return 1
         fi
@@ -2936,7 +2939,7 @@ parse_vless_uri() {
             outbound_proxy_parse_error="VLESS gRPC 不能使用 WebSocket 参数 path、host、ed 或 eh"
             return 1
         fi
-        if [[ $mode_present == true && $mode != gun ]]; then
+        if [[ $mode_present == 1 && $mode != gun ]]; then
             case $mode in
             multi | guna) outbound_proxy_parse_error="VLESS gRPC mode=$mode 与 sing-box 原生 gRPC 不等价" ;;
             *) outbound_proxy_parse_error="VLESS gRPC mode=$mode 仅支持 gun" ;;
@@ -2945,13 +2948,13 @@ parse_vless_uri() {
         fi
         ;;
     tcp | raw)
-        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 || $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 || $grpc_service_name_present == 1 || $mode_present == 1 || $authority_present == 1 ]]; then
             if [[ $path_present == 1 ]]; then transport_parameter=path
             elif [[ $host_present == 1 ]]; then transport_parameter=host
             elif [[ $ed_present == 1 ]]; then transport_parameter=ed
             elif [[ $eh_present == 1 ]]; then transport_parameter=eh
             elif [[ $grpc_service_name_present == 1 ]]; then transport_parameter=serviceName
-            elif [[ $mode_present == true ]]; then transport_parameter=mode
+            elif [[ $mode_present == 1 ]]; then transport_parameter=mode
             else transport_parameter=authority
             fi
             outbound_proxy_parse_error="VLESS type=$transport 不支持参数: $transport_parameter"
@@ -2963,7 +2966,7 @@ parse_vless_uri() {
             outbound_proxy_parse_error="VLESS $transport 不能使用 WebSocket 专属参数 ed 或 eh"
             return 1
         fi
-        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
+        if [[ $grpc_service_name_present == 1 || $mode_present == 1 || $authority_present == 1 ]]; then
             outbound_proxy_parse_error="VLESS $transport 不能使用 gRPC 专属参数 serviceName、mode 或 authority"
             return 1
         fi
@@ -2976,59 +2979,18 @@ parse_vless_uri() {
     h2) transport=http ;;
     esac
 
-    uri_query_alias_value "$uri_query_json" raw sni serverName || return 1
-    sni=$uri_alias_value
-    sni_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw alpn || return 1
-    alpn=$uri_alias_value
-    alpn_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw fp fingerprint || return 1
-    fingerprint=$uri_alias_value
-    fingerprint_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw pbk publicKey || return 1
-    public_key=$uri_alias_value
-    public_key_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw sid shortId || return 1
-    short_id=$uri_alias_value
-    short_id_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" boolean allowInsecure insecure skip-cert-verify || return 1
-    insecure=$uri_alias_value
-    insecure_present=$uri_alias_present
-    [[ $insecure_present == 1 ]] || insecure=false
-    uri_query_alias_value "$uri_query_json" packet_encoding packetEncoding packet_encoding || return 1
-    packet_encoding=$uri_alias_value
-    packet_encoding_present=$uri_alias_present
-    ech_present=$(jq -r 'has("ech")' <<<"$uri_query_json")
-    ech=$(jq -r '.ech // ""' <<<"$uri_query_json")
-    [[ $ech_present == true ]] && ech_enabled=1
-    pcs=$(jq -r '.pcs // ""' <<<"$uri_query_json")
-    vcn=$(jq -r '.vcn // ""' <<<"$uri_query_json")
-    uri_query_alias_value "$uri_query_json" raw spx spiderX || return 1
-    spx=$uri_alias_value
-    uri_query_alias_value "$uri_query_json" raw remark remarks || return 1
-    remark_name=$uri_alias_value
-    path_present=$(jq -r 'has("path")' <<<"$uri_query_json")
-    path=$(jq -r '.path // ""' <<<"$uri_query_json")
-    host_present=$(jq -r 'has("host")' <<<"$uri_query_json")
-    host=$(jq -r '.host // ""' <<<"$uri_query_json")
-    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
-    header_type=$(jq -r '.headerType // ""' <<<"$uri_query_json")
-    quic_security_present=$(jq -r 'has("quicSecurity")' <<<"$uri_query_json")
-    quic_security=$(jq -r '.quicSecurity // ""' <<<"$uri_query_json")
-    quic_key_present=$(jq -r 'has("key")' <<<"$uri_query_json")
-    quic_key=$(jq -r '.key // ""' <<<"$uri_query_json")
-
-    if [[ $transport != quic && ($quic_security_present == true || $quic_key_present == true) ]]; then
+    if [[ $transport != quic && ($quic_security_present == 1 || $quic_key_present == 1) ]]; then
         outbound_proxy_parse_error="VLESS quicSecurity 和 key 仅用于 QUIC 传输"
         return 1
     fi
+
     case $transport in
     tcp)
-        if [[ $path_present == true || $host_present == true ]]; then
+        if [[ $path_present == 1 || $host_present == 1 ]]; then
             outbound_proxy_parse_error="VLESS TCP/raw 不支持 path 或 host 传输参数"
             return 1
         fi
-        if [[ $header_type_present == true ]]; then
+        if [[ $header_type_present == 1 ]]; then
             case $header_type in
             none) ;;
             http)
@@ -3043,47 +3005,47 @@ parse_vless_uri() {
         fi
         ;;
     http)
-        if [[ $header_type_present == true ]]; then
+        if [[ $header_type_present == 1 ]]; then
             outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
             return 1
         fi
-        if [[ $path_present == true ]]; then
+        if [[ $path_present == 1 ]]; then
             [[ $path ]] || {
                 outbound_proxy_parse_error="VLESS HTTP path 不能为空"
                 return 1
             }
+            http_path=$path
         else
-            path=/
+            http_path=/
         fi
-        if [[ $host_present == true ]]; then
+        if [[ $host_present == 1 ]]; then
             [[ $host ]] || {
                 outbound_proxy_parse_error="VLESS HTTP host 不能为空"
                 return 1
             }
-            host_json=$(jq -cn --arg host "$host" '$host | split(",")') || return 1
-            jq -e 'length > 0 and all(.[]; length > 0)' <<<"$host_json" >/dev/null || {
+            [[ $host != ,* && $host != *, && $host != *,,* ]] || {
                 outbound_proxy_parse_error="VLESS HTTP host 必须是逗号分隔的非空列表"
                 return 1
             }
-            transport_config_json=$(jq -cn --arg path "$path" --argjson host "$host_json" '{type:"http",path:$path,host:$host}') || return 1
-        else
-            transport_config_json=$(jq -cn --arg path "$path" '{type:"http",path:$path}') || return 1
+            http_host=$host
+            http_host_present=1
         fi
         ;;
     httpupgrade)
-        if [[ $header_type_present == true ]]; then
+        if [[ $header_type_present == 1 ]]; then
             outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
             return 1
         fi
-        if [[ $path_present == true ]]; then
+        if [[ $path_present == 1 ]]; then
             [[ $path ]] || {
                 outbound_proxy_parse_error="VLESS HTTPUpgrade path 不能为空"
                 return 1
             }
+            http_path=$path
         else
-            path=/
+            http_path=/
         fi
-        if [[ $host_present == true ]]; then
+        if [[ $host_present == 1 ]]; then
             [[ $host ]] || {
                 outbound_proxy_parse_error="VLESS HTTPUpgrade host 不能为空"
                 return 1
@@ -3092,27 +3054,60 @@ parse_vless_uri() {
                 outbound_proxy_parse_error="VLESS HTTPUpgrade host 只支持单值，不能接收逗号分隔列表"
                 return 1
             }
-            transport_config_json=$(jq -cn --arg path "$path" --arg host "$host" '{type:"httpupgrade",path:$path,host:$host}') || return 1
-        else
-            transport_config_json=$(jq -cn --arg path "$path" '{type:"httpupgrade",path:$path}') || return 1
+            http_host=$host
+            http_host_present=1
         fi
         ;;
     quic)
-        if [[ $path_present == true || $host_present == true || $header_type_present == true ]]; then
+        if [[ $path_present == 1 || $host_present == 1 || $header_type_present == 1 ]]; then
             outbound_proxy_parse_error="VLESS QUIC 不支持 path、host 或 headerType 传输参数"
             return 1
         fi
-        if [[ $quic_security_present == true && $quic_security != none ]]; then
+        if [[ $quic_security_present == 1 && $quic_security != none ]]; then
             outbound_proxy_parse_error="VLESS QUIC 仅支持 quicSecurity=none；额外加密不兼容 sing-box"
             return 1
         fi
-        if [[ $quic_key_present == true && $quic_key ]]; then
+        if [[ $quic_key_present == 1 && $quic_key ]]; then
             outbound_proxy_parse_error="VLESS QUIC 不支持额外加密 key；跨内核 QUIC 变体不兼容"
             return 1
         fi
-        transport_config_json='{"type":"quic"}'
         ;;
     esac
+}
+
+parse_vless_tls_params() {
+    local canonical_public_key public_key_length grpc_default_authority
+
+    uri_query_alias_value raw sni serverName || return 1
+    sni=$uri_alias_value
+    sni_present=$uri_alias_present
+    uri_query_alias_value raw alpn || return 1
+    alpn=$uri_alias_value
+    alpn_present=$uri_alias_present
+    uri_query_alias_value raw fp fingerprint || return 1
+    fingerprint=$uri_alias_value
+    fingerprint_present=$uri_alias_present
+    uri_query_alias_value raw pbk publicKey || return 1
+    public_key=$uri_alias_value
+    public_key_present=$uri_alias_present
+    uri_query_alias_value raw sid shortId || return 1
+    short_id=$uri_alias_value
+    short_id_present=$uri_alias_present
+    uri_query_alias_value boolean allowInsecure insecure skip-cert-verify || return 1
+    insecure=$uri_alias_value
+    insecure_present=$uri_alias_present
+    [[ $insecure_present == 1 ]] || insecure=false
+    uri_query_alias_value packet_encoding packetEncoding packet_encoding || return 1
+    packet_encoding=$uri_alias_value
+    packet_encoding_present=$uri_alias_present
+    [[ ${uri_query_map[ech]+_} ]] && ech_enabled=1
+    ech=${uri_query_map[ech]-}
+    pcs=${uri_query_map[pcs]-}
+    vcn=${uri_query_map[vcn]-}
+    uri_query_alias_value raw spx spiderX || return 1
+    spx=$uri_alias_value
+    uri_query_alias_value raw remark remarks || return 1
+    remark_name=$uri_alias_value
 
     if [[ $security == none ]]; then
         if [[ ($sni_present == 1 && $sni) || ($alpn_present == 1 && $alpn) || ($fingerprint_present == 1 && $fingerprint) || ($insecure_present == 1 && $insecure) || ($public_key_present == 1 && $public_key) || ($short_id_present == 1 && $short_id) ]]; then
@@ -3130,13 +3125,10 @@ parse_vless_uri() {
                 outbound_proxy_parse_error="VLESS alpn 不能为空"
                 return 1
             }
-            alpn_json=$(jq -cn --arg alpn "$alpn" '$alpn | split(",")') || return 1
-            jq -e 'length > 0 and all(.[]; type == "string" and length > 0)' <<<"$alpn_json" >/dev/null || {
+            [[ $alpn != ,* && $alpn != *, && $alpn != *,,* ]] || {
                 outbound_proxy_parse_error="VLESS alpn 必须是逗号分隔的非空协议列表"
                 return 1
             }
-        else
-            alpn_json='[]'
         fi
         if [[ $fingerprint_present == 1 && $fingerprint != none ]]; then
             case $fingerprint in
@@ -3193,7 +3185,8 @@ parse_vless_uri() {
             return 1
         fi
     fi
-    if [[ $transport == grpc && $authority_present == true && $grpc_authority ]]; then
+
+    if [[ $transport == grpc && $authority_present == 1 && $grpc_authority ]]; then
         vless_grpc_default_authority "$uri_server" "$uri_port_number" "$security" "$sni" || {
             outbound_proxy_parse_error="VLESS gRPC authority 默认值无法根据当前 sing-box 版本和构建确认"
             return 1
@@ -3250,6 +3243,29 @@ parse_vless_uri() {
         outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
         return 1
     }
+}
+
+parse_vless_uri() {
+    local uri=$1 raw_name= raw_query= decoded_auth=
+    local fragment_present=0 remark_name= encryption= transport= transport_original= transport_type= security= flow=
+    local sni= sni_present=0 alpn= alpn_present=0 fingerprint= fingerprint_present=0
+    local public_key= public_key_present=0 short_id= short_id_present=0 insecure=false insecure_present=0
+    local packet_encoding= packet_encoding_present=0 utls_enabled=false
+    local ech= ech_config= ech_enabled=0 pcs= pcs_enabled=0 vcn= spx=
+    local vless_certificate_sha256_csv=
+    local http_path=/ http_host= http_host_present=0
+    local grpc_authority= authority_present=0
+    local ws_path=/ ws_host= ws_host_present=0 ws_early_data= ws_early_data_present=0 ws_early_data_header= ws_early_data_header_present=0
+    local grpc_service_name= grpc_service_name_present=0
+
+    outbound_proxy_parse_error="VLESS 链接格式或参数无效"
+    outbound_proxy_name=
+    outbound_proxy_config_json=
+    uri_query_json='{}'
+
+    parse_vless_uri_common || return 1
+    parse_vless_transport_params || return 1
+    parse_vless_tls_params || return 1
 
     outbound_proxy_name=
     if [[ $fragment_present == 1 ]]; then
@@ -3267,7 +3283,7 @@ parse_vless_uri() {
         --arg security "$security" \
         --arg sni "$sni" \
         --argjson insecure "$insecure" \
-        --argjson alpn "$alpn_json" \
+        --arg alpn "$alpn" \
         --argjson alpn_present "${alpn_present:-0}" \
         --argjson utls_enabled "$utls_enabled" \
         --arg fingerprint "$fingerprint" \
@@ -3275,7 +3291,9 @@ parse_vless_uri() {
         --arg short_id "$short_id" \
         --arg flow "$flow" \
         --arg transport "$transport" \
-        --argjson transport_config "$transport_config_json" \
+        --arg http_path "$http_path" \
+        --arg http_host "$http_host" \
+        --argjson http_host_present "$http_host_present" \
         --arg packet_encoding "$packet_encoding" \
         --argjson packet_encoding_present "${packet_encoding_present:-0}" \
         --arg transport_type "$transport_type" \
@@ -3290,16 +3308,16 @@ parse_vless_uri() {
         --argjson grpc_service_name_present "$grpc_service_name_present" \
         --arg ech_config "$ech_config" \
         --argjson ech_enabled "$ech_enabled" \
-        --argjson certificate_sha256 "$vless_certificate_sha256_json" \
+        --arg pcs_csv "$vless_certificate_sha256_csv" \
         --argjson pcs_enabled "$pcs_enabled" \
         '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
         + if $security == "none" then {} else
             {tls:({enabled:true,server_name:$sni,insecure:$insecure}
-                + if $alpn_present == 1 then {alpn:$alpn} else {} end
+                + if $alpn_present == 1 then {alpn:($alpn | split(","))} else {} end
                 + if $utls_enabled then {utls:{enabled:true,fingerprint:$fingerprint}} else {} end
                 + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end
                 + if $ech_enabled == 1 then {ech:({enabled:true} + if $ech_config == "" then {} else {config:$ech_config} end)} else {} end
-                + if $pcs_enabled == 1 then {certificate_sha256:$certificate_sha256} else {} end)}
+                + if $pcs_enabled == 1 then {certificate_sha256:($pcs_csv | split(","))} else {} end)}
           end
         + if $flow == "" then {} else {flow:$flow} end
         + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end
@@ -3313,7 +3331,16 @@ parse_vless_uri() {
           elif $transport_type == "grpc" then
             {transport:({type:"grpc"}
                 + if $grpc_service_name_present == 1 then {service_name:$grpc_service_name} else {} end)}
-          elif $transport == "tcp" then {} else {transport:$transport_config} end') || {
+          elif $transport == "tcp" then {}
+          elif $transport == "http" then
+            {transport:({type:"http",path:$http_path}
+                + if $http_host_present == 1 then {host:($http_host | split(","))} else {} end)}
+          elif $transport == "httpupgrade" then
+            {transport:({type:"httpupgrade",path:$http_path}
+                + if $http_host_present == 1 then {host:$http_host} else {} end)}
+          elif $transport == "quic" then
+            {transport:{type:"quic"}}
+          else {} end') || {
         outbound_proxy_parse_error="无法构造 VLESS 原生出站参数"
         return 1
     }
@@ -3372,7 +3399,7 @@ parse_ss_uri() {
             return 1
         fi
     else
-        uri_query_json='{}'
+        parse_uri_query ""
     fi
     if [[ $uri != *@* ]]; then
         outbound_proxy_parse_error="SS 分享链接缺少凭据或服务器地址"
@@ -3421,7 +3448,7 @@ parse_ss_uri() {
         return 1
     fi
 
-    while IFS= read -r key; do
+    for key in "${uri_query_keys[@]}"; do
         case $key in
         remark | remarks | plugin) ;;
         *)
@@ -3429,16 +3456,16 @@ parse_ss_uri() {
             return 1
             ;;
         esac
-    done < <(jq -r 'keys[]' <<<"$uri_query_json")
-    plugin=$(jq -r '.plugin // empty' <<<"$uri_query_json")
+    done
+    plugin=${uri_query_map[plugin]-}
     if [[ $plugin ]]; then
         outbound_proxy_parse_error="SS 插件暂不支持 (plugin)"
         return 1
     fi
-    remarks_name=$(jq -r '.remarks // empty' <<<"$uri_query_json")
-    remark_name=$(jq -r '.remark // empty' <<<"$uri_query_json")
-    remarks_present=$(jq -r 'has("remarks")' <<<"$uri_query_json")
-    remark_present=$(jq -r 'has("remark")' <<<"$uri_query_json")
+    remarks_name=${uri_query_map[remarks]-}
+    remark_name=${uri_query_map[remark]-}
+    [[ ${uri_query_map[remarks]+_} ]] && remarks_present=true || remarks_present=false
+    [[ ${uri_query_map[remark]+_} ]] && remark_present=true || remark_present=false
     if [[ $remarks_present == true && $remark_present == true && $remarks_name != "$remark_name" ]]; then
         outbound_proxy_parse_error="remark 和 remarks 参数值冲突"
         return 1
@@ -3471,57 +3498,78 @@ parse_ss_uri_for_outbound() {
 }
 
 outbound_proxy_from_metadata() {
-    local cfg=$1 metadata_file=$2 mode server port method password name
+    local cfg=$1 metadata_file=$2 status mode name config_json proxy_json method password
+    local -a fields=()
     outbound_proxy_json=
     outbound_proxy_config_json=
     outbound_proxy_name=
     [[ -f $metadata_file ]] || return 0
-    jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || return 1
-    mode=$(jq -r '.outbound_mode // empty' "$metadata_file")
-    if jq -e 'has("outbound_proxy")' "$metadata_file" >/dev/null; then
-        outbound_proxy_json=$(jq -c '.outbound_proxy' "$metadata_file")
-        if ! jq -e '
-            (.name | type == "string")
-            and (.config | type == "object")
-            and (.config.type == "shadowsocks" or .config.type == "vless")
-            and (.config.server | type == "string" and length > 0)
-            and (.config.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
-            and ((.config | has("tag") or has("detour")) | not)
-            and (.config.type != "shadowsocks" or
-                ((.config.method | type == "string" and length > 0)
-                 and (.config.password | type == "string" and length > 0)))
-            and (.config.type != "vless" or
-                (.config.uuid | type == "string" and length > 0))
-        ' <<<"$outbound_proxy_json" >/dev/null 2>&1; then
-            outbound_proxy_json=
-            [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
-            return 0
-        fi
-        outbound_proxy_name=$(jq -r '.name' <<<"$outbound_proxy_json")
-        outbound_proxy_config_json=$(jq -c '.config' <<<"$outbound_proxy_json")
-        return 0
-    fi
+    mapfile -d '' -t fields < <(jq -j '
+        if type != "object" then error("not object") else . end
+        | (if .outbound_mode == null or .outbound_mode == false then "" else (.outbound_mode | tostring) end) as $mode
+        | if has("outbound_proxy") then
+            .outbound_proxy as $op
+            | if ($op | type == "object")
+                and ($op.name | type == "string")
+                and ($op.config | type == "object")
+                and ($op.config.type == "shadowsocks" or $op.config.type == "vless")
+                and ($op.config.server | type == "string" and length > 0)
+                and ($op.config.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+                and (($op.config | has("tag") or has("detour")) | not)
+                and ($op.config.type != "shadowsocks" or
+                    (($op.config.method | type == "string" and length > 0)
+                     and ($op.config.password | type == "string" and length > 0)))
+                and ($op.config.type != "vless" or
+                    ($op.config.uuid | type == "string" and length > 0))
+              then
+                ["ok", $mode, $op.name, ($op.config | tojson), ($op | tojson), "", ""]
+              else
+                ["bad", $mode, "", "", "", "", ""]
+              end
+          elif $mode == "SS 出站" or has("outbound_ss_server") then
+            (if .outbound_ss_server == null or .outbound_ss_server == false then "" else (.outbound_ss_server | tostring) end) as $server
+            | (if .outbound_ss_port == null or .outbound_ss_port == false then "" else (.outbound_ss_port | tostring) end) as $port
+            | (if .outbound_ss_method == null or .outbound_ss_method == false then "" else (.outbound_ss_method | tostring) end) as $method
+            | (if .outbound_ss_password == null or .outbound_ss_password == false then "" else (.outbound_ss_password | tostring) end) as $password
+            | (if .outbound_ss_name == null or .outbound_ss_name == false then "" else (.outbound_ss_name | tostring) end) as $name
+            | if $server != "" and ($port | test("^0*[1-9][0-9]{0,4}$")) and $method != "" and $password != ""
+                and (($port | tonumber) >= 1 and ($port | tonumber) <= 65535)
+              then
+                ({type:"shadowsocks",server:$server,server_port:($port | tonumber),method:$method,password:$password}) as $cfg
+                | ["legacy_candidate", $mode, $name, ($cfg | tojson), ({name:$name,config:$cfg} | tojson), $method, $password]
+              else
+                ["bad", $mode, "", "", "", "", ""]
+              end
+          else
+            ["none", $mode, "", "", "", "", ""]
+          end
+        | .[0], "\u0000", .[1], "\u0000", .[2], "\u0000", .[3], "\u0000", .[4], "\u0000", .[5], "\u0000", .[6], "\u0000"
+    ' "$metadata_file" 2>/dev/null)
+    (( ${#fields[@]} == 7 )) || return 1
+    status=${fields[0]}
+    mode=${fields[1]}
+    name=${fields[2]}
+    config_json=${fields[3]}
+    proxy_json=${fields[4]}
+    method=${fields[5]}
+    password=${fields[6]}
 
-    if [[ $mode == 'SS 出站' || $(jq -r 'has("outbound_ss_server")' "$metadata_file") == true ]]; then
-        server=$(jq -r '.outbound_ss_server // empty' "$metadata_file")
-        port=$(jq -r '.outbound_ss_port // empty' "$metadata_file")
-        method=$(jq -r '.outbound_ss_method // empty' "$metadata_file")
-        password=$(jq -r '.outbound_ss_password // empty' "$metadata_file")
-        name=$(jq -r '.outbound_ss_name // ""' "$metadata_file")
-        if [[ $server && $port =~ ^[0-9]+$ && $method && $password ]] &&
-            ss_method_supported "$method" &&
-            ((10#$port >= 1 && 10#$port <= 65535)) &&
-            ss_password_valid_for_method "$method" "$password"; then
-            outbound_proxy_config_json=$(jq -cn \
-                --arg server "$server" --argjson server_port "$((10#$port))" \
-                --arg method "$method" --arg password "$password" \
-                '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
+    case $status in
+    ok)
+        outbound_proxy_name=$name
+        outbound_proxy_config_json=$config_json
+        outbound_proxy_json=$proxy_json
+        return 0
+        ;;
+    legacy_candidate)
+        if ss_method_supported "$method" && ss_password_valid_for_method "$method" "$password"; then
             outbound_proxy_name=$name
-            outbound_proxy_json=$(jq -cn --arg name "$name" --argjson config "$outbound_proxy_config_json" '{name:$name,config:$config}') || return 1
+            outbound_proxy_config_json=$config_json
+            outbound_proxy_json=$proxy_json
             return 0
         fi
-        [[ $mode == 'SS 出站' ]] && return 1
-    fi
+        ;;
+    esac
     [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
     return 0
 }
