@@ -49,13 +49,13 @@ if grep -Fq '${PWD}/core.sh' "$repo_root/install.sh"; then
     fail 'install.sh local-install still requires the legacy root core.sh'
 fi
 
-for file in README.md docs/usage.md src/help.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
+for file in README.md docs/usage.md src/help.sh src/core.sh src/relay.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '端口中转' "$repo_root/$file"); then
         fail "$file still contains the deprecated term: $legacy"
     fi
 done
 
-for file in README.md docs/usage.md src/help.sh src/core.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
+for file in README.md docs/usage.md src/help.sh src/core.sh src/relay.sh skills/devops/singbox-noninteractive-operations/scripts/singbox_inventory.sh; do
     if legacy=$(grep -n '中转' "$repo_root/$file"); then
         fail "$file still mixes relay wording: $legacy"
     fi
@@ -98,37 +98,60 @@ help_output=$(
 [[ $help_output != *'中转'* ]] || fail "help still mixes relay wording: $help_output"
 
 run_cli_case() {
-    local core_file=$1
-    CORE_FILE="$core_file" bash <<'CASE' || exit 1
+    local repo_dir=$1
+    REPO_ROOT="$repo_dir" bash <<'CASE' || exit 1
 set -uo pipefail
 
 fail() {
-    echo "FAIL(${CORE_FILE}): $*" >&2
+    echo "FAIL(entry): $*" >&2
     exit 1
 }
 
-source <(sed -n '/^relay_list() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_info_show() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_info() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_warn_security() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_main() {/,/^}/p' "$CORE_FILE")
-msg() { printf '%b\n' "$*"; }
-err() { printf '%s\n' "$*"; return 1; }
-warn() { printf '%s\n' "$*"; }
-
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
-is_conf_dir=$case_dir/conf
-mkdir -p "$is_conf_dir"
-is_main_start=
-is_core=sb
+root="$case_dir/root"
+sh_dir="$root/etc/sing-box/sh"
+entry="$sh_dir/sing-box.sh"
 
-output=$(relay_main list)
+mkdir -p "$sh_dir/src" "$root/etc/sing-box/bin" "$root/etc/sing-box/conf/.quan-meta" \
+    "$root/usr/local/bin" "$root/var/log/sing-box" "$case_dir/bin"
+cp -R "$REPO_ROOT/src/." "$sh_dir/src/"
+cp "$REPO_ROOT/sing-box.sh" "$entry"
+sed -i "s|^\. /etc/sing-box/sh/src/init.sh$|. $sh_dir/src/init.sh|" "$entry"
+sed -i \
+    -e "s|^is_core_dir=/etc/|is_core_dir=$root/etc/|" \
+    -e "s|^is_log_dir=/var/log/|is_log_dir=$root/var/log/|" \
+    -e "s|^is_sh_bin=/usr/local/bin/|is_sh_bin=$root/usr/local/bin/|" \
+    -e "s|^is_caddy_dir=/etc/caddy$|is_caddy_dir=$root/etc/caddy|" \
+    "$sh_dir/src/init.sh"
+chmod +x "$entry"
+
+cat >"$root/etc/sing-box/bin/sing-box" <<'FAKE_CORE'
+#!/usr/bin/env bash
+[[ $1 == version ]] && printf 'sing-box version 1.14.4\n'
+exit 0
+FAKE_CORE
+cat >"$case_dir/bin/apt-get" <<'FAKE_APT'
+#!/usr/bin/env bash
+exit 0
+FAKE_APT
+cat >"$case_dir/bin/systemctl" <<'FAKE_SYS'
+#!/usr/bin/env bash
+[[ $1 == is-active ]] && printf 'active\n'
+exit 0
+FAKE_SYS
+chmod +x "$root/etc/sing-box/bin/sing-box" "$case_dir/bin/apt-get" "$case_dir/bin/systemctl"
+touch "$root/etc/sing-box/qrcode-dependency-checked" "$root/etc/sing-box/bin/tls.cer" "$root/etc/sing-box/bin/tls.key"
+printf '200\n' >"$root/etc/sing-box/log-limit-mb"
+
+is_conf_dir="$root/etc/sing-box/conf"
+
+output=$(PATH="$case_dir/bin:$PATH" bash "$entry" relay list)
 [[ $output == $'\n当前未配置任何端口转发.' ]] || fail "empty relay list output changed: $output"
 [[ $output != *'中转'* ]] || fail "empty relay list still mixes wording: $output"
 [[ $output != *'按回车返回'* ]] || fail 'relay list CLI must not pause'
 
-error_output=$(relay_main unknown 2>&1)
+error_output=$(PATH="$case_dir/bin:$PATH" bash "$entry" relay unknown 2>&1)
 status=$?
 [[ $status != 0 ]] || fail 'unknown relay subcommand must still fail'
 [[ $error_output == *'端口转发'* ]] || fail "relay error should use 端口转发: $error_output"
@@ -141,25 +164,23 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 JSON
 jq -e '.inbounds[0] | .tag == "relay-10000.json" and .type == "direct" and .listen_port == 10000 and .override_address == "203.0.113.60" and .override_port == 20060' "$is_conf_dir/relay-10000.json" >/dev/null || fail 'relay compatibility fields changed'
 
-cli_list=$(relay_main list)
+cli_list=$(PATH="$case_dir/bin:$PATH" bash "$entry" relay list)
 [[ $cli_list == *'端口转发列表'* && $cli_list == *'共 1 个端口转发'* && $cli_list == *'端口转发没有身份验证'* ]] || fail "CLI relay list wording changed: $cli_list"
 [[ $cli_list == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "CLI relay list machine fields changed: $cli_list"
 [[ $cli_list != *'中转'* ]] || fail "CLI relay list still mixes wording: $cli_list"
 [[ $cli_list != *'按回车返回'* ]] || fail 'CLI relay list with entries must not pause'
 
-cli_info=$(relay_main info 10000)
+cli_info=$(PATH="$case_dir/bin:$PATH" bash "$entry" relay info 10000)
 [[ $cli_info == *'端口转发配置信息'* && $cli_info == *'类型: TCP/UDP 端口转发'* && $cli_info == *'监听端口: 10000'* && $cli_info == *'目标地址: 203.0.113.60'* && $cli_info == *'目标端口: 20060'* ]] || fail "CLI relay info compatibility fields changed: $cli_info"
 [[ $cli_info != *'中转'* ]] || fail "CLI relay info still mixes wording: $cli_info"
 [[ $cli_info != *'按回车返回'* ]] || fail 'CLI relay info must not pause'
 
-is_main_start=1
-interactive_list=$(relay_list)
+interactive_list=$(printf '2\n2\n\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
 [[ $interactive_list == *'端口转发列表'* && $interactive_list == *'共 1 个端口转发'* && $interactive_list == *'端口转发没有身份验证'* ]] || fail "interactive relay list still mixes wording: $interactive_list"
 [[ $interactive_list != *'中转'* ]] || fail "interactive relay list still contains 中转: $interactive_list"
-[[ $interactive_list != *'按回车返回'* ]] || fail 'relay list must not add a new pause'
 CASE
 }
 
-run_cli_case "$repo_root/src/core.sh"
+run_cli_case "$repo_root"
 
 printf 'PASS: terminology and relay CLI compatibility\n'

@@ -174,7 +174,7 @@ init_caddy_probe() {
         if [[ -f /lib/systemd/system/caddy.service && ! $(grep '\-\-adapter caddyfile' /lib/systemd/system/caddy.service) ]]; then
             load systemd.sh
             install_service caddy
-            systemctl restart caddy &
+            systemctl restart caddy >/dev/null 2>&1 || warn "Caddy 服务自动重启失败，请检查 caddy.service 状态。"
         fi
     fi
     is_caddy_ver=$("$is_caddy_bin" version 2>/dev/null | head -n1 | cut -d " " -f1)

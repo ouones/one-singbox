@@ -263,8 +263,12 @@ log_set() {
 
         [[ $config_lock ]] && shared_config_unlock
 
-        manage restart &
-        [[ $is_log_level_use != del ]] && msg "\n已更新 Log 设定为: $(_green "$is_log_level_use")\n"
+        if [[ $is_log_level_use == del ]]; then
+            manage_restart_checked "" "日志已清理" || return 1
+        else
+            manage_restart_checked "" "日志配置已更新" || return 1
+            msg "\n已更新 Log 设定为: $(_green "$is_log_level_use")\n"
+        fi
         return 0
     else
         if [[ -f $is_log_dir/access.log ]]; then
