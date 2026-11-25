@@ -1,64 +1,34 @@
 #!/bin/bash
 
-author=ouones
-is_script_name=one-singbox
-
-red='\e[31m'
-yellow='\e[33m'
-gray='\e[90m'
-green='\e[92m'
-blue='\e[94m'
-magenta='\e[95m'
-cyan='\e[96m'
-none='\e[0m'
-_red() { echo -e ${red}$@${none}; }
-_blue() { echo -e ${blue}$@${none}; }
-_cyan() { echo -e ${cyan}$@${none}; }
-_green() { echo -e ${green}$@${none}; }
-_yellow() { echo -e ${yellow}$@${none}; }
-_magenta() { echo -e ${magenta}$@${none}; }
-_red_bg() { echo -e "\e[41m$@${none}"; }
-
-is_err=$(_red_bg 错误!)
-is_warn=$(_red_bg 警告!)
-
-err() {
-    echo -e "\n$is_err $@\n" && exit 1
+_core_resolve_src_dir() {
+    local dir
+    if [[ ${BASH_SOURCE[0]:-} ]]; then
+        dir=$(dirname -- "${BASH_SOURCE[0]}")
+        if [[ -f $dir/meta.sh || -f $dir/init.sh ]]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+    fi
+    if [[ ${is_sh_dir:-} && ( -f $is_sh_dir/src/meta.sh || -f $is_sh_dir/src/init.sh ) ]]; then
+        printf '%s\n' "$is_sh_dir/src"
+        return 0
+    fi
+    return 1
 }
 
-warn() {
-    echo -e "\n$is_warn $@\n"
-}
+_core_src_dir=$(_core_resolve_src_dir || true)
 
-[[ $EUID != 0 ]] && err "请以 root 用户重新运行此脚本。"
+if [[ ! ${is_init_loaded:-} ]]; then
+    if [[ $_core_src_dir && -f $_core_src_dir/init.sh ]]; then
+        is_init_defs_only=1 . "$_core_src_dir/init.sh"
+        unset is_init_defs_only
+    fi
+fi
 
-cmd=$(type -P apt-get || type -P yum || type -P zypper || type -P apk)
 [[ ! $cmd ]] && err "未检测到受支持的包管理器 (apt-get、yum、zypper 或 apk)。"
 
-is_systemd=$(type -P systemctl)
-is_openrc=$(type -P rc-service)
 [[ ! $is_systemd && ! $is_openrc ]] && {
     err "未检测到 systemd 或 OpenRC 服务管理器。请先安装并启用其中之一。"
-}
-
-is_core=sing-box
-is_core_name=sing-box
-is_core_dir=/etc/$is_core
-is_core_bin=$is_core_dir/bin/$is_core
-is_core_repo=SagerNet/$is_core
-is_conf_dir=$is_core_dir/conf
-is_log_dir=/var/log/$is_core
-is_sh_bin=/usr/local/bin/$is_core
-is_sh_dir=$is_core_dir/sh
-is_sh_repo=ouones/one-singbox
-is_config_json=$is_core_dir/config.json
-is_caddy_dir=/etc/caddy
-is_caddy_bin=$(type -P caddy)
-is_caddyfile=$is_caddy_dir/Caddyfile
-is_caddy_conf=$is_caddy_dir/conf.d
-
-load() {
-    . $is_sh_dir/src/$1
 }
 
 shared_config_lock() {
@@ -93,27 +63,35 @@ shared_config_unlock() {
     fi
 }
 
-qrcode_dependency_source=$is_sh_dir/src/qrcode-deps.sh
-if [[ ! -f $qrcode_dependency_source ]]; then
-    qrcode_core_dir=$(dirname -- "$BASH_SOURCE")
-    qrcode_dependency_source=$qrcode_core_dir/qrcode-deps.sh
-    [[ -f $qrcode_dependency_source ]] || qrcode_dependency_source=$qrcode_core_dir/src/qrcode-deps.sh
-fi
-[[ -f $qrcode_dependency_source ]] && . "$qrcode_dependency_source"
-unset qrcode_dependency_source qrcode_core_dir
-
-_wget() {
-    [[ $proxy ]] && export https_proxy=$proxy
-    wget --no-check-certificate $*
+core_load_module() {
+    local mod=$1
+    local src_dir=${_core_src_dir:-}
+    local flag="_core_loaded_${mod//[^a-zA-Z0-9_]/_}"
+    [[ ${!flag:-} == 1 ]] && return 0
+    if [[ ! $src_dir ]]; then
+        src_dir=$(_core_resolve_src_dir) || return 1
+        _core_src_dir=$src_dir
+    fi
+    if [[ -f $src_dir/${mod}.sh ]]; then
+        . "$src_dir/${mod}.sh" || return 1
+        printf -v "$flag" '%s' 1
+    fi
+    return 0
 }
 
-if [[ -x $is_core_bin ]]; then
-    is_core_ver=$($is_core_bin version 2>/dev/null | awk 'NR==1{print $3}')
-fi
-[[ -z $is_core_ver ]] && is_core_ver=unknown
-[[ -x $is_caddy_bin ]] && is_caddy=1
+core_load_modules() {
+    local mod
+    for mod in qrcode-deps meta uri route node relay; do
+        core_load_module "$mod" || return 1
+    done
+    _core_modules_loaded=1
+    unset is_core_defer_modules
+    return 0
+}
 
-export LC_ALL=C
+if [[ ${is_core_defer_modules:-0} != 1 ]]; then
+    core_load_modules
+fi
 
 protocol_list=(
     TUIC
@@ -231,51 +209,12 @@ fi
 
 is_random_ss_method=${ss_method_list[$(shuf -i 4-6 -n1)]} # random only use ss2022
 
-reality_sni_pick() {
-    local -a pool=("$@")
-    local index max=$((${#pool[@]} - 1))
-    ((max >= 0)) || return 1
-    index=$(shuf -i 0-$max -n1)
-    [[ $index =~ ^[0-9]+$ ]] && ((index <= max)) || index=0
-    printf '%s\n' "${pool[index]}"
-}
-
-reality_sni_select() {
-    local response country_code city_region
-    local -a pool
-    response=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
-        timeout 10 wget --no-check-certificate -q -O - -T 10 -t 1 'https://my.ippure.com/v1/info' 2>/dev/null) || response=
-    country_code=$(jq -ers 'if length == 1 and (.[0] | type == "object") and (.[0].countryCode | type == "string" and length > 0) then .[0].countryCode else empty end' <<<"$response" 2>/dev/null) || country_code=
-    city_region=$(jq -ers 'if length == 1 and (.[0] | type == "object") and .[0].countryCode == "US" then if .[0].city == "San Jose" then "san-jose" elif .[0].city == "Los Angeles" then "los-angeles" else empty end else empty end' <<<"$response" 2>/dev/null) || city_region=
-    case $country_code/$city_region in
-    US/san-jose)
-        pool=(www.sccoe.org historysanjose.org www.rosicrucianpark.org)
-        ;;
-    US/los-angeles)
-        pool=(lamag.org)
-        ;;
-    DE/*)
-        pool=(www.uni-frankfurt.de www.staedelmuseum.de liebieghaus.de www.schirn.de dff.film)
-        ;;
-    SG/*)
-        pool=(trinitycollege.edu.sg)
-        ;;
-    HK/*)
-        pool=(www.hkapa.edu www.hsu.edu.hk www.hko.gov.hk www.archsd.gov.hk)
-        ;;
-    *)
-        pool=(www.amd.com www.ibm.com www.ebay.com www.tesla.com www.amazon.com)
-        ;;
-    esac
-    reality_sni_pick "${pool[@]}"
-}
-
 msg() {
     echo -e "$@"
 }
 
 msg_ul() {
-    echo -e "\e[4m$@\e[0m"
+    echo -e "\e[4m$*\e[0m"
 }
 
 # Read interactive input. During a menu operation the operation subprocess exits
@@ -362,165 +301,6 @@ menu_system_impact() {
     "$@"
 }
 
-get_uuid() {
-    tmp_uuid=$(cat /proc/sys/kernel/random/uuid)
-}
-
-json_strip_comments() {
-    awk '
-    {
-        line = ""
-        in_string = 0
-        escaped = 0
-        for (i = 1; i <= length($0); i++) {
-            char = substr($0, i, 1)
-            if (in_string) {
-                line = line char
-                if (escaped) {
-                    escaped = 0
-                } else if (char == "\\") {
-                    escaped = 1
-                } else if (char == "\"") {
-                    in_string = 0
-                }
-            } else if (char == "\"") {
-                in_string = 1
-                line = line char
-            } else if (char == "/" && substr($0, i + 1, 1) == "/") {
-                break
-            } else {
-                line = line char
-            }
-        }
-        print line
-    }' "$1"
-}
-
-get_snell_psk() {
-    local psk
-    psk=$(openssl rand -base64 32 2>/dev/null | tr -d '\n') || return 1
-    [[ $psk ]] || return 1
-    printf '%s\n' "$psk"
-}
-
-snell_version_valid() {
-    [[ $1 == 5 || $1 == 6 ]]
-}
-
-snell_mode_valid() {
-    [[ $1 =~ ^(default|unshaped|unsafe-raw)$ ]]
-}
-
-snell_mode_desc() {
-    echo -e "\n------------- Snell v6 运行模式说明 -------------\n1. default    \e[92m[推荐]\e[0m     : 使用默认的流量处理与填充策略。\n2. unshaped   \e[96m[减少填充]\e[0m : 不使用流量整形和额外填充。\n3. unsafe-raw \e[33m[裸传输]\e[0m   : 不提供流量保护，仅用于可信的内网或专用线路。\n--------------------------------------------------"
-}
-
-snell_obfs_mode_valid() {
-    [[ $1 == none || $1 == http ]]
-}
-
-require_snell_support() {
-    local version=${is_core_ver#v} major minor
-    [[ $version =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || err "无法确认当前 sing-box 版本 ($is_core_ver), Snell 需要 sing-box 1.14.0 或更高版本."
-    major=${BASH_REMATCH[1]}
-    minor=${BASH_REMATCH[2]}
-    ((major > 1 || major == 1 && minor >= 14)) || err "当前 sing-box 版本 ($is_core_ver) 不支持 Snell, 请先升级 sing-box core 到 1.14.0 或更高版本."
-}
-
-config_port_used() {
-    local wanted=$1 current=${2:-} transport=${3:-both} file nullglob_was_set
-    if shopt -q nullglob; then
-        nullglob_was_set=1
-    else
-        nullglob_was_set=0
-    fi
-    shopt -s nullglob
-    for file in "$is_conf_dir"/*.json; do
-        [[ ${file##*/} == "$current" ]] && continue
-        if jq -e --argjson port "$wanted" --arg transport "$transport" '
-            def listens_tcp:
-                (.network // "") != "udp" and
-                (.transport.type // "") != "quic" and
-                (.type != "hysteria" and .type != "hysteria2" and .type != "tuic");
-            def listens_udp:
-                if .network == "tcp" then false
-                elif .network == "udp" then true
-                elif (.transport.type // "") == "quic" or .type == "hysteria" or .type == "hysteria2" or .type == "tuic" then true
-                elif .type == "vless" or .type == "vmess" or .type == "trojan" or .type == "anytls" or .type == "socks" or .type == "http" or .type == "mixed" or .type == "shadowtls" then false
-                else true end;
-            any(.inbounds[]?;
-                .listen_port == $port and
-                (if $transport == "tcp" then listens_tcp
-                 elif $transport == "udp" then listens_udp
-                 else true end))
-        ' "$file" >/dev/null 2>&1; then
-            if ((nullglob_was_set)); then
-                shopt -s nullglob
-            else
-                shopt -u nullglob
-            fi
-            return 0
-        fi
-    done
-    if ((nullglob_was_set)); then
-        shopt -s nullglob
-    else
-        shopt -u nullglob
-    fi
-    return 1
-}
-
-snell_config_port_used() {
-    config_port_used "$@"
-}
-
-validate_snell() {
-    local current_port
-    require_snell_support
-    [[ $(is_test port "$port") ]] || err "($port) 不是一个有效的端口. $is_err_tips"
-    current_port=$(jq -r '.inbounds[0].listen_port // empty' "$is_conf_dir/${is_config_file:-missing}" 2>/dev/null)
-    if [[ $port != "$current_port" ]] && [[ $(is_test port_used "$port") ]]; then
-        err "无法使用 ($port) 端口. $is_err_tips"
-    fi
-    config_port_used "$port" "${is_config_file:-}" && err "无法使用 ($port) 端口. $is_err_tips"
-    [[ $snell_psk ]] || err "Snell PSK 不能为空. $is_err_tips"
-    snell_version_valid "$snell_version" || err "Snell 版本只支持 5 或 6. $is_err_tips"
-    if [[ $snell_version == 6 ]]; then
-        ((${#snell_psk} >= 12 && ${#snell_psk} <= 255)) || err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"
-        snell_mode_valid "$snell_mode" || err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"
-    else
-        snell_obfs_mode_valid "$snell_obfs_mode" || err "Snell 混淆模式只支持 none 或 http. $is_err_tips"
-    fi
-}
-
-
-get_ip() {
-    [[ $ip || $is_no_auto_tls || $is_gen || $is_dont_get_ip ]] && return
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ ! $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ ! $ip ]] && {
-        err "无法获取服务器公网 IP。请检查网络连接后重试。"
-    }
-}
-
-get_port() {
-    is_count=0
-    while :; do
-        ((is_count++))
-        if [[ $is_count -ge 233 ]]; then
-            err "已尝试 233 次，仍未找到可用端口。请检查端口占用情况。"
-        fi
-        tmp_port=$(shuf -i 20000-65535 -n 1)
-        [[ ! $(node_port_used "$tmp_port" "$is_new_protocol") && $tmp_port != $port ]] && break
-    done
-}
-
-get_pbk() {
-    is_tmp_pbk=($($is_core_bin generate reality-keypair | sed 's/.*://'))
-    is_public_key=${is_tmp_pbk[1]}
-    is_private_key=${is_tmp_pbk[0]}
-}
-
 show_list() {
     PS3=''
     COLUMNS=1
@@ -535,139 +315,13 @@ show_list() {
 
 }
 
-is_test() {
-    case $1 in
-    number)
-        echo $2 | grep -E '^[1-9][0-9]?+$'
-        ;;
-    port)
-        if [[ $(is_test number $2) ]]; then
-            [[ $2 -le 65535 ]] && echo ok
-        fi
-        ;;
-    port_used)
-        [[ $(node_port_used "$2" "$is_new_protocol") && ! $is_cant_test_port ]] && echo ok
-        ;;
-    domain)
-        echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
-        ;;
-    path)
-        echo $2 | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
-        ;;
-    uuid)
-        echo $2 | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        ;;
-    esac
-
-}
-
-is_port_used() {
-    if [[ $(type -P netstat) ]]; then
-        [[ ! $is_used_port ]] && is_used_port="$(netstat -tunlp | sed -n 's/.*:\([0-9]\+\).*/\1/p' | sort -nu)"
-        echo $is_used_port | sed 's/ /\n/g' | grep ^${1}$
-        return
-    fi
-    if [[ $(type -P ss) ]]; then
-        [[ ! $is_used_port ]] && is_used_port="$(ss -tunlp | sed -n 's/.*:\([0-9]\+\).*/\1/p' | sort -nu)"
-        echo $is_used_port | sed 's/ /\n/g' | grep ^${1}$
-        return
-    fi
-    is_cant_test_port=1
-    msg "$is_warn 无法检测端口是否可用."
-    msg "请执行: $(_yellow "${cmd} update -y; ${cmd} install net-tools -y") 来修复此问题."
-}
-
-node_protocol_transport() {
-    case ${1,,} in
-    *hysteria* | tuic | *quic*)
-        printf 'udp\n'
-        ;;
-    vless* | vmess | trojan | anytls | socks | http | mixed | shadowtls)
-        printf 'tcp\n'
-        ;;
-    *)
-        printf 'both\n'
-        ;;
-    esac
-}
-
-is_tcp_port_used() {
-    local wanted=$1 output line state recv send local_address peer process port
-    if [[ $(type -P ss) ]]; then
-        output=$(ss -Hlnpt 2>/dev/null) || {
-            is_cant_test_port=1
-            return 0
-        }
-        while read -r state recv send local_address peer process; do
-            port=${local_address##*:}
-            [[ $port == "$wanted" ]] && return 0
-        done <<<"$output"
-        return 1
-    fi
-    if [[ $(type -P netstat) ]]; then
-        output=$(netstat -tnlp 2>/dev/null) || {
-            is_cant_test_port=1
-            return 0
-        }
-        while read -r line; do
-            [[ $line == tcp* && $line == *LISTEN* ]] || continue
-            local_address=$(awk '{print $4}' <<<"$line")
-            port=${local_address##*:}
-            [[ $port == "$wanted" ]] && return 0
-        done <<<"$output"
-        return 1
-    fi
-    is_cant_test_port=1
-    return 0
-}
-
-is_udp_port_used() {
-    local wanted=$1 output state recv send local_address peer process port line
-    if [[ $(type -P ss) ]]; then
-        output=$(ss -Hlnpu 2>/dev/null) || {
-            is_cant_test_port=1
-            return 0
-        }
-        while read -r state recv send local_address peer process; do
-            port=${local_address##*:}
-            [[ $port == "$wanted" ]] && return 0
-        done <<<"$output"
-        return 1
-    fi
-    if [[ $(type -P netstat) ]]; then
-        output=$(netstat -unlp 2>/dev/null) || {
-            is_cant_test_port=1
-            return 0
-        }
-        while read -r line; do
-            [[ $line == udp* ]] || continue
-            local_address=$(awk '{print $4}' <<<"$line")
-            port=${local_address##*:}
-            [[ $port == "$wanted" ]] && return 0
-        done <<<"$output"
-        return 1
-    fi
-    is_cant_test_port=1
-    return 0
-}
-
-node_port_used() {
-    local port=$1 transport
-    transport=$(node_protocol_transport "${2:-}")
-    case $transport in
-    tcp) is_tcp_port_used "$port" && printf '%s\n' "$port" ;;
-    udp) is_udp_port_used "$port" && printf '%s\n' "$port" ;;
-    *) is_port_used "$port" ;;
-    esac
-}
-
 # ask input a string or pick a option for list.
 ask() {
     local outbound_display=
     local is_secret_input=
     case $1 in
     set_ss_method)
-        is_tmp_list=(${ss_method_list[@]})
+        is_tmp_list=("${ss_method_list[@]}")
         is_default_arg=$is_random_ss_method
         is_opt_msg="\n选择加密方式:\n"
         is_opt_input_msg="(默认\e[92m $is_default_arg\e[0m):"
@@ -684,7 +338,9 @@ ask() {
         ;;
     list)
         is_ask_set=$2
-        [[ ! $is_tmp_list ]] && is_tmp_list=($3)
+        if [[ ! $is_tmp_list ]]; then
+            read -ra is_tmp_list <<<"$3"
+        fi
         is_opt_msg=$4
         is_opt_input_msg=$5
         ;;
@@ -697,12 +353,12 @@ ask() {
         msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出口可选 Shadowsocks 或 VLESS。"
         printf '\n选择出口方式:\n'
     else
-        msg $is_opt_msg
+        msg "$is_opt_msg"
     fi
     [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
     [[ $is_tmp_list ]] && show_list "${is_tmp_list[@]}"
     while :; do
-        echo -ne $is_opt_input_msg
+        echo -ne "$is_opt_input_msg"
         if [[ $is_secret_input ]]; then
             interactive_read -rs REPLY
             echo
@@ -711,7 +367,7 @@ ask() {
         fi
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
         if [[ ! $is_tmp_list ]]; then
-            [[ $(grep port <<<$is_ask_set) ]] && {
+            [[ $(grep port <<<"$is_ask_set") ]] && {
                 [[ ! $(is_test port "$REPLY") ]] && {
                     msg "$is_err 请输入正确的端口, 可选(1-65535)"
                     continue
@@ -721,17 +377,17 @@ ask() {
                     continue
                 fi
             }
-            [[ $(grep path <<<$is_ask_set) && ! $(is_test path "$REPLY") ]] && {
+            [[ $(grep path <<<"$is_ask_set") && ! $(is_test path "$REPLY") ]] && {
                 [[ ! $tmp_uuid ]] && get_uuid
                 msg "$is_err 请输入正确的路径, 例如: /$tmp_uuid"
                 continue
             }
-            [[ $(grep uuid <<<$is_ask_set) && ! $(is_test uuid "$REPLY") ]] && {
+            [[ $(grep uuid <<<"$is_ask_set") && ! $(is_test uuid "$REPLY") ]] && {
                 [[ ! $tmp_uuid ]] && get_uuid
                 msg "$is_err 请输入正确的 UUID, 例如: $tmp_uuid"
                 continue
             }
-            [[ $(grep ^y$ <<<$is_ask_set) ]] && {
+            [[ $(grep ^y$ <<<"$is_ask_set") ]] && {
                 [[ $(grep -i ^y$ <<<"$REPLY") ]] && break
                 msg "请输入 y 确认，或按 Ctrl+C 取消。"
                 continue
@@ -761,7 +417,7 @@ ask() {
                 fi
             fi
             if [[ $is_ask_result ]]; then
-                export $is_ask_set="$is_ask_result"
+                export "$is_ask_set=$is_ask_result"
                 if [[ $is_ask_set == is_outbound_mode ]]; then
                     msg "选择: ${is_tmp_list[$REPLY - 1]}"
                 else
@@ -805,254 +461,6 @@ select_snell_obfs_mode() {
     menu_select parent is_new_snell_obfs_mode "$prompt" none http
     status=$?
     return "$status"
-}
-
-meta_dir() {
-    echo "$is_conf_dir/.quan-meta"
-}
-
-meta_file() {
-    echo "$(meta_dir)/$1.meta.json"
-}
-
-meta_get() {
-    local f
-    f=$(meta_file "$1")
-    [[ -f "$f" ]] || return
-    jq -r "$2 // empty" "$f" 2>/dev/null
-}
-
-meta_set_unlocked() {
-    local cfg=$1
-    local key=$2
-    local val=$3
-    local f
-    f=$(meta_file "$cfg")
-    mkdir -p "$(meta_dir)"
-    if [[ -f "$f" ]]; then
-        jq --arg v "$val" ".$key=\$v" "$f" >"$f.tmp" && mv -f "$f.tmp" "$f"
-    else
-        jq -n --arg v "$val" "{$key:\$v}" >"$f"
-    fi
-}
-
-meta_set() {
-    shared_config_lock || return 1
-    meta_set_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
-meta_move_unlocked() {
-    local old=$1
-    local new=$2
-    local of nf
-    of=$(meta_file "$old")
-    nf=$(meta_file "$new")
-    [[ -f "$of" ]] && mv -f "$of" "$nf"
-}
-
-meta_move() {
-    shared_config_lock || return 1
-    meta_move_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
-meta_del_unlocked() {
-    local cfg=$1
-    local key=$2
-    local f
-    f=$(meta_file "$cfg")
-    [[ -f "$f" ]] || return 0
-    if jq --arg k "$key" 'del(.[$k])' "$f" >"$f.tmp"; then
-        if jq -e 'length == 0' "$f.tmp" >/dev/null 2>&1; then
-            rm -f "$f.tmp" "$f"
-        else
-            mv -f "$f.tmp" "$f"
-        fi
-    else
-        rm -f "$f.tmp"
-        return 1
-    fi
-}
-
-meta_del() {
-    shared_config_lock || return 1
-    meta_del_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
-note_trim() {
-    local val=${1-}
-    val=${val//$'\r'/ }
-    val=${val//$'\n'/ }
-    val=${val#"${val%%[![:space:]]*}"}
-    val=${val%"${val##*[![:space:]]}"}
-    printf '%s\n' "$val"
-}
-
-note_get() {
-    local cfg=$1 raw
-    [[ $cfg ]] || return 0
-    raw=$(meta_get "$cfg" '.note')
-    [[ $raw ]] || return 0
-    note_trim "$raw"
-}
-
-note_set() {
-    local cfg=$1 val
-    [[ $cfg ]] || return 1
-    val=$(note_trim "${2-}")
-    if [[ -z $val ]]; then
-        note_clear "$cfg"
-        return $?
-    fi
-    meta_set "$cfg" note "$val"
-}
-
-note_clear() {
-    local cfg=$1
-    [[ $cfg ]] || return 1
-    meta_del "$cfg" note
-}
-
-note_summary() {
-    local text limit=${2:-30}
-    text=$(note_trim "${1-}")
-    [[ -z $text ]] && return 0
-    if ((${#text} <= limit)); then
-        printf '%s\n' "$text"
-        return 0
-    fi
-    jq -rn --arg s "$text" --argjson limit "$limit" 'if ($s | length) > $limit then ($s[0:$limit] + "...") else $s end' 2>/dev/null || printf '%s...\n' "${text:0:limit}"
-}
-
-note_read_line() {
-    local target_var=$1
-    local raw= status=0 read_timeout=${ONE_SINGBOX_READ_TIMEOUT:-3}
-    local IFS=
-    if [[ -t 0 ]]; then
-        interactive_read -r raw || status=$?
-    else
-        interactive_read -t "$read_timeout" -r raw || status=$?
-    fi
-    if ((status > 128)); then
-        printf -v "$target_var" '%s' ''
-        return 1
-    fi
-    printf -v "$target_var" '%s' "$raw"
-    [[ $status == 0 || -n $raw ]]
-}
-
-note_edit_interactive() {
-    local cfg=$1 current= raw_input= trimmed=
-    [[ $cfg ]] || return 1
-    current=$(note_get "$cfg")
-    if [[ $current ]]; then
-        printf '\n当前备注: %s\n' "$current"
-    else
-        printf '\n当前备注: (无)\n'
-    fi
-    echo -ne "请输入新备注 (直接回车保持不变，输入 - 或 clear 清空):"
-    if ! note_read_line raw_input; then
-        msg "\n备注保持不变.\n"
-        return 0
-    fi
-    trimmed=$(note_trim "$raw_input")
-    if [[ -z $trimmed ]]; then
-        msg "\n备注保持不变.\n"
-        return 0
-    fi
-    if [[ $trimmed == - || $trimmed == clear ]]; then
-        note_clear "$cfg" || err "清空备注失败."
-        msg "\n已清空备注.\n"
-        return 0
-    fi
-    note_set "$cfg" "$trimmed" || err "保存备注失败."
-    printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed"
-}
-
-note_apply_cli() {
-    local cfg=${1-}
-    [[ $cfg ]] || return 1
-    if (($# < 2)) || { (($# == 2)) && [[ -z $2 ]]; }; then
-        note_edit_interactive "$cfg" || return $?
-    elif (($# == 2)) && [[ $2 == '--clear' ]]; then
-        note_clear "$cfg" || err "清空备注失败."
-        msg "\n已清空备注.\n"
-    else
-        local IFS=' '
-        local raw_note="${*:2}" trimmed_note
-        trimmed_note=$(note_trim "$raw_note")
-        [[ $trimmed_note ]] || err "备注内容不能为空，如需清空请使用 --clear."
-        note_set "$cfg" "$trimmed_note" || err "保存备注失败."
-        printf '\n已更新备注: \e[92m%s\e[0m\n\n' "$trimmed_note"
-    fi
-}
-
-note_format_list_label() {
-    local cfg=$1 base_label=$2 note= summary=
-    [[ $cfg ]] && note=$(note_get "$cfg")
-    if [[ $note ]]; then
-        summary=$(note_summary "$note")
-        printf '%s  [备注: %s]\n' "$base_label" "${summary:-$note}"
-    else
-        printf '%s\n' "$base_label"
-    fi
-}
-
-meta_rm_unlocked() {
-    local cfg=$1
-    local f
-    f=$(meta_file "$cfg")
-    [[ -f "$f" ]] && rm -f "$f"
-}
-
-meta_rm() {
-    shared_config_lock || return 1
-    meta_rm_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
-
-node_name_for_link() {
-    local cfg=$1
-    local name
-    name=$(meta_get "$cfg" '.node_name')
-    [[ $name ]] && {
-        echo "$name"
-        return
-    }
-    echo "${cfg%.json}"
-}
-
-outbound_mode_to_direct_tag() {
-    case $1 in
-    "V6优先") echo direct_v6_pref ;;
-    "V4优先") echo direct_v4_pref ;;
-    "仅V4") echo direct_v4_only ;;
-    "仅V6") echo direct_v6_only ;;
-    *) return 1 ;;
-    esac
-}
-
-outbound_mode_display_name() {
-    case $1 in
-    "V6优先") echo "IPv6 优先" ;;
-    "V4优先") echo "IPv4 优先" ;;
-    "仅V4") echo "仅 IPv4" ;;
-    "仅V6") echo "仅 IPv6" ;;
-    "SS 出站") echo "Shadowsocks 出口" ;;
-    "VLESS 出站") echo "VLESS 出口" ;;
-    *) echo "$1" ;;
-    esac
 }
 
 current_outbound_mode_display() {
@@ -1103,1051 +511,6 @@ current_outbound_mode_display() {
     printf '%s\n' "$mode_label${tls_status:-}"
 }
 
-msg_outbound_mode_display() {
-    local prefix=$1 cfg=$2 display
-    display=$(current_outbound_mode_display "$cfg")
-    printf '\n%s %b%s%b\n' "$prefix" "$green" "$display" "$none"
-}
-
-runtime_node_ss_outbound_tag() {
-    local cfg=$1 safe
-    safe=${cfg//[^[:alnum:]_-]/_}
-    echo "managed_node_ss_$safe"
-}
-
-runtime_domain_resolver_tag() {
-    local config_file=${1:-$is_config_json}
-    jq -r 'if (.route.default_domain_resolver | type) == "string" then .route.default_domain_resolver elif (.route.default_domain_resolver | type) == "object" then (.route.default_domain_resolver.server // "local") else "local" end' "$config_file" 2>/dev/null
-}
-
-runtime_node_vless_outbound_tag() {
-    local cfg=$1 safe
-    safe=${cfg//[^[:alnum:]_-]/_}
-    echo "managed_node_vless_$safe"
-}
-
-block_cn_is_enabled() {
-    [[ -f ${is_core_dir:-/etc/sing-box}/.block-cn-enabled ]]
-}
-
-block_cn_status_text() {
-    if block_cn_is_enabled; then
-        echo "已启用"
-    else
-        echo "未启用"
-    fi
-}
-
-block_cn_strip_legacy_inbound_fields_json() {
-    local json_input=${1:-}
-    local filter='if .inbounds then .inbounds |= map(if type == "object" then del(.sniff, .sniff_override_destination, .sniff_timeout) else . end) else . end'
-    if [[ -n $json_input ]]; then
-        jq "$filter" <<<"$json_input"
-    else
-        jq "$filter"
-    fi
-}
-
-block_cn_clean_legacy_inbounds() {
-    local target_file=$1
-    [[ -f $target_file ]] || return 0
-    if jq -e '(.inbounds // []) | any(type == "object" and (.sniff != null or .sniff_override_destination != null or .sniff_timeout != null))' "$target_file" >/dev/null 2>&1; then
-        local tmp
-        tmp=$(mktemp "$target_file.tmp.XXXXXX") || return 1
-        if block_cn_strip_legacy_inbound_fields_json <"$target_file" >"$tmp"; then
-            mv -f "$tmp" "$target_file"
-        else
-            rm -f "$tmp"
-            return 1
-        fi
-    fi
-    return 0
-}
-
-block_cn_clean_all_legacy_inbounds() {
-    local conf_dir=${1:-$is_conf_dir}
-    [[ -d $conf_dir ]] || return 0
-    local file
-    for file in "$conf_dir"/*.json; do
-        [[ -f $file ]] || continue
-        [[ $file =~ dynamic-port-.*-link ]] && continue
-        block_cn_clean_legacy_inbounds "$file"
-    done
-}
-
-block_cn_load_whitelist_rules() {
-    local file=${1:-${is_core_dir:-/etc/sing-box}/.cn-whitelist.json}
-    if [[ -f $file ]] && jq -e . "$file" >/dev/null 2>&1; then
-        jq -c '
-            if type == "array" then
-                .
-            elif type == "object" then
-                [.]
-            else
-                []
-            end
-            | map(select(type == "object" and (((.domain // []) + (.domain_suffix // [])) | length > 0)))
-        ' "$file" 2>/dev/null || echo "[]"
-    else
-        echo "[]"
-    fi
-}
-
-block_cn_sync_whitelist() {
-    local core_dir=${is_core_dir:-/etc/sing-box}
-    local cache_file="$core_dir/.cn-whitelist.json"
-    local url="${BLOCK_CN_WHITELIST_URL:-https://raw.githubusercontent.com/ouones/quan/refs/heads/main/sing-box/cn-whitelist.jsonc}"
-    local tmp_download tmp_clean tmp_json
-    local download_ok=0
-
-    mkdir -p "$core_dir" 2>/dev/null || true
-    tmp_download=$(mktemp "$core_dir/.cn-whitelist.download.XXXXXX" 2>/dev/null || mktemp)
-
-    if type -P curl >/dev/null 2>&1; then
-        if curl -fsSL --connect-timeout 10 -m 30 "$url" -o "$tmp_download" 2>/dev/null; then
-            download_ok=1
-        fi
-    elif type -P wget >/dev/null 2>&1; then
-        if wget --no-check-certificate -q -T 10 -t 2 "$url" -O "$tmp_download" 2>/dev/null; then
-            download_ok=1
-        fi
-    fi
-
-    if [[ $download_ok -eq 1 && -s $tmp_download ]]; then
-        tmp_clean=$(json_strip_comments "$tmp_download" 2>/dev/null)
-        if [[ $tmp_clean ]]; then
-            tmp_json=$(jq -c '
-                if type == "object" then
-                    del(.inbound) | .action = (.action // "route") | .outbound = "direct"
-                elif type == "array" then
-                    map(if type == "object" then del(.inbound) | .action = (.action // "route") | .outbound = "direct" else empty end)
-                else
-                    empty
-                end
-            ' <<<"$tmp_clean" 2>/dev/null)
-        fi
-    fi
-
-    if [[ $tmp_json ]] && jq -e 'if type == "array" then length > 0 elif type == "object" then (((.domain // []) + (.domain_suffix // [])) | length > 0) else false end' <<<"$tmp_json" >/dev/null 2>&1; then
-        printf '%s\n' "$tmp_json" | jq . >"$tmp_download" && mv -f "$tmp_download" "$cache_file"
-        return 0
-    fi
-
-    rm -f "$tmp_download"
-
-    if [[ -f $cache_file ]] && jq -e . "$cache_file" >/dev/null 2>&1; then
-        warn "下载回国白名单失败，自动降级采用本地缓存白名单"
-        return 0
-    fi
-
-    warn "下载回国白名单失败且无本地缓存，将跳过白名单规则注入"
-    return 0
-}
-
-block_cn_enable() {
-    local core_dir=${is_core_dir:-/etc/sing-box}
-    mkdir -p "$core_dir" || {
-        err "无法创建目录: $core_dir"
-        return 1
-    }
-    touch "$core_dir/.block-cn-enabled" || {
-        err "无法创建状态文件: $core_dir/.block-cn-enabled"
-        return 1
-    }
-    block_cn_sync_whitelist
-    block_cn_clean_all_legacy_inbounds "${is_conf_dir:-$core_dir/conf}"
-    sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "${is_conf_dir:-$core_dir/conf}" 1 || {
-        rm -f "$core_dir/.block-cn-enabled"
-        err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
-        return 1
-    }
-    manage restart
-}
-
-block_cn_disable() {
-    local core_dir=${is_core_dir:-/etc/sing-box}
-    rm -f "$core_dir/.block-cn-enabled"
-    sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "${is_conf_dir:-$core_dir/conf}" 1 || {
-        err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
-        return 1
-    }
-    manage restart
-}
-
-block_cn_toggle() {
-    if block_cn_is_enabled; then
-        block_cn_disable
-    else
-        block_cn_enable
-    fi
-}
-
-block_cn_menu_toggle() {
-    if block_cn_is_enabled; then
-        block_cn_disable
-        msg "\n已禁用屏蔽回国流量。\n"
-    else
-        block_cn_enable
-        msg "\n已启用屏蔽回国流量。\n"
-    fi
-}
-
-block_cn_cli() {
-    local action=${1:-toggle}
-    case $action in
-    status) ;;
-    enable | on)
-        block_cn_enable
-        ;;
-    disable | off)
-        block_cn_disable
-        ;;
-    toggle)
-        block_cn_toggle
-        ;;
-    *)
-        err "无效参数: $action (支持: status, enable, disable, toggle)"
-        return 1
-        ;;
-    esac
-    msg "屏蔽回国流量: $(block_cn_status_text)"
-}
-
-render_runtime_node_outbound_modes() {
-    local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
-    local resolver file cfg mode outbound meta_path tags config_type tag config server
-    local -A used_proxy_tags=()
-    local block_cn_enabled=false
-    local cached_whitelist="[]"
-    local core_dir=${is_core_dir:-/etc/sing-box}
-    if [[ -f $core_dir/.cn-whitelist.json ]]; then
-        cached_whitelist=$(block_cn_load_whitelist_rules "$core_dir/.cn-whitelist.json")
-    fi
-    if block_cn_is_enabled; then
-        block_cn_enabled=true
-    fi
-    runtime_sync_error=
-    [[ -f $source_config && $output ]] || {
-        runtime_sync_error="公共配置文件不存在"
-        return 1
-    }
-    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.route // {}) | type == "object") and ((.route.rules // []) | type == "array")' "$source_config" >/dev/null 2>&1 || {
-        runtime_sync_error="公共配置格式无效"
-        return 1
-    }
-    resolver=$(runtime_domain_resolver_tag "$source_config") || {
-        runtime_sync_error="无法读取上游域名解析器"
-        return 1
-    }
-    [[ $resolver ]] || resolver=local
-    local has_direct_nodes=false
-    local proxy_outbounds='[]'
-    local managed_inbounds='[]'
-    local managed_node_rules='[]'
-    local node_rules
-
-    for file in "$config_dir"/*.json; do
-        [[ -f $file ]] || continue
-        cfg=${file##*/}
-        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
-        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
-        [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
-        mode=
-        if [[ -f $meta_path ]]; then
-            jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
-                runtime_sync_error="节点元数据格式无效: $cfg"
-                return 1
-            }
-            mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
-                runtime_sync_error="无法读取节点出站方式: $cfg"
-                return 1
-            }
-        fi
-        [[ $mode ]] || mode="V4优先"
-        tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
-            runtime_sync_error="无法读取节点入站 tag: $cfg"
-            return 1
-        }
-        if [[ $(jq -r 'length' <<<"$tags") -eq 0 ]]; then
-            if [[ -f $meta_path ]] && jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
-                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
-                return 1
-            fi
-            continue
-        fi
-
-        outbound=$(outbound_mode_to_direct_tag "$mode")
-        if [[ $outbound ]]; then
-            has_direct_nodes=true
-        elif [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
-            outbound_proxy_from_metadata "$cfg" "$meta_path" || {
-                runtime_sync_error="节点代理配置无效: $cfg"
-                return 1
-            }
-            [[ $outbound_proxy_json ]] || {
-                runtime_sync_error="节点代理配置缺失: $cfg"
-                return 1
-            }
-            config_type=$(jq -r '.config.type' <<<"$outbound_proxy_json")
-            if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
-                outbound=$(runtime_node_ss_outbound_tag "$cfg")
-            elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
-                outbound=$(runtime_node_vless_outbound_tag "$cfg")
-            else
-                runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
-                return 1
-            fi
-            [[ ! ${used_proxy_tags[$outbound]+exists} ]] || {
-                runtime_sync_error="受管出站 tag 冲突: $outbound"
-                return 1
-            }
-            used_proxy_tags[$outbound]=$cfg
-            server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
-            if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
-                config=$(jq -c --arg tag "$outbound" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
-                    runtime_sync_error="生成代理出站失败: $cfg"
-                    return 1
-                }
-            else
-                config=$(jq -c --arg tag "$outbound" '.config + {tag:$tag}' <<<"$outbound_proxy_json") || {
-                    runtime_sync_error="生成代理出站失败: $cfg"
-                    return 1
-                }
-            fi
-            proxy_outbounds=$(jq -c --argjson config "$config" '. + [$config]' <<<"$proxy_outbounds") || {
-                runtime_sync_error="生成代理出站列表失败"
-                return 1
-            }
-        else
-            continue
-        fi
-
-        node_rules=$(jq -n -c --argjson inbound "$tags" --arg outbound "$outbound" --argjson block_cn "$block_cn_enabled" --argjson whitelist "$cached_whitelist" '
-            (if $block_cn and ($whitelist | length > 0) then
-                $whitelist | map(
-                    if type == "object" then
-                        . + {inbound: $inbound, action: (.action // "route"), outbound: $outbound}
-                    else
-                        empty
-                    end
-                )
-            else
-                []
-            end) as $wl
-            | (if $block_cn then
-                [
-                    {inbound: $inbound, ip_is_private: true, action: "reject"},
-                    {inbound: $inbound, rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
-                ]
-            else
-                []
-            end) as $blk
-            | (
-                [{inbound: $inbound, action: "route", outbound: $outbound}]
-            ) as $rt
-            | $wl + $blk + $rt
-        ') || {
-            runtime_sync_error="生成节点规则块失败: $cfg"
-            return 1
-        }
-
-        managed_node_rules=$(jq -c --argjson rules "$node_rules" '. + $rules' <<<"$managed_node_rules") || {
-            runtime_sync_error="合并节点规则块失败: $cfg"
-            return 1
-        }
-        managed_inbounds=$(jq -c --argjson tags "$tags" '. + $tags' <<<"$managed_inbounds")
-    done
-    managed_inbounds=$(jq -c 'unique' <<<"$managed_inbounds")
-
-    jq --arg resolver "$resolver" --argjson has_direct "$has_direct_nodes" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson managed_inbounds "$managed_inbounds" --argjson managed_node_rules "$managed_node_rules" --argjson cached_whitelist "$cached_whitelist" '
-        def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
-        def is_managed_outbound_tag($tag):
-            $tag == "block"
-            or ((direct_managed_tags | index($tag)) != null)
-            or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
-        def is_managed_route_tag($tag):
-            ((direct_managed_tags | index($tag)) != null)
-            or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
-        def is_broad_direct_rule:
-            .outbound == "direct" and (
-                ((keys - ["action","outbound"]) | length) == 0
-                or (
-                    ((keys - ["action","outbound","inbound"]) | length) == 0
-                    and ((.inbound | type) == "array")
-                    and ((.inbound | length) > 0)
-                    and (.inbound | any(.[]; . as $tag | ($managed_inbounds | index($tag)) != null))
-                )
-            );
-        def is_managed_whitelist_rule:
-            (is_broad_direct_rule | not) and (
-                . as $rule |
-                (
-                    (($cached_whitelist // []) | any(
-                        . as $cw |
-                        ($cw.domain != null and $rule.domain == $cw.domain)
-                        or ($cw.domain_suffix != null and $rule.domain_suffix == $cw.domain_suffix)
-                    ))
-                    or (
-                        ($rule.domain // []) | any(. == "connectivitycheck.gstatic.com" or . == "www.gstatic.com")
-                    )
-                )
-            );
-        def is_managed_block_rule:
-            (.action == "reject" or .outbound == "block") and (.ip_is_private == true or .rule_set == ["geosite-cn", "geoip-cn"]);
-        def managed_direct_outbounds($r): [
-            {tag:"direct_v6_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv6"}},
-            {tag:"direct_v4_pref",type:"direct",domain_resolver:{server:$r,strategy:"prefer_ipv4"}},
-            {tag:"direct_v4_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv4_only"}},
-            {tag:"direct_v6_only",type:"direct",domain_resolver:{server:$r,strategy:"ipv6_only"}}
-        ];
-        def managed_rule_set_tags: ["geosite-cn", "geoip-cn"];
-        def is_managed_rule_set:
-            ((.tag // "") as $t | (managed_rule_set_tags | index($t)) != null);
-        def managed_cn_rule_sets: [
-            {
-                tag: "geosite-cn",
-                type: "remote",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
-                http_client: "direct-client"
-            },
-            {
-                tag: "geoip-cn",
-                type: "remote",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-                http_client: "direct-client"
-            }
-        ];
-        def is_managed_sniff_rule:
-            .action == "sniff" and ((keys - ["action", "timeout", "inbound"]) | length) == 0;
-        def managed_sniff_rules:
-            if ($managed_inbounds | length) > 0 then
-                [{action: "sniff", inbound: $managed_inbounds}]
-            else
-                []
-            end;
-        def is_managed_http_client:
-            ((.tag // "") == "direct-client");
-        def managed_http_clients: [
-            {tag: "direct-client"}
-        ];
-        .dns = (.dns // {})
-        | if (($has_direct or (($proxy_outbounds | length) > 0)) and $resolver == "local") then
-            .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end)
-            | if any(.dns.servers[]?; .tag == "local") then . else .dns.servers += [{tag:"local",type:"local"}] end
-          else . end
-        | del(.dns.strategy)
-        | .route = (.route // {})
-        | .route.final = (.route.final // "direct")
-        | if (.route.default_domain_resolver | type) == "object" then
-            if ((.route.default_domain_resolver.server // "") | length) > 0 then
-                .route.default_domain_resolver = .route.default_domain_resolver.server
-            else
-                del(.route.default_domain_resolver)
-            end
-          elif (.route.default_domain_resolver | type) == "string" and ((.route.default_domain_resolver // "") | length) == 0 then
-            del(.route.default_domain_resolver)
-          else . end
-        | if has("http_clients") then
-            .http_clients = ((.http_clients // []) | map(select(is_managed_http_client | not)))
-          else . end
-        | if $block_cn_enabled then
-            .http_clients = ((.http_clients // []) + managed_http_clients)
-          else
-            if has("http_clients") and ((.http_clients | length) == 0) then
-                del(.http_clients)
-            else . end
-          end
-        | if (.route | has("rule_set")) then
-            .route.rule_set = ((.route.rule_set // []) | map(select(is_managed_rule_set | not)))
-          else . end
-        | if $block_cn_enabled then
-            .route.rule_set = ((.route.rule_set // []) + managed_cn_rule_sets)
-          else
-            if (.route | has("rule_set")) and ((.route.rule_set | length) == 0) then
-                del(.route.rule_set)
-            else . end
-          end
-        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule or is_managed_sniff_rule) | not)))) as $existing_rules
-        | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
-        | if $has_direct then .outbounds += managed_direct_outbounds($resolver) else . end
-        | .outbounds += $proxy_outbounds
-        | .route.rules = (
-            (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
-            | ([$existing_rules[] | select(is_broad_direct_rule)]) as $fallback_rules
-            | ([$existing_rules[] | select(is_broad_direct_rule | not)]) as $custom_rules
-            | $sniff_rules + $custom_rules + $managed_node_rules + $fallback_rules
-          )
-    ' "$source_config" >"$output" || {
-        rm -f "$output"
-        runtime_sync_error="运行时出站配置生成失败"
-        return 1
-    }
-    return 0
-}
-
-upgrade_legacy_node_outbound_metadata() {
-    local config_dir=${1:-$is_conf_dir} file cfg meta_path
-    [[ -d $config_dir ]] || return 0
-    shopt -s nullglob
-    for file in "$config_dir"/*.json; do
-        [[ -f $file ]] || continue
-        cfg=${file##*/}
-        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
-        jq -e 'type == "object" and ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | length > 0)' "$file" >/dev/null 2>&1 || continue
-        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
-        if [[ ! -f $meta_path ]] || ! jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
-            is_conf_dir=$config_dir meta_set_unlocked "$cfg" outbound_mode "V4优先"
-        fi
-    done
-    shopt -u nullglob
-    return 0
-}
-
-sync_runtime_node_outbound_modes_unlocked() {
-    local source_config=${1:-$is_config_json} target_config=${2:-$is_config_json} config_dir=${3:-$is_conf_dir} validate=${4:-0} tmp
-    runtime_sync_error=
-    [[ -f $source_config ]] || return 0
-    tmp=$(mktemp "$target_config.tmp.XXXXXX") || {
-        runtime_sync_error="无法创建运行时配置临时文件"
-        return 1
-    }
-    if ! render_runtime_node_outbound_modes "$source_config" "$tmp" '' '' "$config_dir"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    if [[ $validate == 1 ]] && ! "$is_core_bin" check -c "$tmp" -C "$config_dir" &>/dev/null; then
-        rm -f "$tmp"
-        runtime_sync_error="完整运行时配置校验失败"
-        return 1
-    fi
-    if ! mv -f "$tmp" "$target_config"; then
-        rm -f "$tmp"
-        runtime_sync_error="无法保存运行时配置: $target_config"
-        return 1
-    fi
-    upgrade_legacy_node_outbound_metadata "$config_dir"
-    return 0
-}
-
-sync_runtime_node_outbound_modes() {
-    shared_config_lock || {
-        runtime_sync_error=${shared_config_error:-无法获取公共配置锁}
-        return 1
-    }
-    sync_runtime_node_outbound_modes_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
-migrate_runtime_config() {
-    block_cn_clean_all_legacy_inbounds "$is_conf_dir"
-    [[ -f $is_config_json ]] || return 0
-    sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1
-}
-
-manage_restart_confirmed() {
-    local pid
-    if [[ $is_systemd ]]; then
-        systemctl restart "$is_core" || return 1
-        sleep 2
-        systemctl is-active --quiet "$is_core" || return 1
-        pid=$(systemctl show -p MainPID --value "$is_core" 2>/dev/null) || return 1
-        [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
-        return 0
-    fi
-    if [[ $is_openrc ]]; then
-        rc-service "$is_core" restart || return 1
-        sleep 2
-        rc-service "$is_core" status >/dev/null 2>&1 || return 1
-        return 0
-    fi
-    return 1
-}
-
-default_runtime_config() {
-    local log_path="/var/log/$is_core/access.log" ntp=
-    [[ $is_ntp_on ]] && ntp=1
-    jq -cn --arg log_path "$log_path" --arg ntp "$ntp" '
-        {log:{output:$log_path,level:"info",timestamp:true},dns:{},outbounds:[{tag:"direct",type:"direct"}]}
-        + (if $ntp == "1" then {ntp:{enabled:true,server:"time.apple.com"}} else {} end)
-    '
-}
-
-restore_outbound_apply_file() {
-    local backup=$1 target=$2 existed=$3 stage
-    if [[ $existed == 1 ]]; then
-        [[ -f $backup ]] || return 1
-        stage=$(mktemp "$target.restore.XXXXXX") || return 1
-        if ! cp -p "$backup" "$stage"; then
-            rm -f "$stage"
-            return 1
-        fi
-        if ! mv -f "$stage" "$target"; then
-            rm -f "$stage"
-            return 1
-        fi
-    else
-        rm -f "$target" || return 1
-    fi
-}
-
-restore_node_config_lifecycle() {
-    local tmp_dir=$1 operation=$2 old_cfg=$3 new_cfg=${4:-} old_meta_exists=$5 old_config_exists=$6
-    local old_node="$is_conf_dir/$old_cfg" old_meta new_node new_meta stage
-    local -a errors=()
-    old_meta=$(meta_file "$old_cfg")
-    if ! restore_outbound_apply_file "$tmp_dir/original-old-node" "$old_node" 1; then errors+=("$old_node"); fi
-    if [[ $operation == replace && $old_cfg != "$new_cfg" ]]; then
-        new_node="$is_conf_dir/$new_cfg"
-        new_meta=$(meta_file "$new_cfg")
-        if ! restore_outbound_apply_file "$tmp_dir/original-new-node" "$new_node" 0; then errors+=("$new_node"); fi
-        rm -f "$new_meta" || errors+=("$new_meta")
-    fi
-    if [[ $old_meta_exists == 1 ]]; then
-        stage=$(mktemp "$old_meta.restore.XXXXXX") && cp -p "$tmp_dir/original-old-meta" "$stage" && mv -f "$stage" "$old_meta" || { rm -f "${stage:-}"; errors+=("$old_meta"); }
-    else
-        rm -f "$old_meta" || errors+=("$old_meta")
-    fi
-    if ! restore_outbound_apply_file "$tmp_dir/original-config" "$is_config_json" "$old_config_exists"; then errors+=("$is_config_json"); fi
-    node_lifecycle_restore_errors=${errors[*]}
-}
-
-prepare_node_config_lifecycle() {
-    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-} tmp_dir=$5
-    local old_node="$is_conf_dir/$old_cfg" old_meta
-    local candidate_nodes candidate_config source_config original_old_node original_old_meta original_config
-
-    node_lifecycle_error=
-    candidate_nodes="$tmp_dir/nodes"
-    if ! mkdir -p "$candidate_nodes" || ! cp -a "$is_conf_dir/." "$candidate_nodes/"; then
-        node_lifecycle_error="无法构造候选节点集合"
-        return 1
-    fi
-    old_meta=$(meta_file "$old_cfg")
-    if [[ $operation == delete ]]; then
-        rm -f "$candidate_nodes/$old_cfg" "$candidate_nodes/.quan-meta/$old_cfg.meta.json" || {
-            node_lifecycle_error="无法构造候选删除节点集合"
-            return 1
-        }
-    else
-        if [[ $old_cfg != "$new_cfg" ]]; then
-            if ! mv -f "$candidate_nodes/$old_cfg" "$candidate_nodes/$new_cfg"; then
-                node_lifecycle_error="无法构造候选节点迁移: $old_cfg -> $new_cfg"
-                return 1
-            fi
-            if [[ -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" ]]; then
-                mkdir -p "$candidate_nodes/.quan-meta" && mv -f "$candidate_nodes/.quan-meta/$old_cfg.meta.json" "$candidate_nodes/.quan-meta/$new_cfg.meta.json" || {
-                    node_lifecycle_error="无法构造候选节点元数据迁移: $old_cfg -> $new_cfg"
-                    return 1
-                }
-            fi
-        fi
-        printf '%s\n' "$new_json" >"$candidate_nodes/$new_cfg" || {
-            node_lifecycle_error="无法写入候选节点配置: $new_cfg"
-            return 1
-        }
-    fi
-
-    candidate_config="$tmp_dir/config.json"
-    if [[ -f $is_config_json ]]; then
-        source_config=$is_config_json
-    else
-        source_config="$tmp_dir/default-config.json"
-        default_runtime_config >"$source_config" || {
-            node_lifecycle_error="无法构造默认公共配置"
-            return 1
-        }
-    fi
-    if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" '' '' "$candidate_nodes"; then
-        node_lifecycle_error="节点关联配置生成失败: ${runtime_sync_error:-未知错误}"
-        return 1
-    fi
-    if ! "$is_core_bin" check -c "$candidate_config" -C "$candidate_nodes" &>/dev/null; then
-        node_lifecycle_error="完整候选节点配置校验失败，原配置未改变: $old_cfg${new_cfg:+ -> $new_cfg}"
-        return 1
-    fi
-
-    original_old_node="$tmp_dir/original-old-node"
-    original_old_meta="$tmp_dir/original-old-meta"
-    original_config="$tmp_dir/original-config"
-    cp -p "$old_node" "$original_old_node" || {
-        node_lifecycle_error="无法备份节点配置: $old_node"
-        return 1
-    }
-    if [[ -f $old_meta ]]; then
-        cp -p "$old_meta" "$original_old_meta" || {
-            node_lifecycle_error="无法备份节点元数据: $old_meta"
-            return 1
-        }
-    fi
-    if [[ -f $is_config_json ]]; then
-        cp -p "$is_config_json" "$original_config" || {
-            node_lifecycle_error="无法备份公共配置: $is_config_json"
-            return 1
-        }
-    fi
-}
-
-apply_node_config_lifecycle_files() {
-    local operation=$1 old_cfg=$2 new_cfg=${3:-} tmp_dir=$4
-    local old_node="$is_conf_dir/$old_cfg" new_node="$is_conf_dir/$new_cfg" old_meta new_meta
-    local candidate_nodes="$tmp_dir/nodes" candidate_config="$tmp_dir/config.json" stage old_config_exists=0
-    node_lifecycle_error=
-    node_lifecycle_restart_needed=0
-    old_meta=$(meta_file "$old_cfg")
-    new_meta=$(meta_file "$new_cfg")
-    [[ -f "$tmp_dir/original-config" ]] && old_config_exists=1
-
-    if [[ $operation == replace ]]; then
-        stage=$(mktemp "$new_node.lifecycle.XXXXXX") || node_lifecycle_error="无法准备节点配置保存: $new_node"
-        if [[ ! $node_lifecycle_error ]] && { ! cp -p "$candidate_nodes/$new_cfg" "$stage" || ! mv -f "$stage" "$new_node"; }; then
-            rm -f "$stage"
-            node_lifecycle_error="保存节点配置失败: $new_node"
-        fi
-        if [[ ! $node_lifecycle_error && $old_cfg != "$new_cfg" ]]; then
-            if [[ -f $old_meta ]] && ! meta_move "$old_cfg" "$new_cfg"; then
-                node_lifecycle_error="迁移节点元数据失败: $old_meta -> $new_meta"
-            elif ! rm -f "$old_node"; then
-                node_lifecycle_error="移除旧节点配置失败: $old_node"
-            fi
-        fi
-    else
-        rm -f "$old_node" || node_lifecycle_error="删除节点配置失败: $old_node"
-        if [[ ! $node_lifecycle_error && -f $old_meta ]] && ! meta_rm "$old_cfg"; then
-            node_lifecycle_error="删除节点元数据失败: $old_meta"
-        fi
-    fi
-    if [[ ! $node_lifecycle_error && ( $old_config_exists == 1 || $operation == replace ) ]]; then
-        stage=$(mktemp "$is_config_json.lifecycle.XXXXXX") || node_lifecycle_error="无法准备公共配置保存: $is_config_json"
-        if [[ ! $node_lifecycle_error ]] && { ! cp -p "$candidate_config" "$stage" || ! mv -f "$stage" "$is_config_json"; }; then
-            rm -f "$stage"
-            node_lifecycle_error="保存公共配置失败: $is_config_json"
-        fi
-        [[ ! $node_lifecycle_error ]] && node_lifecycle_restart_needed=1
-    fi
-    [[ ! $node_lifecycle_error ]]
-}
-
-apply_node_config_lifecycle_unlocked() {
-    local operation=$1 old_cfg=$2 new_cfg=${3:-} new_json=${4:-}
-    local old_node="$is_conf_dir/$old_cfg" tmp_dir tmp_parent old_meta_exists=0 old_config_exists=0
-    node_lifecycle_error=
-    node_lifecycle_restore_errors=
-    node_lifecycle_restart_needed=0
-    [[ $operation == delete || $operation == replace ]] || {
-        node_lifecycle_error="不支持的节点操作: $operation"
-        return 1
-    }
-    [[ -f $old_node ]] || {
-        node_lifecycle_error="本机节点配置不存在: $old_node"
-        return 1
-    }
-    if [[ $operation == replace ]]; then
-        local new_node="$is_conf_dir/$new_cfg" new_meta
-        new_meta=$(meta_file "$new_cfg")
-        [[ $new_cfg && $new_json ]] && jq -e 'type == "object" and (.inbounds | type == "array")' <<<"$new_json" >/dev/null 2>&1 || {
-            node_lifecycle_error="候选本机节点配置无效: $new_cfg"
-            return 1
-        }
-        if [[ $old_cfg != "$new_cfg" && ( -e $new_node || -e $new_meta ) ]]; then
-            node_lifecycle_error="目标节点配置或元数据已存在: $new_cfg"
-            return 1
-        fi
-    fi
-    tmp_parent=$(dirname "$is_conf_dir")
-    tmp_dir=$(mktemp -d "$tmp_parent/.node-lifecycle.XXXXXX") || {
-        node_lifecycle_error="无法创建节点变更临时目录: $tmp_parent"
-        return 1
-    }
-    if ! prepare_node_config_lifecycle "$operation" "$old_cfg" "$new_cfg" "$new_json" "$tmp_dir"; then
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    [[ -f "$tmp_dir/original-old-meta" ]] && old_meta_exists=1
-    [[ -f "$tmp_dir/original-config" ]] && old_config_exists=1
-    if ! apply_node_config_lifecycle_files "$operation" "$old_cfg" "$new_cfg" "$tmp_dir"; then
-        restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
-        [[ $node_lifecycle_restore_errors ]] && node_lifecycle_error+="；恢复文件失败: $node_lifecycle_restore_errors"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    if [[ $node_lifecycle_restart_needed == 1 ]] && ! manage_restart_confirmed; then
-        restore_node_config_lifecycle "$tmp_dir" "$operation" "$old_cfg" "$new_cfg" "$old_meta_exists" "$old_config_exists"
-        if manage_restart_confirmed; then
-            if [[ $node_lifecycle_restore_errors ]]; then
-                node_lifecycle_error="节点变更重启失败，文件恢复失败: $node_lifecycle_restore_errors；原配置恢复重启已完成"
-            else
-                node_lifecycle_error="节点变更重启失败，已恢复原配置并恢复服务"
-            fi
-        elif [[ $node_lifecycle_restore_errors ]]; then
-            node_lifecycle_error="节点变更重启失败，文件恢复和恢复重启均失败: $node_lifecycle_restore_errors"
-        else
-            node_lifecycle_error="节点变更重启失败，原配置已恢复但服务恢复失败"
-        fi
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    rm -rf "$tmp_dir"
-    return 0
-}
-
-apply_node_config_lifecycle() {
-    shared_config_lock || {
-        node_lifecycle_error=${shared_config_error:-无法获取公共配置锁}
-        return 1
-    }
-    apply_node_config_lifecycle_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
-apply_node_outbound_mode_unlocked() {
-    local cfg=$1 mode=$2 proxy_config=${3:-} proxy_name=${4:-}
-    local node_file="$is_conf_dir/$cfg" metadata_file tmp_parent tmp_dir
-    local source_config candidate_meta candidate_config original_meta original_config
-    local candidate_meta_json proxy_json config_type method password
-    local check_error
-    local meta_install config_install old_meta_exists=0 old_config_exists=0
-    local restore_errors=()
-    outbound_apply_error=
-    case $mode in
-    "V6优先" | "V4优先" | "仅V4" | "仅V6") ;;
-    "SS 出站" | "VLESS 出站") ;;
-    *)
-        outbound_apply_error="不支持的出站方式: $mode"
-        return 1
-        ;;
-    esac
-    [[ -f $node_file ]] || {
-        outbound_apply_error="本机节点配置不存在: $node_file"
-        return 1
-    }
-    jq -e 'type == "object" and (.inbounds | type == "array")' "$node_file" >/dev/null 2>&1 || {
-        outbound_apply_error="本机节点配置格式无效: $node_file"
-        return 1
-    }
-    metadata_file=$(meta_file "$cfg")
-    if [[ -f $metadata_file ]]; then
-        jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || {
-            outbound_apply_error="节点元数据格式无效: $metadata_file"
-            return 1
-        }
-    fi
-    if [[ $proxy_config && ($mode == 'SS 出站' || $mode == 'VLESS 出站') ]]; then
-        proxy_json=
-    else
-        outbound_proxy_from_metadata "$cfg" "$metadata_file" || {
-            outbound_apply_error="当前代理缓存无效，未更改运行配置: $metadata_file"
-            return 1
-        }
-        proxy_json=$outbound_proxy_json
-    fi
-    if [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
-        if [[ $proxy_config ]]; then
-            config_type=$(jq -r '.type // empty' <<<"$proxy_config" 2>/dev/null)
-            if [[ $mode == 'SS 出站' ]]; then
-                [[ $config_type == shadowsocks ]] || {
-                    outbound_apply_error="SS 出站需要 Shadowsocks 连接参数"
-                    return 1
-                }
-                jq -e '
-                    type == "object"
-                    and (.server | type == "string" and length > 0)
-                    and (.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
-                    and (.method | type == "string" and length > 0)
-                    and (.password | type == "string" and length > 0)
-                    and ((has("tag") or has("detour")) | not)
-                ' <<<"$proxy_config" >/dev/null 2>&1 || {
-                    outbound_apply_error="SS 出站参数无效"
-                    return 1
-                }
-                method=$(jq -r '.method' <<<"$proxy_config")
-                password=$(jq -r '.password' <<<"$proxy_config")
-                ss_method_supported "$method" && ss_password_valid_for_method "$method" "$password" || {
-                    outbound_apply_error="SS 加密方式或密钥无效"
-                    return 1
-                }
-            else
-                jq -e '
-                    type == "object"
-                    and .type == "vless"
-                    and (.server | type == "string" and length > 0)
-                    and (.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
-                    and (.uuid | type == "string" and length > 0)
-                    and ((has("tag") or has("detour")) | not)
-                ' <<<"$proxy_config" >/dev/null 2>&1 || {
-                    outbound_apply_error="VLESS 出站参数无效"
-                    return 1
-                }
-            fi
-            proxy_json=$(jq -cn --arg name "$proxy_name" --argjson config "$proxy_config" '{name:$name,config:$config}') || {
-                outbound_apply_error="无法构造代理缓存"
-                return 1
-            }
-        else
-            [[ $proxy_json ]] || {
-                outbound_apply_error="没有可复用的代理缓存"
-                return 1
-            }
-            config_type=$(jq -r '.config.type // empty' <<<"$proxy_json")
-            [[ ($mode == 'SS 出站' && $config_type == shadowsocks) || ($mode == 'VLESS 出站' && $config_type == vless) ]] || {
-                outbound_apply_error="当前代理缓存与所选出站方式不匹配"
-                return 1
-            }
-        fi
-    fi
-
-    tmp_parent=$(dirname "$is_config_json")
-    tmp_dir=$(mktemp -d "$tmp_parent/.outbound-apply.XXXXXX") || {
-        outbound_apply_error="无法创建候选配置目录: $tmp_parent"
-        return 1
-    }
-    source_config="$tmp_dir/config-source.json"
-    candidate_meta="$tmp_dir/metadata-candidate.json"
-    candidate_config="$tmp_dir/config-candidate.json"
-    original_meta="$tmp_dir/metadata-original"
-    original_config="$tmp_dir/config-original"
-    if [[ -f $metadata_file ]]; then
-        cp -p "$metadata_file" "$original_meta" || {
-            outbound_apply_error="无法备份节点元数据: $metadata_file"
-            rm -rf "$tmp_dir"
-            return 1
-        }
-        old_meta_exists=1
-        candidate_meta_json=$(jq -c --arg mode "$mode" --argjson proxy "${proxy_json:-null}" '
-            .outbound_mode = $mode
-            | if $proxy == null then . else .outbound_proxy = $proxy | del(.outbound_ss_server,.outbound_ss_port,.outbound_ss_method,.outbound_ss_password,.outbound_ss_name) end
-        ' "$metadata_file" 2>/dev/null) || {
-            outbound_apply_error="无法构造节点元数据: $metadata_file"
-            rm -rf "$tmp_dir"
-            return 1
-        }
-    else
-        candidate_meta_json=$(jq -cn --arg mode "$mode" --argjson proxy "${proxy_json:-null}" '
-            {outbound_mode:$mode}
-            | if $proxy == null then . else .outbound_proxy = $proxy end
-        ') || {
-            outbound_apply_error="无法构造节点元数据"
-            rm -rf "$tmp_dir"
-            return 1
-        }
-    fi
-    if ! printf '%s\n' "$candidate_meta_json" >"$candidate_meta"; then
-        outbound_apply_error="无法写入候选节点元数据"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    if [[ -f $is_config_json ]]; then
-        cp -p "$is_config_json" "$original_config" || {
-            outbound_apply_error="无法备份公共配置: $is_config_json"
-            rm -rf "$tmp_dir"
-            return 1
-        }
-        old_config_exists=1
-        cp -p "$is_config_json" "$source_config" || {
-            outbound_apply_error="无法读取公共配置: $is_config_json"
-            rm -rf "$tmp_dir"
-            return 1
-        }
-    else
-        default_runtime_config >"$source_config" || {
-            outbound_apply_error="无法构造默认公共配置"
-            rm -rf "$tmp_dir"
-            return 1
-        }
-    fi
-    if ! render_runtime_node_outbound_modes "$source_config" "$candidate_config" "$cfg" "$candidate_meta"; then
-        outbound_apply_error="完整配置生成失败: ${runtime_sync_error:-未知错误}"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    if ! "$is_core_bin" check -c "$candidate_config" -C "$is_conf_dir" >"$tmp_dir/check.log" 2>&1; then
-        outbound_apply_error="完整配置校验失败，原配置未改变"
-        check_error=$(sed -n '/[^[:space:]]/{s/\\/\\\\/g;s/[[:cntrl:]]//g;p;}' "$tmp_dir/check.log")
-        [[ ! $check_error ]] || outbound_apply_error+="：$check_error"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    mkdir -p "$(dirname "$metadata_file")" || {
-        outbound_apply_error="无法创建节点元数据目录: $(dirname "$metadata_file")"
-        rm -rf "$tmp_dir"
-        return 1
-    }
-    meta_install=$(mktemp "$metadata_file.apply.XXXXXX") || {
-        outbound_apply_error="无法准备节点元数据保存: $metadata_file"
-        rm -rf "$tmp_dir"
-        return 1
-    }
-    config_install=$(mktemp "$is_config_json.apply.XXXXXX") || {
-        outbound_apply_error="无法准备公共配置保存: $is_config_json"
-        rm -f "$meta_install"
-        rm -rf "$tmp_dir"
-        return 1
-    }
-    if ! cp "$candidate_meta" "$meta_install" || ! cp "$candidate_config" "$config_install" || ! chmod 600 "$meta_install" "$config_install"; then
-        outbound_apply_error="无法暂存候选配置文件"
-        rm -f "$meta_install" "$config_install"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    if ! mv -f "$meta_install" "$metadata_file"; then
-        outbound_apply_error="保存节点元数据失败: $metadata_file"
-        rm -f "$meta_install" "$config_install"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    if ! mv -f "$config_install" "$is_config_json"; then
-        outbound_apply_error="保存公共配置失败: $is_config_json"
-        if ! restore_outbound_apply_file "$original_meta" "$metadata_file" "$old_meta_exists"; then
-            outbound_apply_error+="；恢复节点元数据失败: $metadata_file"
-        fi
-        rm -f "$meta_install" "$config_install"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    if ! manage_restart_confirmed; then
-        if ! restore_outbound_apply_file "$original_meta" "$metadata_file" "$old_meta_exists"; then
-            restore_errors+=("$metadata_file")
-        fi
-        if ! restore_outbound_apply_file "$original_config" "$is_config_json" "$old_config_exists"; then
-            restore_errors+=("$is_config_json")
-        fi
-        if manage_restart_confirmed; then
-            if ((${#restore_errors[@]})); then
-                outbound_apply_error="重启失败且文件恢复失败: ${restore_errors[*]}；原配置恢复重启已完成"
-            else
-                outbound_apply_error="重启失败，已恢复原配置并恢复服务"
-            fi
-        else
-            if ((${#restore_errors[@]})); then
-                outbound_apply_error="重启失败且文件恢复失败: ${restore_errors[*]}；原配置恢复重启也失败"
-            else
-                outbound_apply_error="重启失败，原配置已恢复但服务恢复失败"
-            fi
-        fi
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-    rm -rf "$tmp_dir"
-    return 0
-}
-
-apply_node_outbound_mode() {
-    shared_config_lock || {
-        outbound_apply_error=${shared_config_error:-无法获取公共配置锁}
-        return 1
-    }
-    apply_node_outbound_mode_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
-}
-
 edit_node_outbound_mode() {
     local metadata_file proxy_config= proxy_name= proxy_json= current_proxy_type outbound_status
     printf '\n当前出口方式: %s\n' "$(current_outbound_mode_display "$is_config_file")"
@@ -2179,11 +542,11 @@ edit_node_outbound_mode() {
         echo
         [[ $is_outbound_ss_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_ss_uri ]]; then
-            parse_proxy_uri ss "$is_outbound_ss_uri" || err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"
+            parse_proxy_uri ss "$is_outbound_ss_uri" || { err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"; return 1; }
             proxy_config=$outbound_proxy_config_json
             proxy_name=$outbound_proxy_name
         else
-            [[ $current_proxy_type == shadowsocks ]] || err "没有可复用的 Shadowsocks 配置，请粘贴 SS 分享链接."
+            [[ $current_proxy_type == shadowsocks ]] || { err "没有可复用的 Shadowsocks 配置，请粘贴 SS 分享链接."; return 1; }
             proxy_config=
             proxy_name=
         fi
@@ -2201,1368 +564,17 @@ edit_node_outbound_mode() {
         echo
         [[ $is_outbound_vless_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_vless_uri ]]; then
-            parse_proxy_uri vless "$is_outbound_vless_uri" || err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"
+            parse_proxy_uri vless "$is_outbound_vless_uri" || { err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"; return 1; }
             proxy_config=$outbound_proxy_config_json
             proxy_name=$outbound_proxy_name
         else
-            [[ $current_proxy_type == vless ]] || err "没有可复用的 VLESS 配置，请粘贴 VLESS 分享链接."
+            [[ $current_proxy_type == vless ]] || { err "没有可复用的 VLESS 配置，请粘贴 VLESS 分享链接."; return 1; }
             proxy_config=
             proxy_name=
         fi
     fi
-    apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || err "$outbound_apply_error"
+    apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || { err "$outbound_apply_error"; return 1; }
     msg_outbound_mode_display "配置已应用:" "$is_config_file"
-}
-
-is_valid_ipv4_addr() {
-    local addr=$1
-    [[ $addr =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    IFS='.' read -r o1 o2 o3 o4 <<<"$addr"
-    for o in "$o1" "$o2" "$o3" "$o4"; do
-        [[ $o -le 255 ]] || return 1
-    done
-    return 0
-}
-
-is_valid_ipv6_addr() {
-    local addr=$1 compressed=0 ipv4_groups=0 group_count=0 left right side part ipv4
-    local -a groups
-    [[ $addr == *:* ]] || return 1
-    if [[ $addr == *.* ]]; then
-        ipv4=${addr##*:}
-        [[ $ipv4 != "$addr" ]] && is_valid_ipv4_addr "$ipv4" || return 1
-        addr=${addr%:*}
-        ipv4_groups=2
-    fi
-    if [[ $addr == *::* ]]; then
-        compressed=1
-        left=${addr%%::*}
-        right=${addr#*::}
-        [[ $right != *::* && $left != *: && $right != :* ]] || return 1
-    else
-        left=$addr
-        right=
-    fi
-    for side in "$left" "$right"; do
-        [[ $side ]] || continue
-        [[ $side != :* && $side != *: ]] || return 1
-        IFS=: read -r -a groups <<<"$side"
-        for part in "${groups[@]}"; do
-            [[ $part =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
-            group_count=$((group_count + 1))
-        done
-    done
-    group_count=$((group_count + ipv4_groups))
-    if [[ $compressed == 1 ]]; then
-        ((group_count < 8)) || return 1
-    else
-        ((group_count == 8))
-    fi
-}
-
-is_valid_entry_addr() {
-    local addr=$1
-    [[ $(is_test domain "$addr") ]] && return 0
-    is_valid_ipv4_addr "$addr" && return 0
-    [[ $addr == *:* ]] && getent ahostsv6 "$addr" >/dev/null 2>&1 && return 0
-    return 1
-}
-
-get_public_entry_addr() {
-    get_ip
-    [[ $ip ]] || err "无法获取公网 IP"
-    echo "$ip"
-}
-
-random_node_name() {
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8
-}
-
-ss_password_for_method() {
-    local method=$1
-    if [[ $(grep 128 <<<$method) ]]; then
-        $is_core_bin generate rand 16 --base64
-    else
-        $is_core_bin generate rand 32 --base64
-    fi
-}
-
-ss_password_valid_for_method() {
-    local method=$1 password=$2 expected_len decoded_len key normalized padding mod
-    local -a keys
-    [[ $method != *2022* ]] && return 0
-    [[ $password ]] || return 1
-    [[ $(grep 128 <<<$method) ]] && expected_len=16 || expected_len=32
-    [[ $password != :* && $password != *: && $password != *::* ]] || return 1
-    IFS=: read -r -a keys <<<"$password"
-    for key in "${keys[@]}"; do
-        ss_base64_shape_valid "$key" || return 1
-        [[ $key != *[-_]* || ( $key != *+* && $key != */* ) ]] || return 1
-        normalized=${key%%=*}
-        padding=${key#"$normalized"}
-        normalized=${normalized//-/+}
-        normalized=${normalized//_/\/}
-        mod=$((${#normalized} % 4))
-        if [[ ! $padding ]]; then
-            [[ $mod != 1 ]] || return 1
-            [[ $mod == 2 ]] && padding='=='
-            [[ $mod == 3 ]] && padding='='
-        fi
-        decoded_len=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null | wc -c)
-        [[ ${decoded_len// /} -eq $expected_len ]] || return 1
-    done
-}
-
-ss_base64_shape_valid() {
-    local input=$1 raw padding mod
-    [[ $input =~ ^[A-Za-z0-9+/_-]+={0,2}$ ]] || return 1
-    raw=${input%%=*}
-    padding=${input#"$raw"}
-    mod=$((${#raw} % 4))
-    if [[ $padding ]]; then
-        [[ $((${#input} % 4)) == 0 ]] || return 1
-        [[ ($padding == '==' && $mod == 2) || ($padding == '=' && $mod == 3) ]]
-    else
-        [[ $mod != 1 ]]
-    fi
-}
-
-ss_base64_decode() {
-    local input=$1 raw padding normalized decoded canonical mod
-    ss_base64_shape_valid "$input" || return 1
-    [[ $input != *[-_]* || ( $input != *+* && $input != */* ) ]] || return 1
-    raw=${input%%=*}
-    padding=${input#"$raw"}
-    normalized=${raw//-/+}
-    normalized=${normalized//_/\/}
-    mod=$((${#normalized} % 4))
-    if [[ ! $padding ]]; then
-        [[ $mod != 1 ]] || return 1
-        [[ $mod == 2 ]] && padding='=='
-        [[ $mod == 3 ]] && padding='='
-    fi
-    decoded=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null) 2>/dev/null || return 1
-    canonical=$(printf '%s' "$decoded" | base64 | tr -d '=\n') || return 1
-    [[ $canonical == "$normalized" ]] || return 1
-    printf '%s' "$decoded"
-}
-
-ss_method_supported() {
-    local method=$1 v
-    for v in ${ss_method_list[@]}; do
-        [[ $v == "$method" ]] && return 0
-    done
-    return 1
-}
-
-url_percent_decode() {
-    local input=$1 allow_newlines=${2:-0} output= prefix hex char code control_check
-    if [[ $allow_newlines == 1 ]]; then
-        control_check=${input//$'\r'/}
-        control_check=${control_check//$'\n'/}
-        [[ ! $control_check =~ [[:cntrl:]] ]] || return 1
-    else
-        [[ ! $input =~ [[:cntrl:]] ]] || return 1
-    fi
-    while [[ $input == *%* ]]; do
-        prefix=${input%%\%*}
-        output+=$prefix
-        input=${input#*%}
-        [[ $input =~ ^([[:xdigit:]]{2})(.*)$ ]] || return 1
-        hex=${BASH_REMATCH[1]}
-        input=${BASH_REMATCH[2]}
-        code=$((16#$hex))
-        if [[ $allow_newlines == 1 && ( $code == 10 || $code == 13 ) ]]; then
-            :
-        else
-            ((code > 0 && code >= 32 && code != 127)) || return 1
-        fi
-        printf -v char '%b' "\\x$hex"
-        output+=$char
-    done
-    output+=$input
-    if [[ $allow_newlines == 1 ]]; then
-        control_check=${output//$'\r'/}
-        control_check=${control_check//$'\n'/}
-        [[ ! $control_check =~ [[:cntrl:]] ]] || return 1
-    else
-        [[ ! $output =~ [[:cntrl:]] ]] || return 1
-    fi
-    printf '%s' "$output"
-}
-
-parse_uri_query() {
-    local query=$1 allow_ech_pem=${2:-0} pair key raw_value value
-    uri_query_json='{}'
-    [[ $query ]] || return 0
-    while :; do
-        [[ $query == *'&'* ]] && {
-            pair=${query%%&*}
-            query=${query#*&}
-        } || {
-            pair=$query
-            query=
-        }
-        [[ $pair == *=* ]] || return 1
-        key=${pair%%=*}
-        raw_value=${pair#*=}
-        [[ $key && ! $key =~ [^A-Za-z0-9_-] ]] || return 1
-        if [[ $allow_ech_pem == 1 && $key == ech ]]; then
-            value=$(url_percent_decode "$raw_value" 1 && printf '\001') || return 1
-            value=${value%$'\001'}
-        else
-            value=$(url_percent_decode "$raw_value") || return 1
-        fi
-        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$uri_query_json") != true ]] || return 1
-        uri_query_json=$(jq -c --arg key "$key" --arg value "$value" '. + {($key):$value}' <<<"$uri_query_json") || return 1
-        [[ $query ]] || break
-    done
-}
-
-parse_uri_authority() {
-    local authority=$1 normalized_port
-    uri_server=
-    uri_port=
-    if [[ $authority =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]+)$ ]]; then
-        uri_server=${BASH_REMATCH[1]}
-        uri_port=${BASH_REMATCH[2]}
-        is_valid_ipv6_addr "$uri_server" || return 1
-    else
-        [[ $authority == *:* && $authority != *:*:* ]] || return 1
-        uri_server=${authority%:*}
-        uri_port=${authority##*:}
-        [[ $uri_server ]] || return 1
-        is_valid_ipv4_addr "$uri_server" || [[ $(is_test domain "$uri_server") ]] || return 1
-    fi
-    [[ $uri_port =~ ^[0-9]+$ ]] || return 1
-    normalized_port=${uri_port#"${uri_port%%[!0]*}"}
-    [[ $normalized_port ]] || return 1
-    (( ${#normalized_port} <= 5 )) || return 1
-    uri_port_number=$((10#$normalized_port))
-    ((uri_port_number >= 1 && uri_port_number <= 65535))
-}
-
-uri_query_alias_value() {
-    local query=$1 normalize=$2 key value selected= selected_key= selected_set=0
-    shift 2
-    uri_alias_value=
-    uri_alias_present=0
-    for key in "$@"; do
-        [[ $(jq -r --arg key "$key" 'has($key)' <<<"$query") == true ]] || continue
-        value=$(jq -r --arg key "$key" '.[$key]' <<<"$query") || return 1
-        case $normalize in
-        boolean)
-            case $value in
-            1 | true) value=true ;;
-            0 | false) value=false ;;
-            *)
-                outbound_proxy_parse_error="VLESS 参数 $key 必须为 1、0、true 或 false"
-                return 1
-                ;;
-            esac
-            ;;
-        packet_encoding)
-            [[ $value == none ]] && value=
-            ;;
-        esac
-        if ((selected_set)) && [[ $value != "$selected" ]]; then
-            outbound_proxy_parse_error="VLESS 参数别名冲突: $selected_key / $key"
-            return 1
-        fi
-        selected=$value
-        selected_key=$key
-        selected_set=1
-    done
-    uri_alias_value=$selected
-    uri_alias_present=$selected_set
-}
-
-normalize_vless_ws_early_data() {
-    local value=$1 normalized=$1
-    [[ $value =~ ^[0-9]+$ ]] || {
-        outbound_proxy_parse_error="VLESS WebSocket ed 必须为非负十进制整数"
-        return 1
-    }
-    while [[ ${#normalized} -gt 1 && ${normalized:0:1} == 0 ]]; do
-        normalized=${normalized:1}
-    done
-    [[ ${#normalized} -le 10 ]] && ((10#$normalized <= 4294967295)) || {
-        outbound_proxy_parse_error="VLESS WebSocket ed 超出 sing-box uint32 范围"
-        return 1
-    }
-    uri_vless_ws_early_data_normalized=$normalized
-}
-
-is_valid_vless_ws_header_name() {
-    local header=$1 token_pattern='^[!#$%&'\''*+.^_`|~0-9A-Za-z-]+$'
-    [[ $header =~ $token_pattern ]]
-}
-
-parse_vless_ws_early_data() {
-    local path=$1 outer_ed_present=$2 outer_ed=$3 outer_eh_present=$4 outer_eh=$5
-    local path_prefix=$1 query= remaining segment key raw_value has_equals more
-    local keep_query= keep_query_present=0
-    local inner_ed_present=0 inner_ed= inner_eh_present=0 inner_eh=
-    local outer_ed_normalized= outer_eh_value= selected_ed_present=0 selected_ed= selected_eh_present=0 selected_eh=
-
-    uri_vless_ws_path=$path
-    uri_vless_ws_early_data_present=0
-    uri_vless_ws_early_data=
-    uri_vless_ws_early_data_header_present=0
-    uri_vless_ws_early_data_header=
-
-    if [[ $path == *\?* ]]; then
-        path_prefix=${path%%\?*}
-        query=${path#*\?}
-        remaining=$query
-        while :; do
-            if [[ $remaining == *'&'* ]]; then
-                segment=${remaining%%&*}
-                remaining=${remaining#*&}
-                more=1
-            else
-                segment=$remaining
-                remaining=
-                more=0
-            fi
-            if [[ $segment == *=* ]]; then
-                key=${segment%%=*}
-                raw_value=${segment#*=}
-                has_equals=1
-            else
-                key=$segment
-                raw_value=
-                has_equals=0
-            fi
-            case $key in
-            ed)
-                [[ $has_equals == 1 && $inner_ed_present == 0 ]] || {
-                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 ed 格式无效或重复"
-                    return 1
-                }
-                inner_ed=$(url_percent_decode "$raw_value") || {
-                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 ed 编码无效"
-                    return 1
-                }
-                normalize_vless_ws_early_data "$inner_ed" || return 1
-                inner_ed=$uri_vless_ws_early_data_normalized
-                inner_ed_present=1
-                ;;
-            eh)
-                [[ $has_equals == 1 && $inner_eh_present == 0 ]] || {
-                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 eh 格式无效或重复"
-                    return 1
-                }
-                inner_eh=$(url_percent_decode "$raw_value") || {
-                    outbound_proxy_parse_error="VLESS WebSocket path query 中的 eh 编码无效"
-                    return 1
-                }
-                is_valid_vless_ws_header_name "$inner_eh" || {
-                    outbound_proxy_parse_error="VLESS WebSocket early-data header 名无效"
-                    return 1
-                }
-                inner_eh_present=1
-                ;;
-            *)
-                if ((keep_query_present)); then keep_query+='&'; fi
-                keep_query+=$segment
-                keep_query_present=1
-                ;;
-            esac
-            ((more)) || break
-        done
-    fi
-
-    if [[ $outer_ed_present == 1 ]]; then
-        normalize_vless_ws_early_data "$outer_ed" || return 1
-        outer_ed_normalized=$uri_vless_ws_early_data_normalized
-    fi
-    if [[ $outer_eh_present == 1 ]]; then
-        outer_eh_value=$outer_eh
-        is_valid_vless_ws_header_name "$outer_eh_value" || {
-            outbound_proxy_parse_error="VLESS WebSocket early-data header 名无效"
-            return 1
-        }
-    fi
-    if [[ $outer_ed_present == 1 && $inner_ed_present == 1 && $outer_ed_normalized != "$inner_ed" ]]; then
-        outbound_proxy_parse_error="VLESS WebSocket 外层与 path query 的 ed 值冲突"
-        return 1
-    fi
-    if [[ $outer_eh_present == 1 && $inner_eh_present == 1 && $outer_eh_value != "$inner_eh" ]]; then
-        outbound_proxy_parse_error="VLESS WebSocket 外层与 path query 的 eh 值冲突"
-        return 1
-    fi
-
-    if [[ $outer_ed_present == 1 ]]; then
-        selected_ed_present=1
-        selected_ed=$outer_ed_normalized
-    elif [[ $inner_ed_present == 1 ]]; then
-        selected_ed_present=1
-        selected_ed=$inner_ed
-    fi
-    if [[ $outer_eh_present == 1 ]]; then
-        selected_eh_present=1
-        selected_eh=$outer_eh_value
-    elif [[ $inner_eh_present == 1 ]]; then
-        selected_eh_present=1
-        selected_eh=$inner_eh
-    fi
-    if [[ $selected_eh_present == 1 && $selected_ed_present != 1 ]]; then
-        outbound_proxy_parse_error="VLESS WebSocket eh 需要非零 ed"
-        return 1
-    fi
-    if [[ $selected_ed_present == 1 ]]; then
-        [[ $selected_ed != 0 || $selected_eh_present != 1 ]] || {
-            outbound_proxy_parse_error="VLESS WebSocket ed=0 时不能设置 eh"
-            return 1
-        }
-        uri_vless_ws_early_data_present=1
-        uri_vless_ws_early_data=$selected_ed
-        if [[ $selected_ed != 0 && $selected_eh_present != 1 ]]; then
-            selected_eh_present=1
-            selected_eh=Sec-WebSocket-Protocol
-        fi
-    fi
-    if ((inner_ed_present || inner_eh_present)); then
-        uri_vless_ws_path=$path_prefix
-        if ((keep_query_present)); then uri_vless_ws_path+="?$keep_query"; fi
-    fi
-    uri_vless_ws_early_data_header_present=$selected_eh_present
-    uri_vless_ws_early_data_header=$selected_eh
-    return 0
-}
-
-vless_grpc_default_authority() {
-    local server=$1 server_port=$2 security=$3 server_name=$4 version_output version tags tag_count authority_host
-    vless_grpc_default_authority_value=
-    [[ $is_core_bin ]] || return 1
-    version_output=$("$is_core_bin" version 2>/dev/null) || return 1
-    version=$(awk 'NR == 1 { print $3 }' <<<"$version_output")
-    [[ ${version#v} == 1.14.0 ]] || return 1
-    tag_count=$(grep -c '^Tags:' <<<"$version_output" || true)
-    [[ $tag_count == 1 ]] || return 1
-    tags=$(sed -n 's/^Tags:[[:space:]]*//p' <<<"$version_output")
-    tags=${tags//[[:space:]]/}
-
-    if [[ ,$tags, == *,with_grpc,* ]]; then
-        tag=full
-    else
-        tag=lite
-    fi
-    if [[ ($security == tls || $security == reality) && $server_name ]]; then
-        authority_host=$server_name
-    else
-        authority_host=$server
-    fi
-    if [[ $authority_host == *:* && $authority_host != \[*\] ]]; then
-        authority_host="[$authority_host]"
-    fi
-    if [[ $tag == full && ($security == tls || $security == reality) && $server_name ]]; then
-        vless_grpc_default_authority_value=$authority_host
-    else
-        vless_grpc_default_authority_value="$authority_host:$server_port"
-    fi
-}
-
-normalize_vless_ech_config() {
-    local input=$1 normalized begin end body raw padding mod canonical encoded decoded_len
-    vless_ech_config=
-    [[ $input ]] || return 0
-    begin='-----BEGIN ECH CONFIGS-----'
-    end='-----END ECH CONFIGS-----'
-    if [[ $input == "$begin"* ]]; then
-        normalized=${input//$'\r\n'/$'\n'}
-        [[ $normalized != *$'\r'* ]] || return 1
-        [[ $normalized == "$begin"$'\n'* ]] || return 1
-        if [[ $normalized == *$'\n' ]]; then normalized=${normalized%$'\n'}; fi
-        [[ $normalized == "$begin"$'\n'*$'\n'"$end" ]] || return 1
-        body=${normalized#"$begin"$'\n'}
-        body=${body%$'\n'"$end"}
-        body=${body//$'\n'/}
-    else
-        [[ $input != *$'\r'* && $input != *$'\n'* ]] || return 1
-        body=$input
-    fi
-    [[ $body =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
-    raw=${body%%=*}
-    padding=${body#"$raw"}
-    mod=$((${#raw} % 4))
-    if [[ $padding ]]; then
-        [[ $((${#body} % 4)) == 0 ]] || return 1
-        [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
-    else
-        [[ $mod != 1 ]] || return 1
-        [[ $mod == 2 ]] && padding='=='
-        [[ $mod == 3 ]] && padding='='
-    fi
-    canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
-    [[ $canonical == "$raw$padding" ]] || return 1
-    decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
-    [[ $decoded_len != 0 ]] || return 1
-    encoded=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | base64) || return 1
-    vless_ech_config="$begin"$'\n'"$encoded"$'\n'"$end"
-}
-
-normalize_vless_certificate_sha256() {
-    local input=$1 pin raw padding mod decoded_len canonical normalized hex_escaped i
-    local -a pins=()
-    vless_certificate_sha256_json='[]'
-    [[ $input ]] || return 0
-    [[ $input != ,* && $input != *, && $input != *,,* ]] || return 1
-    IFS=, read -r -a pins <<<"$input"
-    for pin in "${pins[@]}"; do
-        if [[ $pin =~ ^[[:xdigit:]]{64}$ ]]; then
-            hex_escaped=
-            for ((i = 0; i < ${#pin}; i += 2)); do
-                hex_escaped+="\\x${pin:i:2}"
-            done
-            normalized=$(printf '%b' "$hex_escaped" | base64 -w 0) || return 1
-        else
-            [[ $pin =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
-            raw=${pin%%=*}
-            padding=${pin#"$raw"}
-            mod=$((${#raw} % 4))
-            if [[ $padding ]]; then
-                [[ $((${#pin} % 4)) == 0 ]] || return 1
-                [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
-            else
-                [[ $mod != 1 ]] || return 1
-                [[ $mod == 2 ]] && padding='=='
-                [[ $mod == 3 ]] && padding='='
-            fi
-            canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
-            [[ $canonical == "$raw$padding" ]] || return 1
-            decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
-            [[ $decoded_len == 32 ]] || return 1
-            normalized=$canonical
-        fi
-        vless_certificate_sha256_json=$(jq -cn --argjson current "$vless_certificate_sha256_json" --arg value "$normalized" '$current + [$value]') || return 1
-    done
-}
-
-vless_core_supports_certificate_sha256() {
-    local version=${is_core_ver:-} major minor
-    [[ $version =~ ([0-9]+)\.([0-9]+)\.[0-9]+ ]] || return 0
-    major=${BASH_REMATCH[1]}
-    minor=${BASH_REMATCH[2]}
-    ((major > 1 || (major == 1 && minor >= 15)))
-}
-
-parse_vless_uri() {
-    local uri=$1 raw_name= raw_query= auth authority decoded_auth raw_port
-    local fragment_present=0 remark_name key encryption transport transport_original transport_type security flow
-    local sni sni_present alpn alpn_present alpn_json='[]' fingerprint fingerprint_present
-    local public_key public_key_present short_id short_id_present insecure=false insecure_present
-    local packet_encoding packet_encoding_present utls_enabled=false
-    local ech ech_present ech_config= ech_enabled=0 pcs pcs_enabled=0 vcn spx
-    local vless_certificate_sha256_json='[]'
-    local transport_config_json='{}' path path_present host host_present host_json
-    local header_type header_type_present quic_security quic_security_present quic_key quic_key_present
-    local canonical_public_key public_key_length ed eh mode grpc_authority transport_parameter
-    local ed_present eh_present mode_present authority_present
-    local ws_path=/ ws_host= ws_host_present=0 ws_early_data= ws_early_data_present=0 ws_early_data_header= ws_early_data_header_present=0
-    local grpc_service_name= grpc_service_name_present=0 grpc_default_authority
-
-    outbound_proxy_parse_error="VLESS 链接格式或参数无效"
-    outbound_proxy_name=
-    outbound_proxy_config_json=
-    uri_query_json='{}'
-    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
-    [[ $uri == vless://* ]] || return 1
-    uri=${uri#vless://}
-    if [[ $uri == *#* ]]; then
-        fragment_present=1
-        raw_name=${uri#*#}
-        uri=${uri%%#*}
-        [[ $raw_name != *#* ]] || {
-            outbound_proxy_parse_error="VLESS 链接名称格式无效"
-            return 1
-        }
-    fi
-    if [[ $uri == *\?* ]]; then
-        raw_query=${uri#*\?}
-        uri=${uri%%\?*}
-        parse_uri_query "$raw_query" 1 || {
-            outbound_proxy_parse_error="VLESS 查询参数格式无效"
-            return 1
-        }
-    else
-        uri_query_json='{}'
-    fi
-    [[ $uri == *@* ]] || {
-        outbound_proxy_parse_error="VLESS 链接缺少 UUID 或服务器地址"
-        return 1
-    }
-    auth=${uri%@*}
-    authority=${uri#*@}
-    [[ $auth && $auth != *@* && $authority != *@* && $auth != *:* ]] || {
-        outbound_proxy_parse_error="VLESS userinfo 必须是 UUID，不能包含密码"
-        return 1
-    }
-    decoded_auth=$(url_percent_decode "$auth") || {
-        outbound_proxy_parse_error="VLESS UUID 编码无效"
-        return 1
-    }
-    [[ $decoded_auth =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
-        outbound_proxy_parse_error="VLESS UUID 无效"
-        return 1
-    }
-    [[ $authority == */ ]] && authority=${authority%/}
-    [[ $authority != */* ]] || {
-        outbound_proxy_parse_error="VLESS authority 不支持路径"
-        return 1
-    }
-    raw_port=${authority##*:}
-    [[ $raw_port =~ ^[0-9]{1,5}$ ]] || {
-        outbound_proxy_parse_error="VLESS 端口必须为 1–65535 的十进制整数"
-        return 1
-    }
-    parse_uri_authority "$authority" || {
-        outbound_proxy_parse_error="VLESS 服务器地址或端口无效"
-        return 1
-    }
-
-    while IFS= read -r key; do
-        case $key in
-        remark | remarks | encryption | type | security | flow | sni | serverName | alpn | fp | fingerprint | pbk | publicKey | sid | shortId | allowInsecure | insecure | skip-cert-verify | packetEncoding | packet_encoding | path | host | ed | eh | serviceName | service_name | mode | authority | headerType | quicSecurity | key | ech | pcs | vcn | spx | spiderX) ;;
-        *)
-            outbound_proxy_parse_error="VLESS 暂不支持连接参数: $key"
-            return 1
-            ;;
-        esac
-    done < <(jq -r 'keys[]' <<<"$uri_query_json")
-
-    encryption=$(jq -r '.encryption // "none"' <<<"$uri_query_json")
-    [[ ! $encryption || $encryption == none ]] || {
-        outbound_proxy_parse_error="VLESS encryption 仅支持 none"
-        return 1
-    }
-    transport_original=$(jq -r '.type // "tcp"' <<<"$uri_query_json")
-    transport=$transport_original
-    case $transport in
-    tcp | raw | ws | grpc | h2 | http | httpupgrade | quic) ;;
-    *)
-        outbound_proxy_parse_error="VLESS type=$transport_original 传输暂不支持"
-        return 1
-        ;;
-    esac
-    security=$(jq -r '.security // "none"' <<<"$uri_query_json")
-    [[ ! $security ]] && security=none
-    [[ $security == none || $security == tls || $security == reality ]] || {
-        outbound_proxy_parse_error="VLESS security=$security 暂不支持"
-        return 1
-    }
-    if [[ $transport_original == h2 && $security == none ]]; then
-        outbound_proxy_parse_error="VLESS type=h2 需要 TLS 或 Reality，避免按明文 HTTP/2 处理"
-        return 1
-    fi
-    if [[ $transport == quic && $security != tls ]]; then
-        outbound_proxy_parse_error="VLESS QUIC 仅支持 sing-box 原生 TLS；无 TLS 或跨内核 Reality QUIC 不受支持"
-        return 1
-    fi
-    flow=$(jq -r '.flow // ""' <<<"$uri_query_json")
-    [[ ! $flow || $flow == xtls-rprx-vision ]] || {
-        outbound_proxy_parse_error="VLESS flow=$flow 暂不支持"
-        return 1
-    }
-    if [[ $flow && ($transport == ws || $transport == grpc) ]]; then
-        outbound_proxy_parse_error="VLESS Vision 仅支持 TCP/raw，不能用于 WebSocket 或 gRPC"
-        return 1
-    fi
-
-    path=$(jq -r '.path // ""' <<<"$uri_query_json")
-    path_present=$(jq -r 'has("path") | if . then 1 else 0 end' <<<"$uri_query_json")
-    host=$(jq -r '.host // ""' <<<"$uri_query_json")
-    host_present=$(jq -r 'has("host") | if . then 1 else 0 end' <<<"$uri_query_json")
-    ed=$(jq -r '.ed // ""' <<<"$uri_query_json")
-    ed_present=$(jq -r 'has("ed") | if . then 1 else 0 end' <<<"$uri_query_json")
-    eh=$(jq -r '.eh // ""' <<<"$uri_query_json")
-    eh_present=$(jq -r 'has("eh") | if . then 1 else 0 end' <<<"$uri_query_json")
-    uri_query_alias_value "$uri_query_json" raw serviceName service_name || return 1
-    grpc_service_name=$uri_alias_value
-    grpc_service_name_present=$uri_alias_present
-    mode=$(jq -r '.mode // ""' <<<"$uri_query_json")
-    mode_present=$(jq -r 'has("mode")' <<<"$uri_query_json")
-    grpc_authority=$(jq -r '.authority // ""' <<<"$uri_query_json")
-    authority_present=$(jq -r 'has("authority")' <<<"$uri_query_json")
-    header_type=$(jq -r '.headerType // "none"' <<<"$uri_query_json")
-    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
-    if [[ $header_type_present == true && $header_type != none ]]; then
-        if [[ $header_type == http ]]; then
-            outbound_proxy_parse_error="VLESS headerType=http 的 TCP HTTP 伪装与 sing-box 原生传输不等价"
-        else
-            outbound_proxy_parse_error="VLESS headerType=$header_type 暂不支持"
-        fi
-        return 1
-    fi
-    case $transport in
-    ws)
-        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
-            outbound_proxy_parse_error="VLESS WebSocket 不能使用 gRPC 参数 serviceName、mode 或 authority"
-            return 1
-        fi
-        [[ $path_present != 1 || $path ]] || {
-            outbound_proxy_parse_error="VLESS WebSocket path 不能为空"
-            return 1
-        }
-        if [[ $host_present == 1 ]]; then
-            [[ $host && $host != *,* && ! $host =~ [[:space:]] ]] || {
-                outbound_proxy_parse_error="VLESS WebSocket host 必须是单个非空值且不能包含空白字符"
-                return 1
-            }
-            ws_host=$host
-            ws_host_present=1
-        fi
-        [[ $path_present == 1 ]] && ws_path=$path
-        parse_vless_ws_early_data "$ws_path" "$ed_present" "$ed" "$eh_present" "$eh" || return 1
-        ws_path=$uri_vless_ws_path
-        ws_early_data=$uri_vless_ws_early_data
-        ws_early_data_present=$uri_vless_ws_early_data_present
-        ws_early_data_header=$uri_vless_ws_early_data_header
-        ws_early_data_header_present=$uri_vless_ws_early_data_header_present
-        ;;
-    grpc)
-        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 ]]; then
-            outbound_proxy_parse_error="VLESS gRPC 不能使用 WebSocket 参数 path、host、ed 或 eh"
-            return 1
-        fi
-        if [[ $mode_present == true && $mode != gun ]]; then
-            case $mode in
-            multi | guna) outbound_proxy_parse_error="VLESS gRPC mode=$mode 与 sing-box 原生 gRPC 不等价" ;;
-            *) outbound_proxy_parse_error="VLESS gRPC mode=$mode 仅支持 gun" ;;
-            esac
-            return 1
-        fi
-        ;;
-    tcp | raw)
-        if [[ $path_present == 1 || $host_present == 1 || $ed_present == 1 || $eh_present == 1 || $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
-            if [[ $path_present == 1 ]]; then transport_parameter=path
-            elif [[ $host_present == 1 ]]; then transport_parameter=host
-            elif [[ $ed_present == 1 ]]; then transport_parameter=ed
-            elif [[ $eh_present == 1 ]]; then transport_parameter=eh
-            elif [[ $grpc_service_name_present == 1 ]]; then transport_parameter=serviceName
-            elif [[ $mode_present == true ]]; then transport_parameter=mode
-            else transport_parameter=authority
-            fi
-            outbound_proxy_parse_error="VLESS type=$transport 不支持参数: $transport_parameter"
-            return 1
-        fi
-        ;;
-    h2 | http | httpupgrade | quic)
-        if [[ $ed_present == 1 || $eh_present == 1 ]]; then
-            outbound_proxy_parse_error="VLESS $transport 不能使用 WebSocket 专属参数 ed 或 eh"
-            return 1
-        fi
-        if [[ $grpc_service_name_present == 1 || $mode_present == true || $authority_present == true ]]; then
-            outbound_proxy_parse_error="VLESS $transport 不能使用 gRPC 专属参数 serviceName、mode 或 authority"
-            return 1
-        fi
-        ;;
-    esac
-
-    transport_type=$transport
-    case $transport in
-    tcp | raw) transport=tcp ;;
-    h2) transport=http ;;
-    esac
-
-    uri_query_alias_value "$uri_query_json" raw sni serverName || return 1
-    sni=$uri_alias_value
-    sni_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw alpn || return 1
-    alpn=$uri_alias_value
-    alpn_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw fp fingerprint || return 1
-    fingerprint=$uri_alias_value
-    fingerprint_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw pbk publicKey || return 1
-    public_key=$uri_alias_value
-    public_key_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" raw sid shortId || return 1
-    short_id=$uri_alias_value
-    short_id_present=$uri_alias_present
-    uri_query_alias_value "$uri_query_json" boolean allowInsecure insecure skip-cert-verify || return 1
-    insecure=$uri_alias_value
-    insecure_present=$uri_alias_present
-    [[ $insecure_present == 1 ]] || insecure=false
-    uri_query_alias_value "$uri_query_json" packet_encoding packetEncoding packet_encoding || return 1
-    packet_encoding=$uri_alias_value
-    packet_encoding_present=$uri_alias_present
-    ech_present=$(jq -r 'has("ech")' <<<"$uri_query_json")
-    ech=$(jq -r '.ech // ""' <<<"$uri_query_json")
-    [[ $ech_present == true ]] && ech_enabled=1
-    pcs=$(jq -r '.pcs // ""' <<<"$uri_query_json")
-    vcn=$(jq -r '.vcn // ""' <<<"$uri_query_json")
-    uri_query_alias_value "$uri_query_json" raw spx spiderX || return 1
-    spx=$uri_alias_value
-    uri_query_alias_value "$uri_query_json" raw remark remarks || return 1
-    remark_name=$uri_alias_value
-    path_present=$(jq -r 'has("path")' <<<"$uri_query_json")
-    path=$(jq -r '.path // ""' <<<"$uri_query_json")
-    host_present=$(jq -r 'has("host")' <<<"$uri_query_json")
-    host=$(jq -r '.host // ""' <<<"$uri_query_json")
-    header_type_present=$(jq -r 'has("headerType")' <<<"$uri_query_json")
-    header_type=$(jq -r '.headerType // ""' <<<"$uri_query_json")
-    quic_security_present=$(jq -r 'has("quicSecurity")' <<<"$uri_query_json")
-    quic_security=$(jq -r '.quicSecurity // ""' <<<"$uri_query_json")
-    quic_key_present=$(jq -r 'has("key")' <<<"$uri_query_json")
-    quic_key=$(jq -r '.key // ""' <<<"$uri_query_json")
-
-    if [[ $transport != quic && ($quic_security_present == true || $quic_key_present == true) ]]; then
-        outbound_proxy_parse_error="VLESS quicSecurity 和 key 仅用于 QUIC 传输"
-        return 1
-    fi
-    case $transport in
-    tcp)
-        if [[ $path_present == true || $host_present == true ]]; then
-            outbound_proxy_parse_error="VLESS TCP/raw 不支持 path 或 host 传输参数"
-            return 1
-        fi
-        if [[ $header_type_present == true ]]; then
-            case $header_type in
-            none) ;;
-            http)
-                outbound_proxy_parse_error="VLESS TCP headerType=http 伪装与原生 HTTP 传输不等价"
-                return 1
-                ;;
-            *)
-                outbound_proxy_parse_error="VLESS TCP headerType 仅支持 none"
-                return 1
-                ;;
-            esac
-        fi
-        ;;
-    http)
-        if [[ $header_type_present == true ]]; then
-            outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
-            return 1
-        fi
-        if [[ $path_present == true ]]; then
-            [[ $path ]] || {
-                outbound_proxy_parse_error="VLESS HTTP path 不能为空"
-                return 1
-            }
-        else
-            path=/
-        fi
-        if [[ $host_present == true ]]; then
-            [[ $host ]] || {
-                outbound_proxy_parse_error="VLESS HTTP host 不能为空"
-                return 1
-            }
-            host_json=$(jq -cn --arg host "$host" '$host | split(",")') || return 1
-            jq -e 'length > 0 and all(.[]; length > 0)' <<<"$host_json" >/dev/null || {
-                outbound_proxy_parse_error="VLESS HTTP host 必须是逗号分隔的非空列表"
-                return 1
-            }
-            transport_config_json=$(jq -cn --arg path "$path" --argjson host "$host_json" '{type:"http",path:$path,host:$host}') || return 1
-        else
-            transport_config_json=$(jq -cn --arg path "$path" '{type:"http",path:$path}') || return 1
-        fi
-        ;;
-    httpupgrade)
-        if [[ $header_type_present == true ]]; then
-            outbound_proxy_parse_error="VLESS headerType 仅适用于 TCP/raw"
-            return 1
-        fi
-        if [[ $path_present == true ]]; then
-            [[ $path ]] || {
-                outbound_proxy_parse_error="VLESS HTTPUpgrade path 不能为空"
-                return 1
-            }
-        else
-            path=/
-        fi
-        if [[ $host_present == true ]]; then
-            [[ $host ]] || {
-                outbound_proxy_parse_error="VLESS HTTPUpgrade host 不能为空"
-                return 1
-            }
-            [[ $host != *,* ]] || {
-                outbound_proxy_parse_error="VLESS HTTPUpgrade host 只支持单值，不能接收逗号分隔列表"
-                return 1
-            }
-            transport_config_json=$(jq -cn --arg path "$path" --arg host "$host" '{type:"httpupgrade",path:$path,host:$host}') || return 1
-        else
-            transport_config_json=$(jq -cn --arg path "$path" '{type:"httpupgrade",path:$path}') || return 1
-        fi
-        ;;
-    quic)
-        if [[ $path_present == true || $host_present == true || $header_type_present == true ]]; then
-            outbound_proxy_parse_error="VLESS QUIC 不支持 path、host 或 headerType 传输参数"
-            return 1
-        fi
-        if [[ $quic_security_present == true && $quic_security != none ]]; then
-            outbound_proxy_parse_error="VLESS QUIC 仅支持 quicSecurity=none；额外加密不兼容 sing-box"
-            return 1
-        fi
-        if [[ $quic_key_present == true && $quic_key ]]; then
-            outbound_proxy_parse_error="VLESS QUIC 不支持额外加密 key；跨内核 QUIC 变体不兼容"
-            return 1
-        fi
-        transport_config_json='{"type":"quic"}'
-        ;;
-    esac
-
-    if [[ $security == none ]]; then
-        if [[ ($sni_present == 1 && $sni) || ($alpn_present == 1 && $alpn) || ($fingerprint_present == 1 && $fingerprint) || ($insecure_present == 1 && $insecure) || ($public_key_present == 1 && $public_key) || ($short_id_present == 1 && $short_id) ]]; then
-            outbound_proxy_parse_error="VLESS security=none 不能包含 TLS/Reality 参数"
-            return 1
-        fi
-        [[ ! $flow ]] || {
-            outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
-            return 1
-        }
-    else
-        [[ $sni ]] || sni=$uri_server
-        if [[ $alpn_present == 1 ]]; then
-            [[ $alpn ]] || {
-                outbound_proxy_parse_error="VLESS alpn 不能为空"
-                return 1
-            }
-            alpn_json=$(jq -cn --arg alpn "$alpn" '$alpn | split(",")') || return 1
-            jq -e 'length > 0 and all(.[]; type == "string" and length > 0)' <<<"$alpn_json" >/dev/null || {
-                outbound_proxy_parse_error="VLESS alpn 必须是逗号分隔的非空协议列表"
-                return 1
-            }
-        else
-            alpn_json='[]'
-        fi
-        if [[ $fingerprint_present == 1 && $fingerprint != none ]]; then
-            case $fingerprint in
-            chrome | firefox | edge | safari | 360 | qq | ios | android | random | randomized) ;;
-            *)
-                outbound_proxy_parse_error="VLESS fingerprint=$fingerprint 不受支持"
-                return 1
-                ;;
-            esac
-            utls_enabled=true
-        elif [[ $security == reality ]]; then
-            [[ $fingerprint != none ]] || {
-                outbound_proxy_parse_error="VLESS Reality 需要 uTLS fingerprint"
-                return 1
-            }
-            fingerprint=chrome
-            utls_enabled=true
-        fi
-        [[ $fingerprint_present != 1 || $fingerprint ]] || {
-            outbound_proxy_parse_error="VLESS fingerprint 不能为空"
-            return 1
-        }
-        if [[ $security == reality ]]; then
-            [[ $public_key_present == 1 && $public_key ]] || {
-                outbound_proxy_parse_error="VLESS Reality 需要 pbk/publicKey"
-                return 1
-            }
-            public_key=${public_key%=}
-            [[ $public_key =~ ^[A-Za-z0-9_-]{43}$ ]] || {
-                outbound_proxy_parse_error="VLESS Reality public key 必须是 32 字节 Base64URL"
-                return 1
-            }
-            canonical_public_key=$(printf '%s=' "$public_key" | tr '_-' '/+' | base64 -d 2>/dev/null | base64 -w 0 | tr '+/' '-_' | sed 's/=*$//')
-            public_key_length=$(printf '%s' "$public_key" | tr '_-' '/+' | sed 's/$/=/' | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]')
-            [[ $canonical_public_key == "$public_key" && $public_key_length == 32 ]] || {
-                outbound_proxy_parse_error="VLESS Reality public key 必须解码为 32 字节 Base64URL"
-                return 1
-            }
-            if [[ $short_id_present == 1 && $short_id && ! $short_id =~ ^([0-9A-Fa-f]{2}){1,8}$ ]]; then
-                outbound_proxy_parse_error="VLESS Reality short ID 必须是偶数位十六进制且不超过 16 位"
-                return 1
-            fi
-            [[ $short_id_present == 1 ]] || short_id=
-        elif [[ $public_key_present == 1 || $short_id_present == 1 ]]; then
-            outbound_proxy_parse_error="VLESS pbk/publicKey 和 sid/shortId 仅用于 Reality"
-            return 1
-        fi
-        if [[ $flow && $security != tls && $security != reality ]]; then
-            outbound_proxy_parse_error="VLESS Vision flow 需要 TLS 或 Reality"
-            return 1
-        fi
-        if [[ $flow && $transport != tcp ]]; then
-            outbound_proxy_parse_error="VLESS Vision flow 仅支持 TCP/raw 传输"
-            return 1
-        fi
-    fi
-    if [[ $transport == grpc && $authority_present == true && $grpc_authority ]]; then
-        vless_grpc_default_authority "$uri_server" "$uri_port_number" "$security" "$sni" || {
-            outbound_proxy_parse_error="VLESS gRPC authority 默认值无法根据当前 sing-box 版本和构建确认"
-            return 1
-        }
-        grpc_default_authority=$vless_grpc_default_authority_value
-        [[ $grpc_authority == "$grpc_default_authority" ]] || {
-            outbound_proxy_parse_error="VLESS gRPC authority 不能独立覆盖，当前构建默认值为 $grpc_default_authority"
-            return 1
-        }
-    fi
-    if [[ $ech_enabled == 1 ]]; then
-        [[ $security == tls ]] || {
-            outbound_proxy_parse_error="VLESS ECH 仅支持 TLS，不能与 security=$security 组合"
-            return 1
-        }
-        if [[ $fingerprint && $fingerprint != none ]]; then
-            outbound_proxy_parse_error="VLESS ECH 与 uTLS fingerprint 组合不兼容"
-            return 1
-        fi
-        if [[ $ech ]]; then
-            normalize_vless_ech_config "$ech" || {
-                outbound_proxy_parse_error="VLESS ECH 必须是 ECH CONFIGS PEM 或静态 ECHConfigList Base64"
-                return 1
-            }
-            ech_config=$vless_ech_config
-        fi
-    fi
-    if [[ $pcs ]]; then
-        [[ $security == tls ]] || {
-            outbound_proxy_parse_error="VLESS pcs 整张证书 SHA-256 固定需要 TLS"
-            return 1
-        }
-        vless_core_supports_certificate_sha256 || {
-            outbound_proxy_parse_error="VLESS pcs 整张证书 SHA-256 固定需要 sing-box 1.15.0+，当前版本 ${is_core_ver:-未知} 不支持"
-            return 1
-        }
-        normalize_vless_certificate_sha256 "$pcs" || {
-            outbound_proxy_parse_error="VLESS pcs 必须是逗号分隔的 32 字节整张证书 SHA-256 十六进制或 Base64 摘要"
-            return 1
-        }
-        pcs_enabled=1
-    fi
-    if [[ $vcn ]]; then
-        [[ $security == tls && $vcn == "$sni" ]] || {
-            outbound_proxy_parse_error="VLESS vcn 仅支持空值或与 TLS SNI 相同的证书校验名"
-            return 1
-        }
-    fi
-    if [[ $spx ]]; then
-        outbound_proxy_parse_error="VLESS spx/spiderX 非空值与 sing-box Reality 参数不等价，暂不支持"
-        return 1
-    fi
-    [[ ! $packet_encoding || $packet_encoding == xudp || $packet_encoding == packetaddr ]] || {
-        outbound_proxy_parse_error="VLESS packetEncoding 仅支持 xudp、packetaddr、none 或空值"
-        return 1
-    }
-
-    outbound_proxy_name=
-    if [[ $fragment_present == 1 ]]; then
-        outbound_proxy_name=$(url_percent_decode "$raw_name") || {
-            outbound_proxy_parse_error="VLESS 链接名称编码无效"
-            return 1
-        }
-    elif [[ $remark_name ]]; then
-        outbound_proxy_name=$remark_name
-    fi
-    outbound_proxy_config_json=$(jq -cn \
-        --arg server "$uri_server" \
-        --argjson server_port "$uri_port_number" \
-        --arg uuid "$decoded_auth" \
-        --arg security "$security" \
-        --arg sni "$sni" \
-        --argjson insecure "$insecure" \
-        --argjson alpn "$alpn_json" \
-        --argjson alpn_present "${alpn_present:-0}" \
-        --argjson utls_enabled "$utls_enabled" \
-        --arg fingerprint "$fingerprint" \
-        --arg public_key "$public_key" \
-        --arg short_id "$short_id" \
-        --arg flow "$flow" \
-        --arg transport "$transport" \
-        --argjson transport_config "$transport_config_json" \
-        --arg packet_encoding "$packet_encoding" \
-        --argjson packet_encoding_present "${packet_encoding_present:-0}" \
-        --arg transport_type "$transport_type" \
-        --arg ws_path "$ws_path" \
-        --arg ws_host "$ws_host" \
-        --argjson ws_host_present "$ws_host_present" \
-        --arg ws_early_data "$ws_early_data" \
-        --argjson ws_early_data_present "$ws_early_data_present" \
-        --arg ws_early_data_header "$ws_early_data_header" \
-        --argjson ws_early_data_header_present "$ws_early_data_header_present" \
-        --arg grpc_service_name "$grpc_service_name" \
-        --argjson grpc_service_name_present "$grpc_service_name_present" \
-        --arg ech_config "$ech_config" \
-        --argjson ech_enabled "$ech_enabled" \
-        --argjson certificate_sha256 "$vless_certificate_sha256_json" \
-        --argjson pcs_enabled "$pcs_enabled" \
-        '{type:"vless",server:$server,server_port:$server_port,uuid:$uuid}
-        + if $security == "none" then {} else
-            {tls:({enabled:true,server_name:$sni,insecure:$insecure}
-                + if $alpn_present == 1 then {alpn:$alpn} else {} end
-                + if $utls_enabled then {utls:{enabled:true,fingerprint:$fingerprint}} else {} end
-                + if $security == "reality" then {reality:{enabled:true,public_key:$public_key,short_id:$short_id}} else {} end
-                + if $ech_enabled == 1 then {ech:({enabled:true} + if $ech_config == "" then {} else {config:$ech_config} end)} else {} end
-                + if $pcs_enabled == 1 then {certificate_sha256:$certificate_sha256} else {} end)}
-          end
-        + if $flow == "" then {} else {flow:$flow} end
-        + if $packet_encoding_present == 1 then {packet_encoding:$packet_encoding} else {} end
-        + if $transport_type == "ws" then
-            {transport:({type:"ws",path:$ws_path}
-                + if $ws_host_present == 1 then {headers:{Host:$ws_host}} else {} end
-                + if $ws_early_data_present == 1 then
-                    {max_early_data:($ws_early_data|tonumber)}
-                    + if $ws_early_data_header_present == 1 then {early_data_header_name:$ws_early_data_header} else {} end
-                  else {} end)}
-          elif $transport_type == "grpc" then
-            {transport:({type:"grpc"}
-                + if $grpc_service_name_present == 1 then {service_name:$grpc_service_name} else {} end)}
-          elif $transport == "tcp" then {} else {transport:$transport_config} end') || {
-        outbound_proxy_parse_error="无法构造 VLESS 原生出站参数"
-        return 1
-    }
-    return 0
-}
-
-parse_proxy_uri() {
-    local expected=$1 uri=$2
-    outbound_proxy_parse_error=
-    case $expected in
-    ss)
-        parse_ss_uri "$uri"
-        ;;
-    vless)
-        parse_vless_uri "$uri"
-        ;;
-    *)
-        outbound_proxy_parse_error="不支持的代理出站类型"
-        return 1
-        ;;
-    esac
-}
-
-parse_ss_uri() {
-    local uri=$1 raw_name= raw_query= auth authority decoded_auth
-    local fragment_present=0 fragment_name remark_name remarks_name remark_present remarks_present plugin key
-    outbound_proxy_parse_error=
-    outbound_proxy_json=
-    outbound_proxy_config_json=
-    outbound_proxy_name=
-    is_outbound_ss_name=
-    is_outbound_ss_server=
-    is_outbound_ss_port=
-    is_outbound_ss_method=
-    is_outbound_ss_password=
-    uri=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$uri")
-    if [[ $uri =~ [[:cntrl:]] ]]; then
-        outbound_proxy_parse_error="SS 分享链接含控制字符"
-        return 1
-    fi
-    if [[ $uri != ss://* ]]; then
-        outbound_proxy_parse_error="仅支持单条 ss:// Shadowsocks 分享链接"
-        return 1
-    fi
-    uri=${uri#ss://}
-    if [[ $uri == *#* ]]; then
-        fragment_present=1
-        raw_name=${uri#*#}
-        uri=${uri%%#*}
-    fi
-    if [[ $uri == *\?* ]]; then
-        raw_query=${uri#*\?}
-        uri=${uri%%\?*}
-        if ! parse_uri_query "$raw_query"; then
-            outbound_proxy_parse_error="SS 查询参数格式、重复项或百分号编码无效"
-            return 1
-        fi
-    else
-        uri_query_json='{}'
-    fi
-    if [[ $uri != *@* ]]; then
-        outbound_proxy_parse_error="SS 分享链接缺少凭据或服务器地址"
-        return 1
-    fi
-    auth=${uri%@*}
-    authority=${uri#*@}
-    if [[ ! $auth || $auth == *@* || $authority == *@* ]]; then
-        outbound_proxy_parse_error="SS 分享链接凭据或服务器地址格式无效"
-        return 1
-    fi
-    [[ $authority == */ ]] && authority=${authority%/}
-    if [[ $authority == */* ]] || ! parse_uri_authority "$authority"; then
-        outbound_proxy_parse_error="SS 服务器地址或端口无效"
-        return 1
-    fi
-
-    if ! decoded_auth=$(url_percent_decode "$auth"); then
-        outbound_proxy_parse_error="SS 凭据含无效百分号编码或控制字符"
-        return 1
-    fi
-    if [[ $decoded_auth != *:* ]]; then
-        if ! decoded_auth=$(ss_base64_decode "$decoded_auth" 2>/dev/null) 2>/dev/null; then
-            outbound_proxy_parse_error="SS 凭据 Base64 编码无效"
-            return 1
-        fi
-    fi
-    if [[ $decoded_auth != *:* ]]; then
-        outbound_proxy_parse_error="SS 凭据必须包含加密方式和密码"
-        return 1
-    fi
-    is_outbound_ss_method=${decoded_auth%%:*}
-    is_outbound_ss_password=${decoded_auth#*:}
-    is_outbound_ss_server=$uri_server
-    is_outbound_ss_port=$uri_port_number
-    if ! ss_method_supported "$is_outbound_ss_method"; then
-        outbound_proxy_parse_error="SS 加密方式不受支持"
-        return 1
-    fi
-    if [[ ! $is_outbound_ss_password || $decoded_auth =~ [[:cntrl:]] ]]; then
-        outbound_proxy_parse_error="SS 密码为空或含控制字符"
-        return 1
-    fi
-    if ! ss_password_valid_for_method "$is_outbound_ss_method" "$is_outbound_ss_password"; then
-        outbound_proxy_parse_error="SS2022 密钥 Base64 格式或长度无效"
-        return 1
-    fi
-
-    while IFS= read -r key; do
-        case $key in
-        remark | remarks | plugin) ;;
-        *)
-            outbound_proxy_parse_error="SS 分享链接包含不支持的参数: $key"
-            return 1
-            ;;
-        esac
-    done < <(jq -r 'keys[]' <<<"$uri_query_json")
-    plugin=$(jq -r '.plugin // empty' <<<"$uri_query_json")
-    if [[ $plugin ]]; then
-        outbound_proxy_parse_error="SS 插件暂不支持 (plugin)"
-        return 1
-    fi
-    remarks_name=$(jq -r '.remarks // empty' <<<"$uri_query_json")
-    remark_name=$(jq -r '.remark // empty' <<<"$uri_query_json")
-    remarks_present=$(jq -r 'has("remarks")' <<<"$uri_query_json")
-    remark_present=$(jq -r 'has("remark")' <<<"$uri_query_json")
-    if [[ $remarks_present == true && $remark_present == true && $remarks_name != "$remark_name" ]]; then
-        outbound_proxy_parse_error="remark 和 remarks 参数值冲突"
-        return 1
-    fi
-    if [[ $fragment_present == 1 ]]; then
-        if ! fragment_name=$(url_percent_decode "$raw_name"); then
-            outbound_proxy_parse_error="SS 分享名称含无效百分号编码或控制字符"
-            return 1
-        fi
-        is_outbound_ss_name=$fragment_name
-    elif [[ $remarks_present == true ]]; then
-        is_outbound_ss_name=$remarks_name
-    elif [[ $remark_present == true ]]; then
-        is_outbound_ss_name=$remark_name
-    else
-        is_outbound_ss_name=
-    fi
-    outbound_proxy_name=$is_outbound_ss_name
-    outbound_proxy_config_json=$(jq -cn \
-        --arg server "$is_outbound_ss_server" \
-        --argjson server_port "$is_outbound_ss_port" \
-        --arg method "$is_outbound_ss_method" \
-        --arg password "$is_outbound_ss_password" \
-        '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
-    return 0
-}
-
-parse_ss_uri_for_outbound() {
-    parse_proxy_uri ss "$1"
-}
-
-outbound_proxy_from_metadata() {
-    local cfg=$1 metadata_file=$2 mode server port method password name
-    outbound_proxy_json=
-    outbound_proxy_config_json=
-    outbound_proxy_name=
-    [[ -f $metadata_file ]] || return 0
-    jq -e 'type == "object"' "$metadata_file" >/dev/null 2>&1 || return 1
-    mode=$(jq -r '.outbound_mode // empty' "$metadata_file")
-    if jq -e 'has("outbound_proxy")' "$metadata_file" >/dev/null; then
-        outbound_proxy_json=$(jq -c '.outbound_proxy' "$metadata_file")
-        if ! jq -e '
-            (.name | type == "string")
-            and (.config | type == "object")
-            and (.config.type == "shadowsocks" or .config.type == "vless")
-            and (.config.server | type == "string" and length > 0)
-            and (.config.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
-            and ((.config | has("tag") or has("detour")) | not)
-            and (.config.type != "shadowsocks" or
-                ((.config.method | type == "string" and length > 0)
-                 and (.config.password | type == "string" and length > 0)))
-            and (.config.type != "vless" or
-                (.config.uuid | type == "string" and length > 0))
-        ' <<<"$outbound_proxy_json" >/dev/null 2>&1; then
-            outbound_proxy_json=
-            [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
-            return 0
-        fi
-        outbound_proxy_name=$(jq -r '.name' <<<"$outbound_proxy_json")
-        outbound_proxy_config_json=$(jq -c '.config' <<<"$outbound_proxy_json")
-        return 0
-    fi
-
-    if [[ $mode == 'SS 出站' || $(jq -r 'has("outbound_ss_server")' "$metadata_file") == true ]]; then
-        server=$(jq -r '.outbound_ss_server // empty' "$metadata_file")
-        port=$(jq -r '.outbound_ss_port // empty' "$metadata_file")
-        method=$(jq -r '.outbound_ss_method // empty' "$metadata_file")
-        password=$(jq -r '.outbound_ss_password // empty' "$metadata_file")
-        name=$(jq -r '.outbound_ss_name // ""' "$metadata_file")
-        if [[ $server && $port =~ ^[0-9]+$ && $method && $password ]] &&
-            ss_method_supported "$method" &&
-            ((10#$port >= 1 && 10#$port <= 65535)) &&
-            ss_password_valid_for_method "$method" "$password"; then
-            outbound_proxy_config_json=$(jq -cn \
-                --arg server "$server" --argjson server_port "$((10#$port))" \
-                --arg method "$method" --arg password "$password" \
-                '{type:"shadowsocks",server:$server,server_port:$server_port,method:$method,password:$password}') || return 1
-            outbound_proxy_name=$name
-            outbound_proxy_json=$(jq -cn --arg name "$name" --argjson config "$outbound_proxy_config_json" '{name:$name,config:$config}') || return 1
-            return 0
-        fi
-        [[ $mode == 'SS 出站' ]] && return 1
-    fi
-    [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]] && return 1
-    return 0
-}
-
-resolve_entry_addr_for_listen() {
-    local addr=$1
-    if [[ $(is_test domain "$addr") ]]; then
-        getent ahostsv4 "$addr" 2>/dev/null | awk 'NR==1{print $1; exit}' && return 0
-        getent ahostsv6 "$addr" 2>/dev/null | awk 'NR==1{print $1; exit}' && return 0
-        return 1
-    fi
-    echo "$addr"
-}
-
-sync_entry_addr_config_unlocked() {
-    local cfg=$1
-    local entry=$2
-    local file="$is_conf_dir/$cfg"
-    local listen_addr new_json normalized_entry
-
-    [[ -f "$file" ]] || err "配置文件不存在: $cfg"
-
-    normalized_entry=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$entry")
-    if [[ ! $normalized_entry ]] || ! is_valid_entry_addr "$normalized_entry"; then
-        normalized_entry=$(get_public_entry_addr)
-    fi
-
-    if jq -e '.inbounds[0].transport.headers.host? != null' "$file" >/dev/null 2>&1; then
-        new_json=$(jq --arg addr "$normalized_entry" '.inbounds[0].transport.headers.host = $addr' "$file") || return 1
-    else
-        listen_addr=$(resolve_entry_addr_for_listen "$normalized_entry") || listen_addr=$(get_public_entry_addr)
-        new_json=$(jq --arg addr "$listen_addr" '.inbounds[0].listen = $addr' "$file") || return 1
-    fi
-
-    apply_node_config_lifecycle_unlocked replace "$cfg" "$cfg" "$new_json" || {
-        echo "$node_lifecycle_error"
-        return 1
-    }
-    meta_set "$cfg" entry_addr "$normalized_entry" || {
-        echo "节点配置已应用，但无法保存分享地址"
-        return 1
-    }
-    echo "$normalized_entry"
-}
-
-sync_entry_addr_config() {
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    sync_entry_addr_config_unlocked "$@"
-    local status=$?
-    shared_config_unlock
-    return "$status"
 }
 
 # create file
@@ -3583,7 +595,7 @@ create() {
         is_json_file=$is_conf_dir/$is_config_name
         [[ ${2,,} == *reality* && ! $is_servername ]] && is_servername=$(reality_sni_select)
         # get json
-        [[ $is_change || ! $json_str ]] && get protocol $2
+        [[ $is_change || ! $json_str ]] && get protocol "$2"
         [[ $net == "reality" ]] && is_add_public_key=",outbounds:[{type:\"direct\"},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
         if [[ ${2,,} == snell ]]; then
             if [[ $snell_version == 6 ]]; then
@@ -3603,11 +615,12 @@ create() {
                     --argjson version 5 \
                     '{inbounds:[{tag:$tag,type:"snell",listen:"::",listen_port:$port,version:$version,psk:$psk,obfs_mode:$obfs_mode}]}')
             fi
-            is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || err "无法创建 Snell 临时配置文件."
+            is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || { err "无法创建 Snell 临时配置文件."; return 1; }
             printf '%s\n' "$is_new_json" >"$is_snell_tmp_file"
             if ! "$is_core_bin" check -c "$is_snell_tmp_file" &>/dev/null; then
                 rm -f "$is_snell_tmp_file"
                 err "Snell 配置校验失败."
+                return 1
             fi
         else
             is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
@@ -3620,54 +633,62 @@ create() {
         [[ $is_gen ]] && {
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
             msg
-            jq <<<$is_new_json
+            jq <<<"$is_new_json"
             msg
             return
         }
         node_migration_applied=
         if [[ ! $is_change || ! $previous_config_file ]]; then
-            shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+            shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
             new_node_lock=1
             if [[ ${2,,} != snell ]]; then
                 is_used_port=
                 if [[ $(node_port_used "$port" "$is_new_protocol") ]]; then
                     shared_config_unlock
                     err "无法使用 ($port) 端口"
+                    return 1
                 fi
             fi
             new_node_transport=$(node_protocol_transport "$is_new_protocol")
             if config_port_used "$port" "$previous_config_file" "$new_node_transport"; then
                 shared_config_unlock
                 err "节点监听端口 ($port) 已被现有配置占用"
+                return 1
             fi
         fi
         if [[ $is_change && $previous_config_file ]]; then
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
-            apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$node_lifecycle_error"
+            apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || { err "$node_lifecycle_error"; return 1; }
             node_migration_applied=1
             is_config_file=$is_config_name
-            msg "\n节点配置已应用: $(_green $is_config_name)\n"
+            msg "\n节点配置已应用: $(_green "$is_config_name")\n"
             if [[ $is_caddy && $is_change && $old_host ]]; then
                 is_del_host=$old_host
-                [[ $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+                if [[ $host != "$old_host" && -f $is_caddy_conf/$is_del_host.conf ]]; then
+                    rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+                fi
             fi
         elif [[ ${2,,} == snell ]]; then
             if ! mv -f "$is_snell_tmp_file" "$is_json_file"; then
                 rm -f "$is_snell_tmp_file"
+                [[ $new_node_lock ]] && shared_config_unlock
                 err "保存 Snell 配置失败, 原有配置未改变."
+                return 1
             fi
         else
-            cat <<<$is_new_json >"$is_json_file"
+            cat <<<"$is_new_json" >"$is_json_file"
         fi
         [[ $is_config_name ]] && is_config_file=$is_config_name
-        [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
+        [[ $is_change && $previous_config_file && $previous_config_file != "$is_config_name" ]] && msg "\n配置文件修改成功: $(_green "$previous_config_file") -> $(_green "$is_config_name")\n"
         if [[ ! $is_change ]]; then
             meta_set "$is_config_name" outbound_mode "V4优先"
         fi
         if [[ ! $node_migration_applied ]]; then
             sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1 || {
                 [[ ! $is_change ]] && rm -f "$is_json_file" "$is_conf_dir/.quan-meta/$is_config_name.meta.json"
+                [[ $new_node_lock ]] && shared_config_unlock
                 err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+                return 1
             }
             if [[ $is_new_install ]]; then
                 # config.json
@@ -3676,67 +697,73 @@ create() {
         fi
         [[ $new_node_lock ]] && shared_config_unlock
         # caddy auto tls
-        [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
-            create caddy $net
-        }
+        if [[ $is_caddy && $host && ! $is_no_auto_tls ]]; then
+            create caddy "$net" || return $?
+        fi
         # restart core
-        [[ ! $node_migration_applied ]] && manage restart &
+        if [[ ! $node_migration_applied ]]; then
+            manage_restart_checked "" "节点配置已保存" || return 1
+        fi
+        return 0
         ;;
     client)
         is_tls=tls
         is_client=1
-        get info $2
-        [[ ! $is_client_id_json ]] && err "($is_config_name) 不支持生成客户端配置."
-        is_new_json=$(jq '{outbounds:[{tag:'\"$is_config_name\"',protocol:'\"$is_protocol\"','"$is_client_id_json"','"$is_stream"'}]}' <<<{})
+        get info "$2"
+        [[ ! $is_client_id_json ]] && { err "($is_config_name) 不支持生成客户端配置."; return 1; }
+        is_new_json=$(jq --arg tag "$is_config_name" --arg proto "$is_protocol" "{outbounds:[{tag:\$tag,protocol:\$proto,$is_client_id_json,$is_stream}]}" <<<{})
         msg
-        jq <<<$is_new_json
+        jq <<<"$is_new_json"
         msg
         ;;
     caddy)
-        shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+        shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
         load caddy.sh
         if [[ $is_install_caddy ]]; then
             caddy_config new
-            [[ -f $is_caddyfile ]] || { shared_config_unlock; err "无法创建 Caddy 主配置文件."; }
+            [[ -f $is_caddyfile ]] || { shared_config_unlock; err "无法创建 Caddy 主配置文件."; return 1; }
         fi
         if [[ ! $(grep "$is_caddy_conf" "$is_caddyfile" 2>/dev/null) ]]; then
             msg "import $is_caddy_conf/*.conf" >>"$is_caddyfile" || {
                 shared_config_unlock
                 err "无法更新 Caddy 主配置文件."
+                return 1
             }
         fi
         if [[ ! -d $is_caddy_conf ]] && ! mkdir -p "$is_caddy_conf"; then
             shared_config_unlock
             err "无法创建 Caddy 配置目录."
+            return 1
         fi
-        caddy_config $2
-        [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; }
+        caddy_config "$2"
+        [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; return 1; }
         shared_config_unlock
-        manage restart caddy &
+        manage_restart_checked caddy "Caddy 配置已更新" || return 1
         ;;
     config.json)
         local candidate_config
-        shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+        shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
         is_log='log:{output:"/var/log/'$is_core'/access.log",level:"info","timestamp":true}'
         is_dns='dns:{}'
         is_ntp='ntp:{"enabled":true,"server":"time.apple.com"},'
         if [[ -f $is_config_json ]]; then
-            [[ $(jq .ntp.enabled $is_config_json) != "true" ]] && is_ntp=
+            [[ $(jq .ntp.enabled "$is_config_json") != "true" ]] && is_ntp=
         else
             [[ ! $is_ntp_on ]] && is_ntp=
         fi
         is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
-        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || { shared_config_unlock; err "无法创建候选公共配置"; }
-        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; shared_config_unlock; err "无法写入候选公共配置"; }
+        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || { shared_config_unlock; err "无法创建候选公共配置"; return 1; }
+        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; shared_config_unlock; err "无法写入候选公共配置"; return 1; }
         if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
             rm -f "$candidate_config"
             shared_config_unlock
             err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            return 1
         fi
         rm -f "$candidate_config"
-        manage restart &
         shared_config_unlock
+        manage_restart_checked "" "公共配置已更新" || return 1
         ;;
     esac
 }
@@ -3819,12 +846,13 @@ change() {
         *)
             [[ $is_try_change ]] && return
             err "无法识别 ($2) 更改类型."
+            return 1
             ;;
         esac
     fi
     [[ $is_try_change ]] && return
     [[ $is_dont_auto_exit ]] && {
-        get info $1
+        get info "$1"
         change_info_status=$?
     } || {
         [[ $is_change_id ]] && {
@@ -3833,13 +861,18 @@ change() {
             else
                 is_change_msg=${change_labels[$is_change_id]#*|}
             fi
-            [[ $is_change_msg ]] && _green "\n快速执行: $is_change_msg"
+            if [[ $is_change_msg ]]; then
+                _green "\n快速执行: $is_change_msg"
+            fi
         }
-        info $1
+        info "$1"
         change_info_status=$?
-        [[ $is_auto_get_config ]] && msg "\n自动选择: $is_config_file"
+        if [[ $is_auto_get_config ]]; then
+            msg "\n自动选择: $is_config_file"
+        fi
     }
     [[ $change_info_status == 2 ]] && return 2
+    [[ $change_info_status == 0 ]] || return "$change_info_status"
     is_old_net=$net
     [[ $is_tcp_http ]] && net=http
     [[ $host ]] && net=$is_protocol-$net-tls
@@ -3851,7 +884,7 @@ change() {
     # if not prefer args, show change list and then get change id.
     [[ ! $is_change_id ]] && {
         is_tmp_list=()
-        for v in ${is_can_change[@]}; do
+        for v in "${is_can_change[@]}"; do
             is_tmp_list+=("${change_labels[$v]%%|*}")
         done
         menu_select parent is_change_str "\n请选择更改:\n" "${is_tmp_list[@]}"
@@ -3876,10 +909,10 @@ change() {
             is_new_servername=$4
             is_servername=$4
         fi
-        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
+        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && { err "($is_config_file) 不支持更改端口, 因为没啥意义."; return 1; }
         if [[ $is_new_port && ! $is_auto ]]; then
-            [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
-            [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
+            [[ ! $(is_test port "$is_new_port") ]] && { err "请输入正确的端口, 可选(1-65535)"; return 1; }
+            [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && { err "无法使用 ($is_new_port) 端口"; return 1; }
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
     [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
@@ -3887,28 +920,28 @@ change() {
             net=$is_old_net
             is_https_port=$is_new_port
             load caddy.sh
-            caddy_config $net
-            manage restart caddy &
+            caddy_config "$net"
+            manage_restart_checked caddy "Caddy 端口配置已更新" || return 1
             info
         else
-            add $net $is_new_port
+            add "$net" "$is_new_port"
         fi
         ;;
     2)
         # new host
         is_new_host=$3
-        [[ ! $host ]] && err "($is_config_file) 不支持更改域名."
+        [[ ! $host ]] && { err "($is_config_file) 不支持更改域名."; return 1; }
     [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
         old_host=$host # del old host
-        add $net $is_new_host
+        add "$net" "$is_new_host"
         ;;
     3)
         # new path
         is_new_path=$3
-        [[ ! $path ]] && err "($is_config_file) 不支持更改路径."
+        [[ ! $path ]] && { err "($is_config_file) 不支持更改路径."; return 1; }
         [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
     [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
-        add $net auto auto $is_new_path
+        add "$net" auto auto "$is_new_path"
         ;;
     4)
         # new password
@@ -3916,30 +949,33 @@ change() {
         if [[ $ss_password || $password ]]; then
             [[ $is_auto ]] && {
                 get_uuid && is_new_pass=$tmp_uuid
-                [[ $ss_password ]] && is_new_pass=$(get ss2022)
+                if [[ $ss_password ]]; then
+                    is_new_pass=$(get ss2022)
+                fi
             }
         else
             err "($is_config_file) 不支持更改密码."
+            return 1
         fi
     [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
         password=$is_new_pass
         ss_password=$is_new_pass
         is_socks_pass=$is_new_pass
-        add $net
+        add "$net"
         ;;
     5)
         # new uuid
         is_new_uuid=$3
-        [[ ! $uuid ]] && err "($is_config_file) 不支持更改 UUID."
+        [[ ! $uuid ]] && { err "($is_config_file) 不支持更改 UUID."; return 1; }
         [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
     [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
-        add $net auto $is_new_uuid
+        add "$net" auto "$is_new_uuid"
         ;;
     6)
         # new method
         is_new_method=$3
         is_new_ss_password=$ss_password
-        [[ $net != 'ss' ]] && err "($is_config_file) 不支持更改加密方式."
+        [[ $net != 'ss' ]] && { err "($is_config_file) 不支持更改加密方式."; return 1; }
         [[ $is_auto ]] && is_new_method=$is_random_ss_method
         if [[ ! $is_new_method ]]; then
             select_ss_method
@@ -3948,108 +984,115 @@ change() {
             [[ $ss_method_status == 0 ]] || return 1
             is_new_method=$ss_method
         fi
-        if [[ $(grep 2022 <<<$is_new_method) ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
+        if [[ $(grep 2022 <<<"$is_new_method") ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
             is_new_ss_password=$(ss_password_for_method "$is_new_method")
-            msg "\n已根据新的加密方式自动更新密码: $(_green $is_new_ss_password)\n"
+            msg "\n已根据新的加密方式自动更新密码: $(_green "$is_new_ss_password")\n"
         fi
-        [[ $is_new_ss_password ]] && add $net auto "$is_new_ss_password" $is_new_method || add $net auto auto $is_new_method
+        if [[ $is_new_ss_password ]]; then
+            add "$net" auto "$is_new_ss_password" "$is_new_method"
+        else
+            add "$net" auto auto "$is_new_method"
+        fi
         ;;
     7)
         # new remote addr
         is_new_door_addr=$3
-        [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标地址."
+        [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标地址."; return 1; }
     [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
         door_addr=$is_new_door_addr
-        add $net
+        add "$net"
         ;;
     8)
         # new remote port
         is_new_door_port=$3
-        [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标端口."
+        [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标端口."; return 1; }
         [[ ! $is_new_door_port ]] && {
         ask string door_port "请输入新的目标端口 (1-65535):"
             is_new_door_port=$door_port
         }
-        add $net auto auto $is_new_door_port
+        add "$net" auto auto "$is_new_door_port"
         ;;
     9)
         # new is_private_key is_public_key
         is_new_private_key=$3
         is_new_public_key=$4
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改密钥."
+        [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改密钥."; return 1; }
         if [[ $is_auto ]]; then
             get_pbk
-            add $net
+            add "$net"
         else
             [[ $is_new_private_key && ! $is_new_public_key ]] && {
                 err "无法找到 Public key."
+                return 1
             }
             [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新的私钥 (输入不显示):"
             [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新的公钥:"
-            if [[ $is_new_private_key == $is_new_public_key ]]; then
+            if [[ $is_new_private_key == "$is_new_public_key" ]]; then
                 err "Private key 和 Public key 不能一样."
+                return 1
             fi
             is_tmp_json=$is_conf_dir/$is_config_file-$uuid
             cp -f "$is_conf_dir/$is_config_file" "$is_tmp_json"
-            sed -i s#$is_private_key #$is_new_private_key# $is_tmp_json
-            $is_core_bin check -c $is_tmp_json &>/dev/null
+            sed -i "s#$is_private_key" "#$is_new_private_key#" "$is_tmp_json"
+            "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
             if [[ $? != 0 ]]; then
                 is_key_err=1
                 is_key_err_msg="Private key 无法通过测试."
             fi
-            sed -i s#$is_new_private_key #$is_new_public_key# $is_tmp_json
-            $is_core_bin check -c $is_tmp_json &>/dev/null
+            sed -i "s#$is_new_private_key" "#$is_new_public_key#" "$is_tmp_json"
+            "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
             if [[ $? != 0 ]]; then
                 is_key_err=1
                 is_key_err_msg+="Public key 无法通过测试."
             fi
             rm "$is_tmp_json"
-            [[ $is_key_err ]] && err $is_key_err_msg
+            [[ $is_key_err ]] && { err "$is_key_err_msg"; return 1; }
             is_private_key=$is_new_private_key
             is_public_key=$is_new_public_key
             is_test_json=
-            add $net
+            add "$net"
         fi
         ;;
     10)
         # new serverName
         is_new_servername=$3
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改 serverName."
+        [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改 serverName."; return 1; }
         [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
         [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
         is_servername=$is_new_servername
-        add $net
+        add "$net"
         ;;
     11)
         # new proxy site
         is_new_proxy_site=$3
         [[ ! $is_caddy && ! $host ]] && {
             err "($is_config_file) 不支持更改伪装网站."
+            return 1
         }
-        [[ ! -f $is_caddy_conf/${host}.conf.add ]] && err "无法配置伪装网站."
+        [[ ! -f $is_caddy_conf/${host}.conf.add ]] && { err "无法配置伪装网站."; return 1; }
         [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的反向代理目标域名 (例如 example.com):"
-        proxy_site=$(sed 's#^.*//##;s#/$##' <<<$is_new_proxy_site)
+        proxy_site=$(sed 's#^.*//##;s#/$##' <<<"$is_new_proxy_site")
         load caddy.sh
         caddy_config proxy
-        manage restart caddy &
-        msg "\n已更新伪装网站为: $(_green $proxy_site) \n"
+        manage_restart_checked caddy "伪装网站配置已更新" || return 1
+        msg "\n已更新伪装网站为: $(_green "$proxy_site") \n"
         ;;
     12)
         # new socks user
-        [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
+        [[ ! $is_socks_user ]] && { err "($is_config_file) 不支持更改用户名 (Username)."; return 1; }
     ask string is_socks_user "请输入新用户名:"
-        add $net
+        add "$net"
         ;;
     13)
         # update share link node name (does not rename json file)
         is_new_name=$3
     [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
         is_new_name=${is_new_name%.json}
-        [[ ! $is_new_name ]] && err "节点名称不能为空."
+        [[ ! $is_new_name ]] && { err "节点名称不能为空."; return 1; }
         is_old_name=$(node_name_for_link "$is_config_file")
-        [[ "$is_old_name" == "$is_new_name" ]] && err "新节点名称与当前名称一致."
+        [[ "$is_old_name" == "$is_new_name" ]] && { err "新节点名称与当前名称一致."; return 1; }
         meta_set "$is_config_file" node_name "$is_new_name"
-        msg "\n已更新节点名称为: $(_green $is_new_name)\n"
+        msg "\n已更新节点名称为: $(_green "$is_new_name")\n"
         info
         ;;
     14)
@@ -4061,31 +1104,31 @@ change() {
             echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
             interactive_read -r is_new_entry_addr
         fi
-        is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || err "入口地址更新失败: $is_new_entry_addr"
-        msg "\n已更新入口地址为: $(_green $is_new_entry_addr)\n"
+        is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || { err "入口地址更新失败: $is_new_entry_addr"; return 1; }
+        msg "\n已更新入口地址为: $(_green "$is_new_entry_addr")\n"
         info
         ;;
     17)
         # psk
-        [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell PSK."
+        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell PSK."; return 1; }
         is_new_snell_psk=$3
         [[ $is_auto ]] && is_new_snell_psk=$(get_snell_psk)
     [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
         if [[ $snell_version == 6 ]]; then
-            ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"
+            ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || { err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"; return 1; }
         fi
         snell_psk=$is_new_snell_psk
         add snell
         ;;
     18)
         # snell-version
-        [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell 版本."
+        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 版本."; return 1; }
         is_new_snell_version=$3
         [[ $is_auto ]] && is_new_snell_version=6
         [[ ! $is_new_snell_version ]] && {
     ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
         }
-        snell_version_valid "$is_new_snell_version" || err "Snell 版本只支持 5 或 6. $is_err_tips"
+        snell_version_valid "$is_new_snell_version" || { err "Snell 版本只支持 5 或 6. $is_err_tips"; return 1; }
         if [[ $is_new_snell_version == 6 && $snell_version != 6 ]]; then
             # migrating v5 -> v6
             unset snell_obfs_mode
@@ -4104,7 +1147,7 @@ change() {
         ;;
     19)
         # obfs-mode
-        [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell 混淆模式."
+        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 混淆模式."; return 1; }
         if [[ $snell_version == 6 ]]; then
             # smart routing for v6 node
             if [[ $3 =~ ^(default|unshaped|unsafe-raw)$ ]]; then
@@ -4174,7 +1217,7 @@ change() {
             [[ $snell_status == 2 ]] && return 2
             [[ $snell_status == 0 ]] || return 1
         fi
-        snell_mode_valid "$is_new_snell_mode" || err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"
+        snell_mode_valid "$is_new_snell_mode" || { err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"; return 1; }
         snell_mode=$is_new_snell_mode
         add snell
         ;;
@@ -4199,7 +1242,7 @@ del() {
     [[ $is_select_delete_node ]] && unset is_config_file is_conf_dir_empty
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
-    [[ ! $is_config_file ]] && { get info $1 || return $?; }
+    [[ ! $is_config_file ]] && { get info "$1" || return $?; }
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
             if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点，删除后将重启 sing-box。确认删除"; then
@@ -4208,7 +1251,10 @@ del() {
             fi
         fi
         deleted_config_file=$is_config_file
-        apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
+        apply_node_config_lifecycle delete "$deleted_config_file" || {
+            err "$node_lifecycle_error"
+            return 1
+        }
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {
@@ -4217,13 +1263,15 @@ del() {
                 [[ ! $old_host ]] && return # no host exist or not set new host;
                 is_del_host=$old_host
             }
-            [[ $is_del_host && $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && {
-                rm -rf $is_caddy_conf/$is_del_host.conf $is_caddy_conf/$is_del_host.conf.add
-                [[ ! $is_new_json ]] && manage restart caddy &
-            }
+            if [[ $is_del_host && $host != "$old_host" && -f $is_caddy_conf/$is_del_host.conf ]]; then
+                rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+                if [[ ! $is_new_json ]]; then
+                    manage_restart_checked caddy "已移除 Caddy 站点配置" || return 1
+                fi
+            fi
         }
     fi
-    if [[ ! $(ls $is_conf_dir | grep .json) && ! $is_change ]]; then
+    if [[ ! $(ls "$is_conf_dir" | grep .json) && ! $is_change ]]; then
         warn "当前配置目录为空! 因为你刚刚删除了最后一个配置文件."
         is_conf_dir_empty=1
     fi
@@ -4254,11 +1302,11 @@ uninstall() {
     manage disable &>/dev/null
     load log.sh
     log_limit_remove
-    rm -rf $is_core_dir $is_log_dir $is_sh_bin ${is_sh_bin/$is_core/sb}
+    rm -rf "$is_core_dir" "$is_log_dir" "$is_sh_bin" "${is_sh_bin/$is_core/sb}"
     if [[ $is_systemd ]]; then
-        rm -f /lib/systemd/system/$is_core.service
+        rm -f "/lib/systemd/system/$is_core.service"
     elif [[ $is_openrc ]]; then
-        rm -f /etc/init.d/$is_core
+        rm -f "/etc/init.d/$is_core"
     fi
     sed -i "/$is_core/d" /root/.bashrc
     # uninstall caddy only when the full-removal scope was selected
@@ -4266,15 +1314,15 @@ uninstall() {
         manage stop caddy &>/dev/null
         manage disable caddy &>/dev/null
         if [[ $is_systemd ]]; then
-            rm -rf $is_caddy_dir $is_caddy_bin /lib/systemd/system/caddy.service
+            rm -rf "$is_caddy_dir" "$is_caddy_bin" /lib/systemd/system/caddy.service
         elif [[ $is_openrc ]]; then
-            rm -rf $is_caddy_dir $is_caddy_bin /etc/init.d/caddy
+            rm -rf "$is_caddy_dir" "$is_caddy_bin" /etc/init.d/caddy
         fi
     fi
     [[ $is_install_sh ]] && return # reinstall
     _green "\n卸载完成!"
     msg "脚本哪里需要完善? 请反馈"
-    msg "反馈问题) $(msg_ul https://github.com/${is_sh_repo}/issues)\n"
+    msg "反馈问题) $(msg_ul "https://github.com/${is_sh_repo}/issues")\n"
 }
 
 # manage run status
@@ -4299,20 +1347,48 @@ manage() {
     *) is_do_name=$is_core ;;
     esac
     if [[ $is_systemd ]]; then
-        systemctl $is_do $is_do_name 2>/dev/null
+        systemctl "$is_do" "$is_do_name" 2>/dev/null
     elif [[ $is_openrc ]]; then
         case $is_do in
         enable)
-            rc-update add $is_do_name default 2>/dev/null
+            rc-update add "$is_do_name" default 2>/dev/null
             ;;
         disable)
-            rc-update del $is_do_name default 2>/dev/null
+            rc-update del "$is_do_name" default 2>/dev/null
             ;;
         *)
-            rc-service $is_do_name $is_do 2>/dev/null
+            rc-service "$is_do_name" "$is_do" 2>/dev/null
             ;;
         esac
     fi
+}
+
+# Lightweight restart wrapper with context-aware error diagnostics and log hints.
+# Transactional node lifecycle operations use manage_restart_confirmed (src/route.sh) instead.
+manage_restart_checked() {
+    local service_arg=${1:-} context=${2:-}
+    local service_name=${is_core_name:-sing-box} unit_name=${is_core:-sing-box}
+    local log_hint='请查看服务日志'
+    if [[ $service_arg == caddy ]]; then
+        service_name=Caddy
+        unit_name=caddy
+    fi
+    if manage restart ${service_arg:+"$service_arg"}; then
+        return 0
+    fi
+    if [[ $is_systemd ]]; then
+        log_hint="查看服务日志：journalctl -u ${unit_name}.service -n 100 --no-pager"
+    elif [[ $is_openrc && $unit_name == "${is_core:-sing-box}" ]]; then
+        log_hint="查看服务错误日志：tail -n 100 ${is_log_dir:-/var/log/${is_core:-sing-box}}/error.log"
+    elif [[ $is_openrc ]]; then
+        log_hint='请查看 OpenRC 服务日志（logread，或 /var/log/messages）'
+    fi
+    if [[ $context ]]; then
+        err "${context}，但 ${service_name} 服务重启失败，请检查服务状态（${log_hint}）。"
+    else
+        err "${service_name} 服务重启失败，请检查服务状态（${log_hint}）。"
+    fi
+    return 1
 }
 
 service_action_result() {
@@ -4387,7 +1463,7 @@ add() {
             is_new_protocol=VMess-${is_lower^^}
             ;;
         wss | h2 | hu | vws | vh2 | vhu | tws | th2 | thu)
-            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/^T/Trojan-/;/^(W|H)/{s/^/VMess-/};s/WSS/WS/;s/HU/HTTPUpgrade/" <<<${is_lower^^})-TLS
+            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/^T/Trojan-/;/^(W|H)/{s/^/VMess-/};s/WSS/WS/;s/HU/HTTPUpgrade/" <<<"${is_lower^^}")-TLS
             ;;
         r | reality)
             is_new_protocol=VLESS-REALITY
@@ -4420,22 +1496,22 @@ add() {
             is_new_protocol=Snell
             ;;
         *)
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
+            for v in "${protocol_list[@]}"; do
+                [[ $(grep -E -i "^$is_lower$" <<<"$v") ]] && is_new_protocol=$v && break
             done
 
-            [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
+            [[ ! $is_new_protocol ]] && { err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"; return 1; }
             ;;
         esac
     fi
 
     # no prefer protocol
     if [[ ! $is_new_protocol ]]; then
-        is_tmp_list=(${protocol_list[@]})
+        is_tmp_list=("${protocol_list[@]}")
         [[ $is_no_auto_tls ]] && {
             is_tmp_list=()
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list+=("$v")
+            for v in "${protocol_list[@]}"; do
+                [[ $(grep -i "\-tls$" <<<"$v") ]] && is_tmp_list+=("$v")
             done
         }
         menu_select parent is_new_protocol "\n选择协议:\n" "${is_tmp_list[@]}"
@@ -4453,6 +1529,7 @@ add() {
         is_core_minor=$(echo "$is_core_ver" | cut -d. -f2)
         if [[ ${is_core_major:-0} -lt 1 || ${is_core_major:-0} -eq 1 && ${is_core_minor:-0} -lt 12 ]]; then
             err "当前 sing-box 版本 ($is_core_ver) 不支持 AnyTLS，请先升级 sing-box core 到 1.12.0 或更高版本。"
+            return 1
         fi
     fi
 
@@ -4521,7 +1598,7 @@ add() {
     [[ $1 && ! $is_change ]] && {
         msg "\n使用协议: $is_new_protocol"
         # err msg tips
-        is_err_tips="\n\n请使用: $(_green $is_core add $1 $is_add_opts) 来添加 $is_new_protocol 配置"
+        is_err_tips="\n\n请使用: $(_green "$is_core add $1 $is_add_opts") 来添加 $is_new_protocol 配置"
     }
 
     # remove old protocol args
@@ -4533,64 +1610,70 @@ add() {
             ;;
         reality)
             net_type=
-            [[ ! $(grep -i reality <<<$is_new_protocol) ]] && is_reality=
+            [[ ! $(grep -i reality <<<"$is_new_protocol") ]] && is_reality=
             ;;
         ss)
-            [[ $(is_test uuid $ss_password) ]] && uuid=$ss_password
+            [[ $(is_test uuid "$ss_password") ]] && uuid=$ss_password
             ;;
         esac
-        [[ ! $(is_test uuid $uuid) ]] && uuid=
-        [[ $(is_test uuid $password) ]] && uuid=$password
+        [[ ! $(is_test uuid "$uuid") ]] && uuid=
+        [[ $(is_test uuid "$password") ]] && uuid=$password
     fi
 
     # no-auto-tls only use h2,ws,grpc
     if [[ $is_no_auto_tls && ! $is_use_tls ]]; then
         err "$is_new_protocol 不支持手动配置 tls."
+        return 1
     fi
 
     # prefer args.
     if [[ $2 ]]; then
         for v in is_use_port is_use_uuid is_use_host is_use_path is_use_pass is_use_method is_use_door_addr is_use_door_port is_use_version; do
-            [[ ${!v} == 'auto' ]] && unset $v
+            [[ ${!v} == 'auto' ]] && unset "$v"
         done
 
         if [[ $is_use_port ]]; then
-            [[ ! $(is_test port ${is_use_port}) ]] && {
+            [[ ! $(is_test port "${is_use_port}") ]] && {
                 err "($is_use_port) 不是一个有效的端口. $is_err_tips"
+                return 1
             }
             if [[ $(node_port_used "$is_use_port" "$is_new_protocol") && ! $is_gen && ${is_new_protocol,,} != snell ]]; then
                 err "无法使用 ($is_use_port) 端口. $is_err_tips"
+                return 1
             fi
             port=$is_use_port
         fi
         if [[ $is_use_door_port ]]; then
-            [[ ! $(is_test port ${is_use_door_port}) ]] && {
+            [[ ! $(is_test port "${is_use_door_port}") ]] && {
                 err "(${is_use_door_port}) 不是一个有效的目标端口. $is_err_tips"
+                return 1
             }
             door_port=$is_use_door_port
         fi
         if [[ $is_use_uuid ]]; then
-            [[ ! $(is_test uuid $is_use_uuid) ]] && {
+            [[ ! $(is_test uuid "$is_use_uuid") ]] && {
                 err "($is_use_uuid) 不是一个有效的 UUID. $is_err_tips"
+                return 1
             }
             uuid=$is_use_uuid
         fi
         if [[ $is_use_path ]]; then
-            [[ ! $(is_test path $is_use_path) ]] && {
+            [[ ! $(is_test path "$is_use_path") ]] && {
                 err "($is_use_path) 不是有效的路径. $is_err_tips"
+                return 1
             }
             path=$is_use_path
         fi
         if [[ $is_use_method ]]; then
             is_tmp_use_name=加密方式
-            is_tmp_list=${ss_method_list[@]}
-            for v in ${is_tmp_list[@]}; do
-                [[ $(grep -E -i "^${is_use_method}$" <<<$v) ]] && is_tmp_use_type=$v && break
+            is_tmp_list=("${ss_method_list[@]}")
+            for v in "${is_tmp_list[@]}"; do
+                [[ $(grep -E -i "^${is_use_method}$" <<<"$v") ]] && is_tmp_use_type=$v && break
             done
             [[ ! ${is_tmp_use_type} ]] && {
                 warn "(${is_use_method}) 不是一个可用的${is_tmp_use_name}."
                 msg "${is_tmp_use_name}可用如下: "
-                for v in ${is_tmp_list[@]}; do
+                for v in "${is_tmp_list[@]}"; do
                     msg "\t\t$v"
                 done
                 msg "$is_err_tips\n"
@@ -4677,7 +1760,7 @@ add() {
                 fi
                 # set password
                 [[ ! $ss_password ]] && {
-                    if [[ $(grep 2022 <<<$ss_method) ]]; then
+                    if [[ $(grep 2022 <<<"$ss_method") ]]; then
                         is_default_arg=$(get ss2022)
                     else
                         [[ ! $tmp_uuid ]] && get_uuid
@@ -4702,7 +1785,7 @@ add() {
             [[ ! $snell_obfs_mode ]] && snell_obfs_mode=none
             unset snell_mode
         fi
-        validate_snell
+        validate_snell || return $?
     fi
 
     # Dokodemo-Door
@@ -4714,15 +1797,15 @@ add() {
     fi
 
     # Shadowsocks 2022
-    if [[ $(grep 2022 <<<$ss_method) ]]; then
+    if [[ $(grep 2022 <<<"$ss_method") ]]; then
         # test ss2022 password
         [[ $ss_password ]] && {
             is_test_json=1
             create server Shadowsocks
             [[ ! $tmp_uuid ]] && get_uuid
             is_test_json_save=$is_conf_dir/tmp-test-$tmp_uuid
-            cat <<<"$is_new_json" >$is_test_json_save
-            $is_core_bin check -c $is_test_json_save &>/dev/null
+            cat <<<"$is_new_json" >"$is_test_json_save"
+            "$is_core_bin" check -c "$is_test_json_save" &>/dev/null
             if [[ $? != 0 ]]; then
                 warn "当前 Shadowsocks 加密方式 ($ss_method) 不支持此密码。脚本将自动生成可用密码。"
                 ss_password=
@@ -4730,7 +1813,7 @@ add() {
                 json_str=
             fi
             is_test_json=
-            rm -f $is_test_json_save
+            rm -f "$is_test_json_save"
         }
 
     fi
@@ -4741,7 +1824,7 @@ add() {
     fi
 
     if [[ $is_caddy && $host && ! $is_no_auto_tls && ! $is_gen ]]; then
-        shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+        shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
         caddy_shared_lock=1
     fi
 
@@ -4751,23 +1834,24 @@ add() {
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
-        if declare -F note_read_line >/dev/null 2>&1; then
-            echo -ne "输入备注 (可选，直接回车跳过):"
-            if note_read_line is_custom_node_note; then
-                if declare -F note_trim >/dev/null 2>&1; then
-                    is_custom_node_note=$(note_trim "$is_custom_node_note")
-                fi
-            else
-                is_custom_node_note=
-            fi
+        echo -ne "输入备注 (可选，直接回车跳过):"
+        if note_read_line is_custom_node_note; then
+            is_custom_node_note=$(note_trim "$is_custom_node_note")
+        else
+            is_custom_node_note=
         fi
     fi
 
     # create json
-    create server $is_new_protocol
+    local add_rc=0
+    create server "$is_new_protocol" || {
+        add_rc=$?
+        [[ $caddy_shared_lock ]] && shared_config_unlock
+        return "$add_rc"
+    }
     if [[ ! $is_change && ! $is_gen && $is_config_name ]]; then
         [[ $is_custom_node_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
-        if [[ $is_custom_node_note ]] && declare -F note_set >/dev/null 2>&1; then
+        if [[ $is_custom_node_note ]]; then
             note_set "$is_config_name" "$is_custom_node_note"
         fi
     fi
@@ -4791,15 +1875,21 @@ get() {
         [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
-            [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
+            [[ $(grep ":" <<<"$ip") ]] && is_addr="[$ip]"
         }
         # IPv6 地址加方括号 (URL 格式要求)
-        [[ $is_addr == *:* && $is_addr != \[*\] ]] && is_addr="[$is_addr]"
+        if [[ $is_addr == *:* && $is_addr != \[*\] ]]; then
+            is_addr="[$is_addr]"
+        fi
+        return 0
         ;;
     new)
         [[ ! $host ]] && get_ip
         [[ ! $port ]] && get_port && port=$tmp_port
-        [[ ! $uuid ]] && get_uuid && uuid=$tmp_uuid
+        if [[ ! $uuid ]]; then
+            get_uuid && uuid=$tmp_uuid
+        fi
+        return 0
         ;;
     file)
         is_file_str=$2
@@ -4814,17 +1904,13 @@ get() {
             [[ ${#is_all_json[@]} -ge 233 ]] && break
         done
         shopt -u nullglob
-        [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
+        [[ ! $is_all_json ]] && { err "无法找到相关的配置文件: $2"; return 1; }
         [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
-            [[ $is_dont_auto_exit ]] && return
+            [[ $is_dont_auto_exit ]] && return 0
             is_file_display_list=()
             for is_cfg_item in "${is_all_json[@]}"; do
-                if declare -F note_format_list_label >/dev/null 2>&1; then
-                    is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
-                else
-                    is_file_display_list+=("$is_cfg_item")
-                fi
+                is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
             done
             menu_select parent is_config_file "\n选择节点:\n" "${is_file_display_list[@]}"
             get_status=$?
@@ -4833,16 +1919,18 @@ get() {
             is_config_file=${is_all_json[REPLY - 1]}
             export is_config_file
         }
+        return 0
         ;;
     info)
         is_tcp_http=
-        get file $2
+        get file "$2"
         get_status=$?
         [[ $get_status == 2 ]] && return 2
+        [[ $get_status == 0 ]] || return "$get_status"
         if [[ $is_config_file ]]; then
             is_json_str=$(json_strip_comments "$is_conf_dir/$is_config_file")
-            is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<$is_json_str)
-            [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
+            is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<"$is_json_str")
+            [[ $? != 0 ]] && { err "无法读取此文件: $is_config_file"; return 1; }
             is_up_var_set=(null is_protocol port is_listen_addr uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key snell_version snell_psk snell_obfs_mode snell_mode)
             [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
             mapfile -t is_json_data_list <<<"$is_json_data"
@@ -4854,8 +1942,8 @@ get() {
                 printf -v "${is_up_var_set[$i]}" '%s' "$v"
                 export "${is_up_var_set[$i]}"
             done
-            for v in ${is_up_var_set[@]}; do
-                [[ ${!v} == 'null' ]] && unset $v
+            for v in "${is_up_var_set[@]}"; do
+                [[ ${!v} == 'null' ]] && unset "$v"
             done
 
             if [[ $is_private_key ]]; then
@@ -4868,21 +1956,22 @@ get() {
 
             # extract anytls ACME domain
             [[ $is_protocol == 'anytls' ]] && {
-                is_anytls_domain=$(jq -r '(.inbounds[0].tls.certificate_provider.domain[0] // .inbounds[0].tls.acme.domain[0]) // empty' <<<$is_json_str 2>/dev/null)
+                is_anytls_domain=$(jq -r '(.inbounds[0].tls.certificate_provider.domain[0] // .inbounds[0].tls.acme.domain[0]) // empty' <<<"$is_json_str" 2>/dev/null)
             }
 
             is_config_name=$is_config_file
 
             if [[ $is_caddy && $host && -f $is_caddy_conf/$host.conf ]]; then
-                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
+                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" "$is_caddy_conf/$host.conf" | sed 's/.*://')
             fi
             if [[ $host && ! -f $is_caddy_conf/$host.conf ]]; then
                 is_no_auto_tls=1
             fi
             [[ $is_tmp_https_port ]] && is_https_port=$is_tmp_https_port
             [[ $is_client && $host ]] && port=$is_https_port
-            get protocol $is_protocol-$net_type
+            get protocol "$is_protocol-$net_type" || return $?
         fi
+        return 0
         ;;
     protocol)
         get addr # get host or server ip
@@ -4926,7 +2015,9 @@ get() {
             [[ ! $ss_method ]] && ss_method=$is_random_ss_method
             [[ ! $ss_password ]] && {
                 ss_password=$uuid
-                [[ $(grep 2022 <<<$ss_method) ]] && ss_password=$(get ss2022)
+                if [[ $(grep 2022 <<<"$ss_method") ]]; then
+                    ss_password=$(get ss2022)
+                fi
             }
             json_str="method:\"$ss_method\",password:\"$ss_password\""
             ;;
@@ -4974,6 +2065,7 @@ get() {
             ;;
         *)
             err "无法识别协议: $is_config_file"
+            return 1
             ;;
         esac
         [[ $net ]] && return # if net exist, dont need more json args
@@ -5011,6 +2103,7 @@ get() {
             ;;
         *)
             err "无法识别传输协议: $is_config_file"
+            return 1
             ;;
         esac
         json_str="$is_users,$is_json_add"
@@ -5019,22 +2112,23 @@ get() {
         [[ $is_no_auto_tls || $is_gen || $is_dont_test_host ]] && return
         get_ip
         get ping
-        if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
-            msg "\n请将 ($(_red_bg $host)) 解析到 ($(_red_bg $ip))"
+        if [[ ! $(grep "$ip" <<<"$is_host_dns") ]]; then
+            msg "\n请将 ($(_red_bg "$host")) 解析到 ($(_red_bg "$ip"))"
             msg "\n如果使用 Cloudflare, 在 DNS 那; 关闭 (Proxy status / 代理状态), 即是 (DNS only / 仅限 DNS)"
             ask string y "确认域名已解析到本机公网 IP；如使用 Cloudflare，代理状态为“仅 DNS”。输入 y 继续:"
             get ping
-            if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
+            if [[ ! $(grep "$ip" <<<"$is_host_dns") ]]; then
                 _cyan "\n测试结果: $is_host_dns"
                 err "域名 ($host) 没有解析到 ($ip)"
+                return 1
             fi
         fi
         ;;
     ssss | ss2022)
-        if [[ $(grep 128 <<<$ss_method) ]]; then
-            $is_core_bin generate rand 16 --base64
+        if [[ $(grep 128 <<<"$ss_method") ]]; then
+            "$is_core_bin" generate rand 16 --base64
         else
-            $is_core_bin generate rand 32 --base64
+            "$is_core_bin" generate rand 32 --base64
         fi
         ;;
     ping)
@@ -5042,7 +2136,7 @@ get() {
         # [[ $(grep ":" <<<$ip) ]] && is_ip_type="-6"
         # is_host_dns=$(ping $host $is_ip_type -c 1 -W 2 | head -1)
         is_dns_type="a"
-        [[ $(grep ":" <<<$ip) ]] && is_dns_type="aaaa"
+        [[ $(grep ":" <<<"$ip") ]] && is_dns_type="aaaa"
         is_host_dns=$(_wget -qO- --header="accept: application/dns-json" "https://one.one.one.one/dns-query?name=$host&type=$is_dns_type")
         ;;
     install-caddy)
@@ -5055,9 +2149,9 @@ get() {
         _green "安装 Caddy 成功.\n"
         ;;
     reinstall)
-        is_install_sh=$(cat $is_sh_dir/install.sh)
+        is_install_sh=$(cat "$is_sh_dir/install.sh")
         uninstall || return $?
-        bash <<<$is_install_sh
+        bash <<<"$is_install_sh"
         ;;
     esac
 }
@@ -5065,7 +2159,8 @@ get() {
 # show info
 info() {
     local info_target=${1:-${is_config_file:-$is_config_name}}
-    local info_status
+    local info_status i a tt is_node_name is_vmess_url= is_quic_add= is_sha256= is_flow= is_net_type= is_insecure= is_type=
+    local -a is_info_show=() is_info_str=()
     is_surge_str=
     is_url=
     [[ $is_gen ]] && return
@@ -5074,7 +2169,7 @@ info() {
         info_status=$?
         [[ $info_status == 2 ]] && return 2
     elif [[ ! $is_protocol ]]; then
-        get info $1
+        get info "$1"
         info_status=$?
         [[ $info_status == 2 ]] && return 2
     fi
@@ -5088,8 +2183,8 @@ info() {
             is_can_change=(0 1 2 3 5 13 14 15 16)
             is_info_show=(0 1 2 3 4 6 7 8)
             [[ $is_protocol == 'vmess' ]] && {
-                is_vmess_url=$(jq -c '{v:2,ps:'\"$is_node_name\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
-                is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
+                is_vmess_url=$(jq -cn --arg ps "$is_node_name" --arg add "$is_addr" --arg port "$is_https_port" --arg id "$uuid" --arg net "$net" --arg host "$host" --arg path "$path" '{v:2,ps:$ps,add:$add,port:$port,id:$id,aid:"0",net:$net,host:$host,path:$path,tls:"tls"}')
+                is_url=vmess://$(echo -n "$is_vmess_url" | base64 -w 0)
             } || {
                 [[ $is_protocol == "trojan" ]] && {
                     uuid=$password
@@ -5100,18 +2195,18 @@ info() {
                 is_url="$is_protocol://$uuid@$host:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#$is_node_name"
             }
             [[ $is_caddy ]] && is_can_change+=(11)
-            is_info_str=($is_protocol $is_addr $is_https_port $uuid $net $host $path 'tls')
+            is_info_str=("$is_protocol" "$is_addr" "$is_https_port" "$uuid" "$net" "$host" "$path" 'tls')
         else
             is_type=none
             is_can_change=(0 1 5 13 14 15 16)
             is_info_show=(0 1 2 3 4)
-            is_info_str=($is_protocol $is_addr $port $uuid $net)
+            is_info_str=("$is_protocol" "$is_addr" "$port" "$uuid" "$net")
             [[ $net == "http" ]] && {
                 net=tcp
                 is_type=http
                 is_tcp_http=1
                 is_info_show+=(5)
-                is_info_str=(${is_info_str[@]/http/tcp http})
+                is_info_str=("$is_protocol" "$is_addr" "$port" "$uuid" "tcp" "http")
             }
             [[ $net == "quic" ]] && {
                 is_insecure=1
@@ -5120,36 +2215,36 @@ info() {
                 is_quic_add=",tls:\"tls\",alpn:\"h3\"" # cant add allowInsecure
             }
             is_vmess_url=$(jq -c "{v:2,ps:\"$is_node_name\",add:\"$is_addr\",port:\"$port\",id:\"$uuid\",aid:\"0\",net:\"$net\",type:\"$is_type\"$is_quic_add}" <<<{})
-            is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
+            is_url=vmess://$(echo -n "$is_vmess_url" | base64 -w 0)
         fi
         ;;
     ss)
         is_can_change=(0 1 4 6 13 14 15 16)
         is_info_show=(0 1 2 10 11)
-        is_url="ss://$(echo -n ${ss_method}:${ss_password} | base64 -w 0)@${is_addr}:${port}#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $ss_password $ss_method)
+        is_url="ss://$(echo -n "${ss_method}:${ss_password}" | base64 -w 0)@${is_addr}:${port}#$is_node_name"
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$ss_password" "$ss_method")
         ;;
     trojan)
         is_insecure=1
         is_can_change=(0 1 4 13 14 15 16)
         is_info_show=(0 1 2 10 4 8 20)
         is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $password tcp tls true)
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tcp tls true)
         ;;
     hy*)
         is_can_change=(0 1 4 12 13 14 15)
         is_info_show=(0 1 2 10 8 9 20)
         # fix xray core for client use.
-        is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
+        is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in "$is_core_dir/bin/tls.cer" | sed 's/.*=//;s/://g')
         is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $password tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5 13 14 15 16)
         is_info_show=(0 1 2 3 10 8 9 20 21)
         is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$uuid" "$password" tls h3 true bbr)
         ;;
     reality)
         is_color=41
@@ -5160,21 +2255,21 @@ info() {
         [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]] && {
             is_flow=
             is_net_type=h2
-            is_info_show=(${is_info_show[@]/15/})
+            is_info_show=(0 1 2 3 4 8 16 17 18)
         }
-        is_info_str=($is_protocol $is_addr "${is_public_port:-$port}" $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
+        is_info_str=("$is_protocol" "$is_addr" "${is_public_port:-$port}" "$uuid" "$is_flow" "$is_net_type" reality "$is_servername" chrome "$is_public_key")
         is_url="$is_protocol://$uuid@$is_addr:${is_public_port:-$port}?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
         ;;
     anytls)
         is_can_change=(0 1 4 12 13 14 15)
         if [[ $is_anytls_domain ]]; then
             is_info_show=(0 1 2 10 8)
-            is_info_str=($is_protocol $is_anytls_domain $port $password tls)
+            is_info_str=("$is_protocol" "$is_anytls_domain" "$port" "$password" tls)
             is_url="anytls://$password@$is_anytls_domain:$port#$is_node_name"
         else
             is_insecure=1
             is_info_show=(0 1 2 10 8 20)
-            is_info_str=($is_protocol $is_addr $port $password tls true)
+            is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tls true)
             is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#$is_node_name"
         fi
         ;;
@@ -5208,13 +2303,13 @@ info() {
     direct)
         is_can_change=(0 1 7 8 13 14 15 16)
         is_info_show=(0 1 2 13 14)
-        is_info_str=($is_protocol $is_addr $port $door_addr $door_port)
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$door_addr" "$door_port")
         ;;
     socks)
         is_can_change=(0 1 12 4 13 14 15 16)
         is_info_show=(0 1 2 19 10)
-        is_info_str=($is_protocol $is_addr $port $is_socks_user $is_socks_pass)
-        is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#$is_node_name"
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$is_socks_user" "$is_socks_pass")
+        is_url="socks://$(echo -n "${is_socks_user}:${is_socks_pass}" | base64 -w 0)@${is_addr}:${port}#$is_node_name"
         ;;
     esac
     is_can_change+=(21)
@@ -5263,94 +2358,14 @@ info() {
     footer_msg
 }
 
-# footer msg
-footer_msg() {
-    [[ $is_core_stop && ! $is_new_json ]] && warn "$is_core_name 当前处于停止状态."
-    [[ $is_caddy_stop && $host ]] && warn "Caddy 当前处于停止状态."
-    return 0
-}
-
-render_qrcode() {
-    local url=$1
-    local terminal_size terminal_rows terminal_columns qr_output qr_width qr_height install_command
-    msg "------------- $is_config_name & QR code 二维码 -------------"
-    msg
-    if [[ $(type -P qrencode) ]]; then
-        if ! terminal_size=$(stty size 2>/dev/null) || [[ ! $terminal_size =~ ^[1-9][0-9]*[[:space:]]+[1-9][0-9]*$ ]]; then
-            warn "($is_config_name) 无法读取终端尺寸，未显示二维码，请复制上方链接."
-            msg
-            return 1
-        fi
-        read -r terminal_rows terminal_columns <<<"$terminal_size"
-        if ! qr_output=$(qrencode -t UTF8 "$url"); then
-            warn "($is_config_name) QR code 二维码生成失败，请复制上方链接."
-            msg
-            return 1
-        fi
-        qr_width=$(printf '%s\n' "$qr_output" | sed -e 's/█/x/g' -e 's/▀/x/g' -e 's/▄/x/g' | wc -L)
-        qr_height=$(printf '%s\n' "$qr_output" | wc -l)
-        if ((qr_width >= terminal_columns || qr_height >= terminal_rows)); then
-            warn "($is_config_name) 终端空间不足，未显示二维码，请复制上方链接."
-            msg
-            return 1
-        fi
-        printf '%s\n' "$qr_output"
-        msg
-        return 0
-    else
-        install_command=$(qrcode_dependency_install_command) || install_command=qrencode
-        msg "请安装 qrencode: $(_green "$install_command")；当前仍可复制上方链接，也可通过主动更新脚本重试."
-    fi
-    msg
-    return 1
-}
-
-show_qrcode_link() {
-    local encoded_url
-    encoded_url=$(jq -rn --arg uri "$1" '$uri | @uri')
-    local link="https://one-singbox-node-qr.clj1105557035.workers.dev/#data=${encoded_url}"
-    msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
-    msg "\n\e[4;${is_color}m${link}\e[0m\n"
-}
-
-# URL or qrcode
-url_qr() {
-    is_dont_show_info=1
-    info $2
-    if [[ $1 == 'qr' && $is_protocol == snell ]]; then
-        err "Snell 不支持二维码生成，请使用 URL 链接或 Surge 配置"
-    fi
-    if [[ $is_url ]]; then
-        if [[ $1 == 'url' ]]; then
-            msg "\n------------- $is_config_name & URL 链接 -------------"
-            msg "\n\e[${is_color}m${is_url}\e[0m\n"
-            if [[ $is_surge_str ]]; then
-                msg "------------- Surge 配置 -------------"
-                msg "\n\e[${is_color}m${is_surge_str}\e[0m\n"
-            fi
-            footer_msg
-        else
-            msg "\n\e[${is_color}m${is_url}\e[0m\n"
-            render_qrcode "$is_url" || :
-            show_qrcode_link "$is_url"
-            footer_msg
-        fi
-    else
-        [[ $1 == 'url' ]] && {
-            err "($is_config_name) 无法生成 URL 链接."
-        } || {
-            err "($is_config_name) 无法生成 QR code 二维码."
-        }
-    fi
-}
-
 # Internal exit code: a successful interactive script update must reload the new panel.
 is_reload_exit_code=75
 
 # update core, sh, caddy
 update() {
     case $1 in
-    1 | core | $is_core)
+    1 | core | "$is_core")
+        [[ ${is_core_ver:-} ]] || init_core_ver
         is_update_name=core
         is_show_name=$is_core_name
         is_run_ver=v${is_core_ver##* }
@@ -5363,7 +2378,7 @@ update() {
         is_update_repo=$is_sh_repo
         ;;
     3 | caddy)
-        [[ ! $is_caddy ]] && err "不支持更新 Caddy."
+        [[ ! $is_caddy ]] && { err "不支持更新 Caddy."; return 1; }
         is_update_name=caddy
         is_show_name="Caddy"
         is_run_ver=$is_caddy_ver
@@ -5371,6 +2386,7 @@ update() {
         ;;
     *)
         err "无法识别 ($1), 请使用: $is_core update [core | sh | caddy] [ver]"
+        return 1
         ;;
     esac
     if [[ $is_update_name == 'sh' ]]; then
@@ -5383,45 +2399,49 @@ update() {
             is_new_ver=v${2#v}
         fi
     fi
-    [[ $is_run_ver == $is_new_ver ]] && {
+    [[ $is_run_ver == "$is_new_ver" ]] && {
         msg "\n自定义版本和当前 $is_show_name 版本一样, 无需更新.\n"
         return 0
     }
     load download.sh
     if [[ $is_new_ver ]]; then
-        msg "\n使用自定义版本更新 $is_show_name: $(_green $is_new_ver)\n"
+        msg "\n使用自定义版本更新 $is_show_name: $(_green "$is_new_ver")\n"
     else
-        get_latest_version $is_update_name
-        [[ $is_run_ver == $latest_ver ]] && {
+        get_latest_version "$is_update_name"
+        [[ $is_run_ver == "$latest_ver" ]] && {
             msg "\n$is_show_name 当前已经是最新版本了.\n"
             return 0
         }
-        msg "\n发现 $is_show_name 新版本: $(_green $latest_ver)\n"
+        msg "\n发现 $is_show_name 新版本: $(_green "$latest_ver")\n"
         is_new_ver=$latest_ver
     fi
-    download $is_update_name $is_new_ver
+    download "$is_update_name" "$is_new_ver"
     case $is_update_name in
     sh)
         if [[ -f $is_config_json ]] && ! "$is_sh_bin" __post-update; then
             err "脚本更新后配置迁移失败，已安装新脚本但配置尚未完成同步。请运行: sb fix-config.json"
+            return 1
         fi
         ;;
     core)
         if ! migrate_runtime_config; then
             err "内核更新后配置校验发现异常，已阻断内核重启以防服务故障。请检查配置或运行: sb fix-config.json"
+            return 1
         fi
-        if ! manage restart $is_update_name; then
+        if ! manage restart "$is_update_name"; then
             err "$is_show_name 更新后服务重启失败，请检查服务状态."
+            return 1
         fi
         ;;
     caddy)
-        if ! manage restart $is_update_name; then
+        if ! manage restart "$is_update_name"; then
             err "$is_show_name 更新后服务重启失败，请检查服务状态."
+            return 1
         fi
         ;;
     esac
-    msg "更新成功, 当前 $is_show_name 版本: $(_green $is_new_ver)\n"
-    msg "$(_green 请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver)\n"
+    msg "更新成功, 当前 $is_show_name 版本: $(_green "$is_new_ver")\n"
+    msg "$(_green "请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver")\n"
     if [[ $is_update_name == 'sh' && ${is_interactive_operation:-0} == 1 ]]; then
         msg "正在重新加载新版本面板...\n"
         return "$is_reload_exit_code"
@@ -5679,331 +2699,19 @@ is_main_menu() {
     done
 }
 
-relay_warn_security() {
-    if [[ $is_main_start ]]; then
-        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
-    else
-        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
-    fi
-}
-
-relay_info_show() {
-    local l_port=$1 r_addr=$2 r_port=$3 r_note=
-    if declare -F note_get >/dev/null 2>&1; then
-        r_note=$(note_get "relay-${l_port}.json")
-    fi
-    msg "类型: TCP/UDP 端口转发"
-    msg "监听地址: ::"
-    msg "监听端口: $l_port"
-    msg "目标地址: $r_addr"
-    msg "目标端口: $r_port"
-    if [[ $r_note ]]; then
-        printf '备注: %s\n' "$r_note"
-    fi
-}
-
-relay_add() {
-    local local_port=${1-} remote_addr=${2-} remote_port=${3-} relay_note= interactive_add=0 raw_note=
-    if (($# >= 4)); then
-        local IFS=' '
-        relay_note=$(note_trim "${*:4}")
-    fi
-    if [[ ! $local_port ]]; then
-        interactive_add=1
-        while :; do
-            get_port
-            local_port=$tmp_port
-            config_port_used "$local_port" || break
-        done
-        local auto_port=$local_port
-        is_default_arg=$auto_port
-        ask string local_port "输入监听端口 (1-65535，回车自动分配 $local_port):"
-        [[ -z "$REPLY" ]] && msg "自动分配本地端口: $local_port"
-    fi
-    local_port=$(echo "$local_port" | tr -d ' ')
-    [[ $(is_test port "$local_port") ]] || err "($local_port) 不是一个有效的端口."
-    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
-    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-
-    if [[ ! $remote_addr ]]; then
-        interactive_add=1
-        ask string remote_addr "输入目标地址 (IPv4、IPv6 或域名):"
-    fi
-    remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    [[ -n $remote_addr ]] || err "目标地址不能为空."
-
-    if [[ ! $remote_port ]]; then
-        interactive_add=1
-        ask string remote_port "输入目标端口 (1-65535):"
-    fi
-    remote_port=$(echo "$remote_port" | tr -d ' ')
-    [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
-
-    if ((interactive_add == 1 && $# < 4)); then
-        echo -ne "输入备注 (可选，直接回车跳过):"
-        if note_read_line raw_note; then
-            relay_note=$(note_trim "$raw_note")
-        fi
-    fi
-
-    local relay_file="$is_conf_dir/relay-${local_port}.json"
-    local tmp_file
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
-    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建端口转发临时配置文件."
-
-    local relay_inbound
-    relay_inbound=$(jq -n \
-        --arg tag "relay-${local_port}.json" \
-        --arg addr "$remote_addr" \
-        --argjson local_port "$local_port" \
-        --argjson remote_port "$remote_port" \
-        '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
-        rm -f "$tmp_file"
-        err "生成端口转发配置 JSON 失败."
-    }
-    printf '%s\n' "$relay_inbound" > "$tmp_file"
-
-    if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
-        rm -f "$tmp_file"
-        err "端口转发配置校验失败."
-    fi
-
-    if ! mv -f "$tmp_file" "$relay_file"; then
-        rm -f "$tmp_file"
-        err "保存端口转发配置文件失败."
-    fi
-
-    if [[ -f $is_config_json ]]; then
-        if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
-            rm -f "$relay_file"
-            err "完整运行时配置校验失败，已取消安装该端口转发配置."
-        fi
-    fi
-
-    shared_config_unlock
-    if [[ $relay_note ]]; then
-        note_set "relay-${local_port}.json" "$relay_note" || err "保存备注失败."
-    fi
-    manage restart &
-    if [[ $is_main_start ]]; then
-        msg "\n$(_green '端口转发配置添加成功!')"
-    else
-        msg "\n$(_green '端口转发配置添加成功!')"
-    fi
-    msg "------------------------------------------------"
-    relay_info_show "$local_port" "$remote_addr" "$remote_port"
-    msg "------------------------------------------------"
-    relay_warn_security
-}
-
-relay_info() {
-    local local_port=$1
-    if [[ ! $local_port ]]; then
-        relay_list
-        ask string local_port "输入要查看的监听端口:"
-    fi
-    local_port=${local_port#relay-}
-    local_port=${local_port%.json}
-    local relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
-    local r_addr r_port
-    r_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
-    r_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-    if [[ $is_main_start ]]; then
-        msg "\n------------- 端口转发配置信息 -------------"
-    else
-        msg "\n------------- 端口转发配置信息 -------------"
-    fi
-    relay_info_show "$local_port" "$r_addr" "$r_port"
-    msg "----------------------------------------"
-    relay_warn_security
-}
-
-relay_list() {
-    local files count=0 file l_port r_addr r_port cfg_name base_label
-    shopt -s nullglob
-    files=("$is_conf_dir"/relay-*.json)
-    shopt -u nullglob
-    if [[ ${#files[@]} -eq 0 ]]; then
-        if [[ $is_main_start ]]; then
-            msg "\n暂无端口转发，请先添加\n"
-        else
-            msg "\n当前未配置任何端口转发.\n"
-        fi
-        return
-    fi
-    if [[ $is_main_start ]]; then
-        msg "\n------------- 端口转发列表 -------------"
-    else
-        msg "\n------------- 端口转发列表 -------------"
-    fi
-    for file in "${files[@]}"; do
-        l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
-        r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
-        r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
-        cfg_name=${file##*/}
-        base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
-        if declare -F note_format_list_label >/dev/null 2>&1; then
-            printf '%s\n' "$(note_format_list_label "$cfg_name" "$base_label")"
-        else
-            msg "$base_label"
-        fi
-        ((count++))
-    done
-    msg "------------------------------------"
-    if [[ $is_main_start ]]; then
-        msg "共 $count 个端口转发"
-    else
-        msg "共 $count 个端口转发"
-    fi
-    relay_warn_security
-}
-
-relay_delete() {
-    local local_port=$1 relay_file backup_file remote_addr remote_port
-    if [[ ! $local_port ]]; then
-        relay_list
-        # Existing relays may be listening; only validate the port format here.
-        local is_cant_test_port=1
-        ask string local_port "输入要删除的监听端口:"
-    fi
-    local_port=${local_port#relay-}
-    local_port=${local_port%.json}
-    relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
-    if [[ $is_main_start ]]; then
-        remote_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
-        remote_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-        confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return; }
-    fi
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
-    mv -f "$relay_file" "$backup_file" || err "备份端口转发配置失败，未执行删除."
-    if [[ -f $is_config_json ]]; then
-        if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
-            mv -f "$backup_file" "$relay_file"
-            err "删除端口转发后完整运行时配置校验失败，已恢复端口转发配置."
-        fi
-    fi
-    rm -f "$backup_file"
-    if declare -F meta_rm_unlocked >/dev/null 2>&1; then
-        if ! declare -F meta_file >/dev/null 2>&1 || [[ -f $(meta_file "relay-${local_port}.json") ]]; then
-            meta_rm_unlocked "relay-${local_port}.json" || {
-                shared_config_unlock
-                err "删除端口转发元数据失败: relay-${local_port}.json"
-            }
-        fi
-    fi
-    [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
-        [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
-    }
-    shared_config_unlock
-    manage restart &
-    if [[ $is_main_start ]]; then
-        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
-    else
-        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
-    fi
-}
-
-relay_note() {
-    local local_port=${1-} relay_cfg relay_file
-    if [[ ! $local_port ]]; then
-        if ! relay_menu_has_entries; then
-            relay_list
-            return 1
-        fi
-        relay_list
-        # Existing relays may be listening; only validate the port format here.
-        local is_cant_test_port=1
-        ask string local_port "输入要编辑备注的监听端口:"
-    fi
-    local_port=$(printf '%s' "$local_port" | tr -d '[:space:]')
-    local_port=${local_port#relay-}
-    local_port=${local_port%.json}
-    [[ $local_port ]] || err "监听端口不能为空."
-    relay_cfg="relay-${local_port}.json"
-    relay_file="$is_conf_dir/$relay_cfg"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 ($relay_cfg)."
-
-    note_apply_cli "$relay_cfg" "${@:2}"
-}
-
-relay_menu_has_entries() {
-    local files
-    shopt -s nullglob
-    files=("$is_conf_dir"/relay-*.json)
-    shopt -u nullglob
-    ((${#files[@]} > 0))
-}
-
-relay_menu_empty_state() {
-    relay_menu_has_entries && return 1
-    relay_list
-    menu_pause
-    return 0
-}
-
-relay_menu() {
-    local choice_status
-    while :; do
-        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "备注" "删除"
-        choice_status=$?
-        [[ $choice_status == 2 ]] && return
-        [[ $choice_status == 0 ]] || return 1
-        case $REPLY in
-        1)
-            menu_action relay_add
-            ;;
-        2)
-            menu_action relay_list
-            ;;
-        3)
-            relay_menu_empty_state && continue
-            menu_action relay_info
-            ;;
-        4)
-            relay_menu_empty_state && continue
-            menu_action relay_note
-            ;;
-        5)
-            relay_menu_empty_state && continue
-            menu_action relay_delete
-            ;;
-        esac
-    done
-}
-
-relay_main() {
-    case ${1:-} in
-    add)
-        relay_add "${@:2}"
-        ;;
-    list)
-        relay_list
-        ;;
-    info)
-        relay_info "${@:2}"
-        ;;
-    note)
-        relay_note "${@:2}"
-        ;;
-    del | delete | rm)
-        relay_delete "${@:2}"
-        ;;
-    "")
-        relay_menu
-        ;;
-    *)
-        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|note|delete]"
-        ;;
-    esac
-}
-
 # check prefer args, if not exist prefer args and show main menu
 main() {
+    require_root_for_system_exec || return 1
+    if [[ ${is_core_defer_modules:-0} == 1 ]]; then
+        case ${1:-} in
+        h | help | --help | v | ver | version | s | status | start | stop | r | restart | \
+        bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools | bbr | log)
+            ;;
+        *)
+            core_load_modules
+            ;;
+        esac
+    fi
     local fix_all_locked=
     [[ ! $1 ]] && {
         is_main_menu
@@ -6013,15 +2721,16 @@ main() {
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
         [[ $1 == 'no-auto-tls' ]] && is_no_auto_tls=1
-        add ${@:2}
+        add "${@:2}"
         ;;
     bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools)
         is_run_command=$1
         if [[ $1 == 'bin' ]]; then
-            $is_core_bin ${@:2}
+            "$is_core_bin" "${@:2}"
+        elif [[ $is_run_command == 'pbk' ]]; then
+            "$is_core_bin" generate reality-keypair "${@:2}"
         else
-            [[ $is_run_command == 'pbk' ]] && is_run_command="generate reality-keypair"
-            $is_core_bin $is_run_command ${@:2}
+            "$is_core_bin" "$is_run_command" "${@:2}"
         fi
         ;;
     bbr)
@@ -6039,20 +2748,20 @@ main() {
     #     create client $2
     #     ;;
     d | del | rm)
-        del $2
+        del "$2"
         ;;
     dd | ddel | fix | fix-all)
         case $1 in
         fix)
             [[ $2 ]] && {
-                change $2 full
+                change "$2" full
             } || {
                 is_change_id=full && change
             }
             return
             ;;
         fix-all)
-            shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+            shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
             fix_all_locked=1
             is_dont_auto_exit=1
             msg
@@ -6069,32 +2778,40 @@ main() {
             ;;
         *)
             is_dont_auto_exit=1
-            [[ ! $2 ]] && {
+            if [[ ! $2 ]]; then
+                is_dont_auto_exit=
                 err "无法找到需要删除的参数"
-            } || {
-                for v in ${@:2}; do
-                    del $v
-                done
-            }
+                return 1
+            fi
+            local del_ok=0
+            for v in "${@:2}"; do
+                if del "$v"; then
+                    del_ok=1
+                fi
+            done
+            if ((del_ok == 0)); then
+                is_dont_auto_exit=
+                return 1
+            fi
             ;;
         esac
         is_dont_auto_exit=
         if [[ $fix_all_locked ]]; then
-            manage restart
-            [[ $is_del_host ]] && manage restart caddy
             shared_config_unlock
-        else
-            manage restart &
-            [[ $is_del_host ]] && manage restart caddy &
         fi
+        manage_restart_checked "" "配置操作已保存" || return 1
+        if [[ $is_del_host ]]; then
+            manage_restart_checked caddy "Caddy 配置已更新" || return 1
+        fi
+        return 0
         ;;
     dns)
         load dns.sh
-        dns_set ${@:2}
+        dns_set "${@:2}"
         ;;
     debug)
         is_debug=1
-        get info $2
+        get info "$2"
         warn "如果需要复制; 请把 *uuid, *password, *host, *key 的值改写, 以避免泄露."
         ;;
     fix-config.json)
@@ -6102,34 +2819,35 @@ main() {
         create config.json
         ;;
     __post-update)
-        migrate_runtime_config || err "更新后配置迁移失败: ${runtime_sync_error:-未知错误}"
+        migrate_runtime_config || { err "更新后配置迁移失败: ${runtime_sync_error:-未知错误}"; return 1; }
         ;;
     fix-caddyfile)
         if [[ $is_caddy ]]; then
             load caddy.sh
             caddy_config new
-            manage restart caddy &
+            manage_restart_checked caddy "Caddyfile 已更新" || return 1
             _green "\nfix 完成.\n"
         else
             err "无法执行此操作"
+            return 1
         fi
         ;;
     i | info)
-        info $2
+        info "$2"
         ;;
     ip)
         get_ip
-        msg $ip
+        msg "$ip"
         ;;
     in | import)
         load import.sh
         ;;
     log)
         load log.sh
-        log_set $2
+        log_set "${@:2}"
         ;;
     url | qr)
-        url_qr $@
+        url_qr "$@"
         ;;
     un | uninstall)
         uninstall
@@ -6142,37 +2860,41 @@ main() {
             is_update_name=sh
             is_update_ver=
         }
-        update $is_update_name $is_update_ver
+        update "$is_update_name" ${is_update_ver:+"$is_update_ver"}
         ;;
     ssss | ss2022)
-        get $@
+        get "$@"
         ;;
     s | status)
+        [[ ${is_core_ver:-} ]] || init_core_ver
         core_status_read
         msg "\n$is_core_name $is_core_ver: $is_core_status\n"
-        [[ $is_caddy ]] && msg "Caddy $is_caddy_ver: $is_caddy_status\n"
+        if [[ $is_caddy ]]; then
+            msg "Caddy $is_caddy_ver: $is_caddy_status\n"
+        fi
         ;;
     start | stop | r | restart)
-        [[ $2 && $2 != 'caddy' ]] && err "无法识别 ($2), 请使用: $is_core $1 [caddy]"
+        [[ $2 && $2 != 'caddy' ]] && { err "无法识别 ($2), 请使用: $is_core $1 [caddy]"; return 1; }
         service_action_result "$1" "$2"
         ;;
     reinstall)
-        get $1
+        get "$1"
         ;;
     get-port)
         get_port
-        msg $tmp_port
+        msg "$tmp_port"
         ;;
     main)
         is_main_menu
         ;;
     v | ver | version)
-        [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy $is_caddy_ver)"
-        msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_script_name script $is_sh_ver) $is_caddy_ver\n"
+        [[ ${is_core_ver:-} ]] || init_core_ver
+        [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy "$is_caddy_ver")"
+        msg "\n$(_green "$is_core_name" "$is_core_ver") / $(_cyan "$is_script_name" script "$is_sh_ver") $is_caddy_ver\n"
         ;;
     h | help | --help)
         load help.sh
-        show_help ${@:2}
+        show_help "${@:2}"
         ;;
     relay)
         relay_main "${@:2}"
@@ -6190,6 +2912,7 @@ main() {
             }
         else
             err "无法识别 ($1), 获取帮助请使用: $is_core help"
+            return 1
         fi
         ;;
     esac

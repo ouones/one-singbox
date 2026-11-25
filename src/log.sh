@@ -27,7 +27,8 @@ log_usage_read() {
 
 # Copy/truncate keeps the core's open log descriptors usable without restarting it.
 log_limit_check() {
-    local limit=$(($(log_limit_read) * 1048576)) total=0 file size tmp keep
+    local limit total=0 file size tmp keep
+    limit=$(($(log_limit_read) * 1048576))
     local files=()
     for file in "$is_log_dir"/*.log "$is_log_dir"/*.log.1; do
         [[ -f $file && ! -L $file ]] || continue
@@ -125,7 +126,12 @@ log_limit_init() {
         log_limit_service
         return $?
     fi
-    echo 200 >"$is_core_dir/log-limit-mb" || return 1
+    local tmp
+    tmp=$(mktemp "$is_core_dir/.log-limit-mb.XXXXXX") || return 1
+    if ! printf '200\n' >"$tmp" || ! mv -f "$tmp" "$is_core_dir/log-limit-mb"; then
+        rm -f "$tmp"
+        return 1
+    fi
     if ! log_limit_service; then
         rm -f "$is_core_dir/log-limit-mb"
         return 1
@@ -133,7 +139,8 @@ log_limit_init() {
 }
 
 log_limit_set() {
-    local current=$(log_limit_read) value
+    local current value
+    current=$(log_limit_read)
     msg "\n当前日志占用上限: $current MB (默认上限 200 MB)"
     while :; do
         msg "输入日志上限 (大于 0 的整数，单位 MB；回车保留当前值):"
@@ -144,7 +151,12 @@ log_limit_set() {
         fi
         msg "输入无效，请输入大于 0 的整数 (单位 MB)."
     done
-    echo "$value" >"$is_core_dir/log-limit-mb" || return 1
+    local tmp
+    tmp=$(mktemp "$is_core_dir/.log-limit-mb.XXXXXX") || return 1
+    if ! printf '%s\n' "$value" >"$tmp" || ! mv -f "$tmp" "$is_core_dir/log-limit-mb"; then
+        rm -f "$tmp"
+        return 1
+    fi
     # Stop the worker before the immediate check to avoid concurrent rotation.
     if [[ $is_systemd && -f /lib/systemd/system/$is_core-log-limit.service ]]; then
         systemctl stop "$is_core-log-limit" || return 1
@@ -198,35 +210,66 @@ interactive_log_tail() {
 
 log_set() {
     if [[ $1 ]]; then
-        for v in ${is_log_level_list[@]}; do
-            [[ $(grep -E -i "^${1,,}$" <<<$v) ]] && is_log_level_use=$v && break
+        local v is_log_level_use= config_lock= tmp_config= log_output=
+        for v in "${is_log_level_list[@]}"; do
+            if [[ $v == "${1,,}" ]]; then
+                is_log_level_use=$v
+                break
+            fi
         done
-        [[ ! $is_log_level_use ]] && {
-            err "无法识别 log 参数: $@ \n请使用 $is_core log [${is_log_level_list[@]}] 进行相关设定.\n备注: del 参数仅临时删除 log 文件; none 参数将不会生成 log 文件."
-        }
-        local config_lock=
+        if [[ ! $is_log_level_use ]]; then
+            err "无法识别 log 参数: $* \n请使用 $is_core log [${is_log_level_list[*]}] 进行相关设定.\n备注: del 参数仅临时删除 log 文件; none 参数将不会生成 log 文件."
+            return 1
+        fi
         if [[ $is_log_level_use != del ]]; then
-            shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+            shared_config_lock || {
+                err "${shared_config_error:-无法获取公共配置锁}"
+                return 1
+            }
             config_lock=1
+            tmp_config=$(mktemp "$is_config_json.log.XXXXXX") || {
+                shared_config_unlock
+                err "无法创建日志临时配置文件"
+                return 1
+            }
         fi
         case $is_log_level_use in
         del)
-            rm -rf $is_log_dir/*.log $is_log_dir/*.log.1
-            msg "\n $(_green 已临时删除 log 文件, 如果你想要完全禁止生成 log 文件请使用: $is_core log none)\n"
+            rm -rf "$is_log_dir"/*.log "$is_log_dir"/*.log.1
+            msg "\n $(_green "已临时删除 log 文件, 如果你想要完全禁止生成 log 文件请使用: $is_core log none")\n"
             ;;
-        none)
-            rm -rf $is_log_dir/*.log $is_log_dir/*.log.1
-            cat <<<$(jq '.log={"disabled":true}' $is_config_json) >$is_config_json
-            ;;
-        *)
-            cat <<<$(jq '.log={output:"/var/log/'$is_core'/access.log",level:"'$is_log_level_use'","timestamp":true}' $is_config_json) >$is_config_json
+        none | *)
+            if [[ $is_log_level_use == none ]]; then
+                jq '.log = {"disabled": true}' "$is_config_json" >"$tmp_config"
+            else
+                log_output="${is_log_dir:-/var/log/${is_core:-sing-box}}/access.log"
+                jq --arg output "$log_output" --arg level "$is_log_level_use" '.log = {output: $output, level: $level, timestamp: true}' "$is_config_json" >"$tmp_config"
+            fi
+            if [[ $? -ne 0 || ! -s $tmp_config ]] || ! jq -e 'type == "object" and (.log | type == "object")' "$tmp_config" >/dev/null 2>&1; then
+                rm -f "$tmp_config"
+                shared_config_unlock
+                err "无法生成日志配置"
+                return 1
+            fi
+            if ! mv -f "$tmp_config" "$is_config_json"; then
+                rm -f "$tmp_config"
+                shared_config_unlock
+                err "无法写入日志配置"
+                return 1
+            fi
+            [[ $is_log_level_use == none ]] && rm -rf "$is_log_dir"/*.log "$is_log_dir"/*.log.1
             ;;
         esac
 
         [[ $config_lock ]] && shared_config_unlock
 
-        manage restart &
-        [[ $1 != 'del' ]] && msg "\n已更新 Log 设定为: $(_green $is_log_level_use)\n"
+        if [[ $is_log_level_use == del ]]; then
+            manage_restart_checked "" "日志已清理" || return 1
+        else
+            manage_restart_checked "" "日志配置已更新" || return 1
+            msg "\n已更新 Log 设定为: $(_green "$is_log_level_use")\n"
+        fi
+        return 0
     else
         if [[ -f $is_log_dir/access.log ]]; then
             if [[ $is_terminal_log_view ]]; then
@@ -245,7 +288,7 @@ log_set() {
                 return "$status"
             else
                 msg "\n 按 $(_green Ctrl+C) 退出\n"
-                tail -f $is_log_dir/access.log
+                tail -f "$is_log_dir/access.log"
             fi
         else
             if [[ $is_terminal_log_view ]]; then

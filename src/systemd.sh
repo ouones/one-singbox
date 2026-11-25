@@ -1,20 +1,20 @@
 # detect init system
-is_systemd=$(type -P systemctl)
-is_openrc=$(type -P rc-service)
+[[ ${is_systemd+x} ]] || is_systemd=$(type -P systemctl)
+[[ ${is_openrc+x} ]] || is_openrc=$(type -P rc-service)
 
 install_service() {
     if [[ $is_systemd ]]; then
-        install_service_systemd $1
+        install_service_systemd "$1"
     elif [[ $is_openrc ]]; then
-        install_service_openrc $1
+        install_service_openrc "$1"
     fi
 }
 
 install_service_systemd() {
     case $1 in
-    $is_core)
+    "$is_core")
         is_doc_site=https://sing-box.sagernet.org/
-        cat >/lib/systemd/system/$is_core.service <<<"
+        cat >"/lib/systemd/system/$is_core.service" <<<"
 [Unit]
 Description=$is_core_name Service
 Documentation=$is_doc_site
@@ -65,14 +65,14 @@ WantedBy=multi-user.target"
     esac
 
     # enable, reload
-    systemctl enable $1
+    systemctl enable "$1"
     systemctl daemon-reload
 }
 
 install_service_openrc() {
     case $1 in
-    $is_core)
-        cat >/etc/init.d/$is_core <<EOF
+    "$is_core")
+        cat >"/etc/init.d/$is_core" <<EOF
 #!/sbin/openrc-run
 
 name="$is_core_name"
@@ -92,7 +92,7 @@ depend() {
     after firewall
 }
 EOF
-        chmod +x /etc/init.d/$is_core
+        chmod +x "/etc/init.d/$is_core"
         ;;
     caddy)
         cat >/etc/init.d/caddy <<EOF
@@ -118,5 +118,5 @@ EOF
     esac
 
     # enable
-    rc-update add $1 default
+    rc-update add "$1" default
 }

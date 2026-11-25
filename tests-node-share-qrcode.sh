@@ -11,6 +11,10 @@ cleanup() {
       printf '%s\n' "--- $output_file ---"
       cat "$output_file"
     done
+    if [[ -f $workdir/fail.msg ]]; then
+      printf '%s\n' "--- failure ---"
+      cat "$workdir/fail.msg"
+    fi
   fi
   rm -rf "$workdir"
 }
@@ -46,17 +50,17 @@ printf '%s\n' "$*" >>"$QR_PACKAGE_LOG"
 FAKE_PACKAGE_MANAGER
 chmod +x "$workdir/bin/apt-get"
 fail() {
-  echo "FAIL: $1"
+  echo "FAIL: $1" | tee -a "$workdir/fail.msg"
   exit 1
 }
 
 run_core_case() {
   local core_file=$1 case_name=$2
-  CORE_FILE="$core_file" CASE_NAME="$case_name" CASE_DIR="$workdir/$case_name" QR_BIN="$workdir/bin" bash <<'CASE' || exit 1
+  FAIL_LOG="$workdir/fail.msg" CORE_FILE="$core_file" CASE_NAME="$case_name" CASE_DIR="$workdir/$case_name" QR_BIN="$workdir/bin" bash <<'CASE' || exit 1
 set -o pipefail
 
 fail() {
-  echo "FAIL(${CORE_FILE}): $1"
+  echo "FAIL(${CORE_FILE}): $1" | tee -a "$FAIL_LOG"
   exit 1
 }
 
@@ -101,6 +105,7 @@ type() {
 
 export PATH="$QR_BIN:$PATH"
 export QR_PACKAGE_LOG="$CASE_DIR/packages.log"
+is_sh_dir=$(cd "$(dirname "$CORE_FILE")/.." && pwd)
 source "$CORE_FILE"
 is_core_dir="$CASE_DIR/core"
 full_qr_cell='█'
@@ -329,9 +334,9 @@ run_core_case "$repo_root/src/core.sh" src || fail "src core QR tests failed"
 if qrencode_bin=$(command -v qrencode); then
   issue16_url='vless://00000000-0000-4000-8000-000000000000@203.0.113.10:40018?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome#TEST-NODE'
   qr_output=$("$qrencode_bin" -t UTF8 "$issue16_url") || fail "real qrencode failed to render the issue URL"
-  qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | wc -L)
+  qr_width=$(printf '%s\n' "$qr_output" | sed -e $'s/\033\\[[0-9;]*m//g' -e 's/█/x/g' -e 's/▀/x/g' -e 's/▄/x/g' | LC_ALL=C wc -L)
   qr_height=$(printf '%s\n' "$qr_output" | wc -l)
-  [[ $qr_width == 21 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
+  [[ $qr_width == 57 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
   echo "PASS: real qrencode UTF8 dimensions are ${qr_width} columns x ${qr_height} rows"
 
   real_qr_output=$(

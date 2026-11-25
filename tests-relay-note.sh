@@ -83,7 +83,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice1"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"
@@ -114,7 +114,7 @@ is_port_used() { [[ ${TEST_ACTIVE_PORT:-} == "$1" ]] && printf '%s\n' "$1"; }
 
 # 1. CLI 3-arg add must not prompt or block on open stdin pipe, and must omit note when unset.
 add_plain_out=$(timeout 2 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     is_config_json="$2/config.json"
@@ -167,7 +167,7 @@ grep -Fq '输入备注 (可选，直接回车跳过):' <<<"$skip_out" || fail "i
 
 # 6. Interactive add with silent open pipe after 3 inputs does not hang indefinitely (anti-hang guard).
 timeout 3 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     is_config_json="$2/config.json"
@@ -194,7 +194,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice2"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"
@@ -230,7 +230,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$REPO_DIR/src/core.sh")
+source "$REPO_DIR/src/core.sh"
 case_dir="$WORKDIR/slice3"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"
@@ -296,7 +296,7 @@ main relay note 12000 '二次备注' >/dev/null 2>&1 || fail "setup second note 
 # 5. Anti-hang guard on /dev/null and silent open pipe.
 main relay note 12000 '防挂死保留' >/dev/null 2>&1 || fail "setup anti-hang note failed"
 timeout 2 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     main relay note 12000 </dev/null
@@ -304,7 +304,7 @@ timeout 2 bash -c '
 [[ $(note_get relay-12000.json) == '防挂死保留' ]] || fail "/dev/null altered relay note"
 
 timeout 3 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     export ONE_SINGBOX_READ_TIMEOUT=0.2
@@ -347,12 +347,6 @@ grep -Fq 'relay [add|list|info|note|delete]' <<<"$unknown_out" || fail "relay us
 entry_root="$case_dir/entry"
 mkdir -p "$entry_root/etc/sing-box/sh/src" "$entry_root/etc/sing-box/bin" "$entry_root/etc/sing-box/conf" "$entry_root/var/log/sing-box" "$entry_root/usr/local/bin" "$entry_root/bin"
 cp -R "$REPO_DIR/src/." "$entry_root/etc/sing-box/sh/src/"
-sed -i \
-    -e '/EUID != 0/d' \
-    -e "s|^is_core_dir=/etc/|is_core_dir=$entry_root/etc/|" \
-    -e "s|^is_log_dir=/var/log/|is_log_dir=$entry_root/var/log/|" \
-    -e "s|^is_sh_bin=/usr/local/bin/|is_sh_bin=$entry_root/usr/local/bin/|" \
-    "$entry_root/etc/sing-box/sh/src/core.sh"
 sed -i \
     -e "s|^is_core_dir=/etc/|is_core_dir=$entry_root/etc/|" \
     -e "s|^is_log_dir=/var/log/|is_log_dir=$entry_root/var/log/|" \
@@ -399,7 +393,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice4"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"
@@ -509,7 +503,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice5"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"

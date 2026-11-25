@@ -179,7 +179,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"

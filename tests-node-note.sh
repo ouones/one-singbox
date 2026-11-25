@@ -79,7 +79,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice2"
 mkdir -p "$case_dir/core" "$case_dir/conf/.quan-meta"
 is_core_dir="$case_dir/core"
@@ -146,7 +146,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice3"
 mkdir -p "$case_dir/core" "$case_dir/conf/.quan-meta"
 is_core_dir="$case_dir/core"
@@ -252,7 +252,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir="$WORKDIR/slice4"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"
@@ -346,7 +346,7 @@ INPUT
 # 5. Non-TTY anti-hang guard: /dev/null and silent open pipe do not hang and keep note intact.
 note_set node-a.json '防挂死保留'
 timeout 2 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     export ip=203.0.113.10 is_dont_get_ip=1
@@ -357,7 +357,7 @@ timeout 2 bash -c '
 [[ $(note_get node-a.json) == '防挂死保留' ]] || fail "/dev/null altered note"
 
 timeout 3 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     export ip=203.0.113.10 is_dont_get_ip=1 ONE_SINGBOX_READ_TIMEOUT=0.2
@@ -383,7 +383,7 @@ fail() {
     exit 1
 }
 
-source <(sed '/EUID != 0/d' "$REPO_DIR/src/core.sh")
+source "$REPO_DIR/src/core.sh"
 case_dir="$WORKDIR/slice5"
 mkdir -p "$case_dir/core" "$case_dir/conf"
 is_core_dir="$case_dir/core"
@@ -487,12 +487,6 @@ entry_root="$case_dir/entry"
 mkdir -p "$entry_root/etc/sing-box/sh/src" "$entry_root/etc/sing-box/bin" "$entry_root/etc/sing-box/conf" "$entry_root/var/log/sing-box" "$entry_root/usr/local/bin" "$entry_root/bin"
 cp -R "$REPO_DIR/src/." "$entry_root/etc/sing-box/sh/src/"
 sed -i \
-    -e '/EUID != 0/d' \
-    -e "s|^is_core_dir=/etc/|is_core_dir=$entry_root/etc/|" \
-    -e "s|^is_log_dir=/var/log/|is_log_dir=$entry_root/var/log/|" \
-    -e "s|^is_sh_bin=/usr/local/bin/|is_sh_bin=$entry_root/usr/local/bin/|" \
-    "$entry_root/etc/sing-box/sh/src/core.sh"
-sed -i \
     -e "s|^is_core_dir=/etc/|is_core_dir=$entry_root/etc/|" \
     -e "s|^is_log_dir=/var/log/|is_log_dir=$entry_root/var/log/|" \
     -e "s|^is_sh_bin=/usr/local/bin/|is_sh_bin=$entry_root/usr/local/bin/|" \
@@ -571,7 +565,7 @@ case_dir="$WORKDIR/slice7"
 setup_lifecycle_test_bin "$case_dir"
 export PATH="$case_dir/bin:$PATH"
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -691,7 +685,7 @@ case_dir="$WORKDIR/slice8"
 setup_lifecycle_test_bin "$case_dir"
 export PATH="$case_dir/bin:$PATH"
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -707,7 +701,7 @@ printf '{"dns":{},"route":{"default_domain_resolver":"local"},"outbounds":[{"tag
 
 # 1. Non-interactive CLI add with silent open pipe neither prompts for note nor blocks stdin.
 cli_out=$(timeout 2 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     is_config_json="$2/config.json"
@@ -740,7 +734,7 @@ eof_out=$(is_main_start=1 add ss 31104 pass-eof aes-128-gcm <<<$'MyEofNode' 2>&1
 jq -e '.node_name == "MyEofNode" and .outbound_mode == "V4优先" and (has("note") | not)' "$is_conf_dir/.quan-meta/Shadowsocks-31104.json.meta.json" >/dev/null || fail "interactive add EOF wrote unexpected note"
 
 pipe_out=$(timeout 3 bash -c '
-    source <(sed "/EUID != 0/d" "$1")
+    source "$1"
     is_core_dir="$2/core"
     is_conf_dir="$2/conf"
     is_config_json="$2/config.json"
@@ -772,7 +766,7 @@ case_dir="$WORKDIR/slice9"
 setup_lifecycle_test_bin "$case_dir"
 export PATH="$case_dir/bin:$PATH"
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -889,7 +883,7 @@ case_dir="$WORKDIR/slice10"
 setup_lifecycle_test_bin "$case_dir"
 export PATH="$case_dir/bin:$PATH"
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -963,7 +957,7 @@ case_dir="$WORKDIR/slice11"
 setup_lifecycle_test_bin "$case_dir"
 export PATH="$case_dir/bin:$PATH"
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"

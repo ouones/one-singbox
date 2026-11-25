@@ -8,7 +8,8 @@ is_dns_list=(
     none
 )
 dns_set() {
-    local candidate_config is_interactive is_dns_use_bak dns_choice_status dns_impact
+    local candidate_config= is_interactive= is_dns_use_bak= dns_choice_status= dns_impact=
+    local is_dns_new= is_dns_type= config_locked=
     [[ ! $1 ]] && is_interactive=1
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
@@ -41,7 +42,8 @@ dns_set() {
             is_dns_use=none
             ;;
         *)
-            err "无法识别 DNS 参数: $@"
+            err "无法识别 DNS 参数: $*"
+            return 1
             ;;
         esac
     else
@@ -70,37 +72,61 @@ dns_set() {
         fi
         menu_system_impact "DNS 配置：$is_dns_use_bak" "$dns_impact" "是" : || return 1
     fi
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || err "无法创建 DNS 候选配置"
-    if [[ $is_dns_use == "none" ]]; then
-        jq '.|.dns={}|del(.route.default_domain_resolver)' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
-    else
-        if [[ $is_dns_new ]]; then
-            dns_set_server $is_dns_use
-            jq '.|.dns.servers=[{tag:"dns",type:"'$is_dns_type'",server:"'$is_dns_use'",domain_resolver:"local"},{tag:"local",type:"local"}]|.route.default_domain_resolver="dns"' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
-        else
-            jq '.dns.servers=[{address:"'$is_dns_use'",address_resolver:"local"},{tag:"local",address:"local"}]' "$is_config_json" >"$candidate_config" || { rm -f "$candidate_config"; err "无法生成 DNS 候选配置"; }
-        fi
+    if [[ $is_dns_use != "none" && $is_dns_new ]]; then
+        dns_set_server "$is_dns_use" || return 1
     fi
-    if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
+    shared_config_lock || {
+        err "${shared_config_error:-无法获取公共配置锁}"
+        return 1
+    }
+    config_locked=1
+    candidate_config=$(mktemp "$is_config_json.dns.XXXXXX") || {
+        shared_config_unlock
+        err "无法创建 DNS 候选配置"
+        return 1
+    }
+    if [[ $is_dns_use == "none" ]]; then
+        jq '. | .dns = {} | del(.route.default_domain_resolver)' "$is_config_json" >"$candidate_config"
+    elif [[ $is_dns_new ]]; then
+        jq --arg dns_type "$is_dns_type" --arg dns_server "$is_dns_use" \
+            '. | .dns.servers = [{tag: "dns", type: $dns_type, server: $dns_server, domain_resolver: "local"}, {tag: "local", type: "local"}] | .route.default_domain_resolver = "dns"' \
+            "$is_config_json" >"$candidate_config"
+    else
+        jq --arg dns_server "$is_dns_use" \
+            '.dns.servers = [{address: $dns_server, address_resolver: "local"}, {tag: "local", address: "local"}]' \
+            "$is_config_json" >"$candidate_config"
+    fi
+    if [[ $? -ne 0 || ! -s $candidate_config ]] || ! jq -e 'type == "object"' "$candidate_config" >/dev/null 2>&1; then
         rm -f "$candidate_config"
+        [[ $config_locked ]] && shared_config_unlock
+        err "无法生成 DNS 候选配置"
+        return 1
+    fi
+    if ! sync_runtime_node_outbound_modes_unlocked "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
+        rm -f "$candidate_config"
+        [[ $config_locked ]] && shared_config_unlock
         err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+        return 1
     fi
     rm -f "$candidate_config"
-    shared_config_unlock
-    manage restart &
-    msg "\n已更新 DNS 为: $(_green $is_dns_use_bak)\n"
+    [[ $config_locked ]] && shared_config_unlock
+    manage_restart_checked "" "DNS 配置已更新" || return 1
+    msg "\n已更新 DNS 为: $(_green "$is_dns_use_bak")\n"
 }
 dns_set_server() {
-    if [[ $(grep '://' <<<$1) ]]; then
-        is_tmp_dns_set=($(awk -F '://|/' '{print $1, $2}' <<<${1,,}))
-        case ${is_tmp_dns_set[0]} in
+    local input=${1,,} scheme host_rest
+    if [[ $input == *://* ]]; then
+        scheme=${input%%://*}
+        host_rest=${input#*://}
+        host_rest=${host_rest%%/*}
+        case $scheme in
         tcp | udp | tls | https | quic | h3)
-            is_dns_use=${is_tmp_dns_set[1]}
-            is_dns_type=${is_tmp_dns_set[0]}
+            is_dns_use=$host_rest
+            is_dns_type=$scheme
             ;;
         *)
             err "无法识别 DNS 类型!"
+            return 1
             ;;
         esac
     else

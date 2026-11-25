@@ -20,8 +20,9 @@ get_latest_version() {
     unset name url
 }
 download() {
+    [[ ${is_arch:-} ]] || init_arch_detect
     latest_ver=$2
-    [[ ! $latest_ver ]] && get_latest_version $1
+    [[ ! $latest_ver ]] && get_latest_version "$1"
     # tmp dir
     tmpdir=$(mktemp -d 2>/dev/null)
     [[ ! $tmpdir ]] && {
@@ -34,8 +35,8 @@ download() {
         tmpfile=$tmpdir/$is_core.tar.gz
         link="https://github.com/${is_core_repo}/releases/download/${latest_ver}/${is_core}-${latest_ver:1}-linux-${is_arch}.tar.gz"
         download_file
-        tar zxf $tmpfile --strip-components 1 -C $is_core_dir/bin
-        chmod +x $is_core_bin
+        tar zxf "$tmpfile" --strip-components 1 -C "$is_core_dir/bin"
+        chmod +x "$is_core_bin"
         ;;
     sh)
         name="$is_script_name 脚本"
@@ -46,8 +47,8 @@ download() {
             rm -rf "$tmpdir"
             err "目标脚本版本不支持更新后配置迁移，请选择包含该修复的新版本."
         fi
-        tar zxf $tmpfile -C $is_sh_dir
-        chmod +x $is_sh_bin ${is_sh_bin/$is_core/sb}
+        tar zxf "$tmpfile" -C "$is_sh_dir"
+        chmod +x "$is_sh_bin" "${is_sh_bin/$is_core/sb}"
         ;;
     caddy)
         name="Caddy"
@@ -55,17 +56,17 @@ download() {
         # https://github.com/caddyserver/caddy/releases/download/v2.6.4/caddy_2.6.4_linux_amd64.tar.gz
         link="https://github.com/${is_caddy_repo}/releases/download/${latest_ver}/caddy_${latest_ver:1}_linux_${is_arch}.tar.gz"
         download_file
-        tar zxf $tmpfile -C $tmpdir
-        cp -f $tmpdir/caddy $is_caddy_bin
-        chmod +x $is_caddy_bin
+        tar zxf "$tmpfile" -C "$tmpdir"
+        cp -f "$tmpdir/caddy" "$is_caddy_bin"
+        chmod +x "$is_caddy_bin"
         ;;
     esac
-    rm -rf $tmpdir
+    rm -rf "$tmpdir"
     unset latest_ver
 }
 download_file() {
-    if ! _wget -t 5 -c $link -O $tmpfile; then
-        rm -rf $tmpdir
+    if ! _wget -t 5 -c "$link" -O "$tmpfile"; then
+        rm -rf "$tmpdir"
         err "\n下载 ${name} 失败.\n"
     fi
 }

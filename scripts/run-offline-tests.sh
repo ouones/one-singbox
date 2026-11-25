@@ -15,7 +15,7 @@ Options:
   --reuse-id <id>     With --copy-to-tmp, reuse /tmp/one-singbox-work-<id>
   --clean-reuse <id>  Remove /tmp/one-singbox-work-<id> and exit
   --jobs <N>          Parallel test workers (default: 1)
-  --static-only       Run static checks (CRLF, bash -n, blocking read) only
+  --static-only       Run static checks (CRLF, bash -n, blocking read, shellcheck) only
   --no-static         Skip static checks
   -h, --help          Show this help
 EOF
@@ -240,7 +240,25 @@ run_static_checks() {
         fi
     fi
 
-    echo "STATIC OK: ${#shell_files[@]} *.sh files passed (LF, bash -n, non-blocking read)"
+    local sc_targets=()
+    for candidate in sing-box.sh install.sh src/*.sh; do
+        [[ -f $candidate ]] && sc_targets+=("$candidate")
+    done
+
+    local shellcheck_status="shellcheck skipped: not installed"
+    if command -v shellcheck >/dev/null 2>&1; then
+        if ((${#sc_targets[@]} > 0)); then
+            if ! shellcheck -s bash --include=SC2086,SC2155,SC2164,SC2046,SC2145,SC2068 "${sc_targets[@]}"; then
+                echo "STATIC FAIL: shellcheck high-severity check failed" >&2
+                return 1
+            fi
+        fi
+        shellcheck_status="shellcheck"
+    else
+        echo "STATIC WARN: shellcheck not found in PATH; skipping shellcheck static check (install shellcheck for full local parity)" >&2
+    fi
+
+    echo "STATIC OK: ${#shell_files[@]} *.sh files passed (LF, bash -n, non-blocking read, $shellcheck_status)"
 }
 
 if ((no_static == 0)); then

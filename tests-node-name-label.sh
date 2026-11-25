@@ -9,7 +9,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-source <(sed '/EUID != 0/d' "$repo_root/src/core.sh")
+source "$repo_root/src/core.sh"
 is_core_dir="$workdir/core"
 manage() { :; }
 mkdir -p "$workdir/bin"

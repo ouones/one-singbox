@@ -11,6 +11,7 @@ RUN apt-get update -qq \
         jq \
         openssl \
         procps \
+        shellcheck \
         uuid-runtime \
     && rm -rf /var/lib/apt/lists/*
 
