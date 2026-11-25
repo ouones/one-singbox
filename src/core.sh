@@ -1187,20 +1187,20 @@ block_cn_clean_all_legacy_inbounds() {
 
 block_cn_load_whitelist_rules() {
     local file=${1:-${is_core_dir:-/etc/sing-box}/.cn-whitelist.json}
-    if [[ -f $file ]] && jq -e . "$file" >/dev/null 2>&1; then
-        jq -c '
-            if type == "array" then
-                .
-            elif type == "object" then
-                [.]
-            else
-                []
-            end
-            | map(select(type == "object" and (((.domain // []) + (.domain_suffix // [])) | length > 0)))
-        ' "$file" 2>/dev/null || echo "[]"
-    else
+    [[ -f $file ]] || {
         echo "[]"
-    fi
+        return 0
+    }
+    jq -ec '
+        if type == "array" then
+            .
+        elif type == "object" then
+            [.]
+        else
+            []
+        end
+        | map(select(type == "object" and (((.domain // []) + (.domain_suffix // [])) | length > 0)))
+    ' "$file" 2>/dev/null || echo "[]"
 }
 
 block_cn_sync_whitelist() {
@@ -1323,153 +1323,289 @@ block_cn_cli() {
     msg "屏蔽回国流量: $(block_cn_status_text)"
 }
 
+_collect_managed_node_files() {
+    local config_dir=$1 override_cfg=$2 override_meta=$3
+    local -n _out_node_files=$4
+    local -n _out_node_cfgs=$5
+    local -n _out_meta_files=$6
+    local -n _out_meta_unique=$7
+    local file cfg meta_path nullglob_was_set=0
+    local -A seen_meta=()
+
+    _out_node_files=()
+    _out_node_cfgs=()
+    _out_meta_files=()
+    _out_meta_unique=()
+    [[ -d $config_dir ]] || return 0
+
+    shopt -q nullglob && nullglob_was_set=1
+    shopt -s nullglob
+    for file in "$config_dir"/*.json; do
+        [[ -f $file ]] || continue
+        cfg=${file##*/}
+        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
+        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
+        [[ $override_cfg && $cfg == "$override_cfg" ]] && meta_path=$override_meta
+        _out_node_files+=("$file")
+        _out_node_cfgs+=("$cfg")
+        _out_meta_files+=("$meta_path")
+        if [[ $meta_path && -f $meta_path && ! ${seen_meta[$meta_path]+exists} ]]; then
+            seen_meta[$meta_path]=1
+            _out_meta_unique+=("$meta_path")
+        fi
+    done
+    (( nullglob_was_set )) || shopt -u nullglob
+}
+
+_render_locate_node_or_meta_error() {
+    local -n _err_node_files=$1
+    local -n _err_node_cfgs=$2
+    local -n _err_meta_files=$3
+    local i file cfg meta_path
+    for i in "${!_err_node_files[@]}"; do
+        file=${_err_node_files[i]}
+        cfg=${_err_node_cfgs[i]}
+        meta_path=${_err_meta_files[i]}
+        if [[ -f $meta_path ]]; then
+            jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
+                runtime_sync_error="节点元数据格式无效: $cfg"
+                return 1
+            }
+            jq -r '.outbound_mode // empty' "$meta_path" >/dev/null 2>&1 || {
+                runtime_sync_error="无法读取节点出站方式: $cfg"
+                return 1
+            }
+        fi
+        if [[ -s $file ]]; then
+            jq -ce '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file" >/dev/null 2>&1 || {
+                runtime_sync_error="无法读取节点入站 tag: $cfg"
+                return 1
+            }
+        fi
+    done
+    runtime_sync_error="读取节点配置或元数据失败"
+    return 1
+}
+
 render_runtime_node_outbound_modes() {
     local source_config=$1 output=$2 override_cfg=${3:-} override_meta=${4:-} config_dir=${5:-$is_conf_dir}
-    local resolver file cfg mode outbound meta_path tags config_type tag config server
-    local -A used_proxy_tags=()
+    local resolver file cfg mode outbound meta_path tags config_type server add_resolver status method password
+    local core_dir=${is_core_dir:-/etc/sing-box}
     local block_cn_enabled=false
     local cached_whitelist="[]"
-    local core_dir=${is_core_dir:-/etc/sing-box}
+    local has_direct_nodes=false
+    local node_specs_jsonl=""
+    local proxy_specs_jsonl=""
+    local -a node_files=() node_cfgs=() meta_files=() meta_unique_files=()
+    local -a node_fields=() meta_fields=()
+    local -A used_proxy_tags=()
+    local -A node_tags_by_file=() node_seen_count=()
+    local -A meta_status_by_file=() meta_mode_by_file=() meta_has_mode_by_file=()
+    local -A meta_type_by_file=() meta_server_by_file=() meta_method_by_file=() meta_password_by_file=() meta_cfg_by_file=() meta_seen_count=()
+    local i batch_ok=1
+
+    runtime_sync_error=
+    [[ -f $source_config && $output ]] || {
+        runtime_sync_error="公共配置文件不存在"
+        return 1
+    }
+    resolver=$(jq -er '
+        if (type == "object" and ((.outbounds // []) | type == "array") and ((.route // {}) | type == "object") and ((.route.rules // []) | type == "array")) then
+            if (.route.default_domain_resolver | type) == "string" then .route.default_domain_resolver
+            elif (.route.default_domain_resolver | type) == "object" then (.route.default_domain_resolver.server // "local")
+            else "local"
+            end
+        else
+            error("invalid_source_config")
+        end
+    ' "$source_config" 2>/dev/null) || {
+        runtime_sync_error="公共配置格式无效"
+        return 1
+    }
+    [[ $resolver ]] || resolver=local
+
     if [[ -f $core_dir/.cn-whitelist.json ]]; then
         cached_whitelist=$(block_cn_load_whitelist_rules "$core_dir/.cn-whitelist.json")
     fi
     if block_cn_is_enabled; then
         block_cn_enabled=true
     fi
-    runtime_sync_error=
-    [[ -f $source_config && $output ]] || {
-        runtime_sync_error="公共配置文件不存在"
-        return 1
-    }
-    jq -e 'type == "object" and ((.outbounds // []) | type == "array") and ((.route // {}) | type == "object") and ((.route.rules // []) | type == "array")' "$source_config" >/dev/null 2>&1 || {
-        runtime_sync_error="公共配置格式无效"
-        return 1
-    }
-    resolver=$(runtime_domain_resolver_tag "$source_config") || {
-        runtime_sync_error="无法读取上游域名解析器"
-        return 1
-    }
-    [[ $resolver ]] || resolver=local
-    local has_direct_nodes=false
-    local proxy_outbounds='[]'
-    local managed_inbounds='[]'
-    local managed_node_rules='[]'
-    local node_rules
 
-    for file in "$config_dir"/*.json; do
-        [[ -f $file ]] || continue
-        cfg=${file##*/}
-        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
-        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
-        [[ $cfg == "$override_cfg" ]] && meta_path=$override_meta
-        mode=
-        if [[ -f $meta_path ]]; then
-            jq -e 'type == "object"' "$meta_path" >/dev/null 2>&1 || {
-                runtime_sync_error="节点元数据格式无效: $cfg"
-                return 1
-            }
-            mode=$(jq -r '.outbound_mode // empty' "$meta_path") || {
-                runtime_sync_error="无法读取节点出站方式: $cfg"
-                return 1
-            }
-        fi
-        [[ $mode ]] || mode="V4优先"
-        tags=$(jq -c '[.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)]' "$file") || {
-            runtime_sync_error="无法读取节点入站 tag: $cfg"
-            return 1
-        }
-        if [[ $(jq -r 'length' <<<"$tags") -eq 0 ]]; then
-            if [[ -f $meta_path ]] && jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
-                runtime_sync_error="节点没有可路由的入站 tag: $cfg"
-                return 1
-            fi
-            continue
-        fi
+    _collect_managed_node_files "$config_dir" "$override_cfg" "$override_meta" node_files node_cfgs meta_files meta_unique_files
 
-        outbound=$(outbound_mode_to_direct_tag "$mode")
-        if [[ $outbound ]]; then
-            has_direct_nodes=true
-        elif [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
-            outbound_proxy_from_metadata "$cfg" "$meta_path" || {
-                runtime_sync_error="节点代理配置无效: $cfg"
-                return 1
-            }
-            [[ $outbound_proxy_json ]] || {
-                runtime_sync_error="节点代理配置缺失: $cfg"
-                return 1
-            }
-            config_type=$(jq -r '.config.type' <<<"$outbound_proxy_json")
-            if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
-                outbound=$(runtime_node_ss_outbound_tag "$cfg")
-            elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
-                outbound=$(runtime_node_vless_outbound_tag "$cfg")
-            else
-                runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
-                return 1
-            fi
-            [[ ! ${used_proxy_tags[$outbound]+exists} ]] || {
-                runtime_sync_error="受管出站 tag 冲突: $outbound"
-                return 1
-            }
-            used_proxy_tags[$outbound]=$cfg
-            server=$(jq -r '.config.server' <<<"$outbound_proxy_json")
-            if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
-                config=$(jq -c --arg tag "$outbound" --arg resolver "$resolver" '.config + {tag:$tag,domain_resolver:{server:$resolver}}' <<<"$outbound_proxy_json") || {
-                    runtime_sync_error="生成代理出站失败: $cfg"
-                    return 1
-                }
-            else
-                config=$(jq -c --arg tag "$outbound" '.config + {tag:$tag}' <<<"$outbound_proxy_json") || {
-                    runtime_sync_error="生成代理出站失败: $cfg"
-                    return 1
-                }
-            fi
-            proxy_outbounds=$(jq -c --argjson config "$config" '. + [$config]' <<<"$proxy_outbounds") || {
-                runtime_sync_error="生成代理出站列表失败"
-                return 1
-            }
-        else
-            continue
-        fi
+    if (( ${#node_files[@]} > 0 )); then
+        mapfile -d '' -t node_fields < <(jq -j '
+            [input_filename, ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | tojson)]
+            | .[0], "\u0000", .[1], "\u0000"
+        ' "${node_files[@]}" 2>/dev/null)
+        wait "$!" || batch_ok=0
 
-        node_rules=$(jq -n -c --argjson inbound "$tags" --arg outbound "$outbound" --argjson block_cn "$block_cn_enabled" --argjson whitelist "$cached_whitelist" '
-            (if $block_cn and ($whitelist | length > 0) then
-                $whitelist | map(
-                    if type == "object" then
-                        . + {inbound: $inbound, action: (.action // "route"), outbound: $outbound}
+        if (( batch_ok == 1 )); then
+            for ((i = 0; i + 1 < ${#node_fields[@]}; i += 2)); do
+                file=${node_fields[i]}
+                node_tags_by_file[$file]=${node_fields[i + 1]}
+                node_seen_count[$file]=$(( ${node_seen_count[$file]:-0} + 1 ))
+            done
+            for file in "${node_files[@]}"; do
+                if [[ ! -s $file ]]; then
+                    if (( ${node_seen_count[$file]:-0} == 0 )); then
+                        node_tags_by_file[$file]="[]"
+                        node_seen_count[$file]=1
                     else
-                        empty
-                    end
-                )
-            else
-                []
-            end) as $wl
-            | (if $block_cn then
-                [
-                    {inbound: $inbound, ip_is_private: true, action: "reject"},
-                    {inbound: $inbound, rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
-                ]
-            else
-                []
-            end) as $blk
-            | (
-                [{inbound: $inbound, action: "route", outbound: $outbound}]
-            ) as $rt
-            | $wl + $blk + $rt
-        ') || {
-            runtime_sync_error="生成节点规则块失败: $cfg"
-            return 1
-        }
+                        batch_ok=0
+                        break
+                    fi
+                elif (( ${node_seen_count[$file]:-0} != 1 )); then
+                    batch_ok=0
+                    break
+                fi
+            done
+        fi
 
-        managed_node_rules=$(jq -c --argjson rules "$node_rules" '. + $rules' <<<"$managed_node_rules") || {
-            runtime_sync_error="合并节点规则块失败: $cfg"
-            return 1
-        }
-        managed_inbounds=$(jq -c --argjson tags "$tags" '. + $tags' <<<"$managed_inbounds")
-    done
-    managed_inbounds=$(jq -c 'unique' <<<"$managed_inbounds")
+        if (( batch_ok == 1 && ${#meta_unique_files[@]} > 0 )); then
+            mapfile -d '' -t meta_fields < <(jq -j '
+                if type != "object" then error("not object") else . end
+                | (if .outbound_mode == null or .outbound_mode == false then "" elif (.outbound_mode | type == "string") then .outbound_mode else (.outbound_mode | tojson) end) as $mode
+                | (if has("outbound_mode") and (.outbound_mode | type == "string" and length > 0) then "1" else "0" end) as $has_mode
+                | if has("outbound_proxy") then
+                    .outbound_proxy as $op
+                    | if ($op | type == "object")
+                        and ($op.name | type == "string")
+                        and ($op.config | type == "object")
+                        and ($op.config.type == "shadowsocks" or $op.config.type == "vless")
+                        and ($op.config.server | type == "string" and length > 0)
+                        and ($op.config.server_port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+                        and (($op.config | has("tag") or has("detour")) | not)
+                        and ($op.config.type != "shadowsocks" or
+                            (($op.config.method | type == "string" and length > 0)
+                             and ($op.config.password | type == "string" and length > 0)))
+                        and ($op.config.type != "vless" or
+                            ($op.config.uuid | type == "string" and length > 0))
+                      then
+                        [input_filename, "ok", $mode, $has_mode, $op.config.type, $op.config.server, "", "", ($op.config | tojson)]
+                      else
+                        [input_filename, "bad", $mode, $has_mode, "", "", "", "", ""]
+                      end
+                  elif $mode == "SS 出站" or has("outbound_ss_server") then
+                    (if .outbound_ss_server == null or .outbound_ss_server == false then "" else (.outbound_ss_server | tostring) end) as $server
+                    | (if .outbound_ss_port == null or .outbound_ss_port == false then "" else (.outbound_ss_port | tostring) end) as $port
+                    | (if .outbound_ss_method == null or .outbound_ss_method == false then "" else (.outbound_ss_method | tostring) end) as $method
+                    | (if .outbound_ss_password == null or .outbound_ss_password == false then "" else (.outbound_ss_password | tostring) end) as $password
+                    | if $server != "" and ($port | test("^0*[1-9][0-9]{0,4}$")) and $method != "" and $password != ""
+                        and (($port | tonumber) >= 1 and ($port | tonumber) <= 65535)
+                      then
+                        ({type:"shadowsocks",server:$server,server_port:($port | tonumber),method:$method,password:$password}) as $cfg
+                        | [input_filename, "legacy_candidate", $mode, $has_mode, "shadowsocks", $server, $method, $password, ($cfg | tojson)]
+                      else
+                        [input_filename, "bad", $mode, $has_mode, "", "", "", "", ""]
+                      end
+                  else
+                    [input_filename, "none", $mode, $has_mode, "", "", "", "", ""]
+                  end
+                | .[0], "\u0000", .[1], "\u0000", .[2], "\u0000", .[3], "\u0000", .[4], "\u0000", .[5], "\u0000", .[6], "\u0000", .[7], "\u0000", .[8], "\u0000"
+            ' "${meta_unique_files[@]}" 2>/dev/null)
+            wait "$!" || batch_ok=0
 
-    jq --arg resolver "$resolver" --argjson has_direct "$has_direct_nodes" --argjson proxy_outbounds "$proxy_outbounds" --argjson block_cn_enabled "$block_cn_enabled" --argjson managed_inbounds "$managed_inbounds" --argjson managed_node_rules "$managed_node_rules" --argjson cached_whitelist "$cached_whitelist" '
+            if (( batch_ok == 1 )); then
+                for ((i = 0; i + 8 < ${#meta_fields[@]}; i += 9)); do
+                    meta_path=${meta_fields[i]}
+                    meta_status_by_file[$meta_path]=${meta_fields[i + 1]}
+                    meta_mode_by_file[$meta_path]=${meta_fields[i + 2]}
+                    meta_has_mode_by_file[$meta_path]=${meta_fields[i + 3]}
+                    meta_type_by_file[$meta_path]=${meta_fields[i + 4]}
+                    meta_server_by_file[$meta_path]=${meta_fields[i + 5]}
+                    meta_method_by_file[$meta_path]=${meta_fields[i + 6]}
+                    meta_password_by_file[$meta_path]=${meta_fields[i + 7]}
+                    meta_cfg_by_file[$meta_path]=${meta_fields[i + 8]}
+                    meta_seen_count[$meta_path]=$(( ${meta_seen_count[$meta_path]:-0} + 1 ))
+                done
+                for meta_path in "${meta_unique_files[@]}"; do
+                    if (( ${meta_seen_count[$meta_path]:-0} != 1 )); then
+                        batch_ok=0
+                        break
+                    fi
+                done
+            fi
+        fi
+
+        if (( batch_ok == 0 )); then
+            _render_locate_node_or_meta_error node_files node_cfgs meta_files
+            return 1
+        fi
+
+        for i in "${!node_files[@]}"; do
+            file=${node_files[i]}
+            cfg=${node_cfgs[i]}
+            meta_path=${meta_files[i]}
+            tags=${node_tags_by_file[$file]}
+            if [[ $tags == "[]" ]]; then
+                if [[ -f $meta_path && ${meta_has_mode_by_file[$meta_path]:-0} == 1 ]]; then
+                    runtime_sync_error="节点没有可路由的入站 tag: $cfg"
+                    return 1
+                fi
+                continue
+            fi
+
+            mode=
+            [[ -f $meta_path ]] && mode=${meta_mode_by_file[$meta_path]:-}
+            [[ $mode ]] || mode="V4优先"
+
+            outbound=$(outbound_mode_to_direct_tag "$mode")
+            if [[ $outbound ]]; then
+                has_direct_nodes=true
+            elif [[ $mode == 'SS 出站' || $mode == 'VLESS 出站' ]]; then
+                [[ -f $meta_path ]] || {
+                    runtime_sync_error="节点代理配置缺失: $cfg"
+                    return 1
+                }
+                status=${meta_status_by_file[$meta_path]:-none}
+                case $status in
+                ok) ;;
+                legacy_candidate)
+                    method=${meta_method_by_file[$meta_path]:-}
+                    password=${meta_password_by_file[$meta_path]:-}
+                    if ! ss_method_supported "$method" || ! ss_password_valid_for_method "$method" "$password"; then
+                        runtime_sync_error="节点代理配置无效: $cfg"
+                        return 1
+                    fi
+                    ;;
+                *)
+                    runtime_sync_error="节点代理配置无效: $cfg"
+                    return 1
+                    ;;
+                esac
+
+                config_type=${meta_type_by_file[$meta_path]:-}
+                if [[ $mode == 'SS 出站' && $config_type == shadowsocks ]]; then
+                    outbound=$(runtime_node_ss_outbound_tag "$cfg")
+                elif [[ $mode == 'VLESS 出站' && $config_type == vless ]]; then
+                    outbound=$(runtime_node_vless_outbound_tag "$cfg")
+                else
+                    runtime_sync_error="节点代理协议与出站方式不一致: $cfg"
+                    return 1
+                fi
+
+                [[ ! ${used_proxy_tags[$outbound]+exists} ]] || {
+                    runtime_sync_error="受管出站 tag 冲突: $outbound"
+                    return 1
+                }
+                used_proxy_tags[$outbound]=$cfg
+
+                server=${meta_server_by_file[$meta_path]:-}
+                add_resolver=false
+                if ! is_valid_ipv4_addr "$server" && ! is_valid_ipv6_addr "$server"; then
+                    add_resolver=true
+                fi
+                proxy_specs_jsonl+='{"tag":"'"$outbound"'","add_resolver":'"$add_resolver"',"config":'"${meta_cfg_by_file[$meta_path]}"'}'$'\n'
+            else
+                continue
+            fi
+
+            node_specs_jsonl+='{"inbound":'"$tags"',"outbound":"'"$outbound"'"}'$'\n'
+        done
+    fi
+
+    jq --arg resolver "$resolver" --argjson has_direct "$has_direct_nodes" --argjson block_cn_enabled "$block_cn_enabled" --argjson cached_whitelist "$cached_whitelist" --slurpfile node_specs <(printf '%s' "$node_specs_jsonl") --slurpfile proxy_specs <(printf '%s' "$proxy_specs_jsonl") '
         def direct_managed_tags: ["direct_v6_pref","direct_v4_pref","direct_v4_only","direct_v6_only"];
         def is_managed_outbound_tag($tag):
             $tag == "block"
@@ -1478,7 +1614,7 @@ render_runtime_node_outbound_modes() {
         def is_managed_route_tag($tag):
             ((direct_managed_tags | index($tag)) != null)
             or ($tag | startswith("managed_node_ss_") or startswith("managed_node_vless_"));
-        def is_broad_direct_rule:
+        def is_broad_direct_rule($managed_inbounds):
             .outbound == "direct" and (
                 ((keys - ["action","outbound"]) | length) == 0
                 or (
@@ -1488,8 +1624,8 @@ render_runtime_node_outbound_modes() {
                     and (.inbound | any(.[]; . as $tag | ($managed_inbounds | index($tag)) != null))
                 )
             );
-        def is_managed_whitelist_rule:
-            (is_broad_direct_rule | not) and (
+        def is_managed_whitelist_rule($managed_inbounds):
+            (is_broad_direct_rule($managed_inbounds) | not) and (
                 . as $rule |
                 (
                     (($cached_whitelist // []) | any(
@@ -1531,7 +1667,7 @@ render_runtime_node_outbound_modes() {
         ];
         def is_managed_sniff_rule:
             .action == "sniff" and ((keys - ["action", "timeout", "inbound"]) | length) == 0;
-        def managed_sniff_rules:
+        def managed_sniff_rules($managed_inbounds):
             if ($managed_inbounds | length) > 0 then
                 [{action: "sniff", inbound: $managed_inbounds}]
             else
@@ -1542,7 +1678,34 @@ render_runtime_node_outbound_modes() {
         def managed_http_clients: [
             {tag: "direct-client"}
         ];
-        .dns = (.dns // {})
+        ($proxy_specs | map(
+            if .add_resolver then
+                .config + {tag: .tag, domain_resolver: {server: $resolver}}
+            else
+                .config + {tag: .tag}
+            end
+        )) as $proxy_outbounds
+        | ([$node_specs[] | .inbound[]] | unique) as $managed_inbounds
+        | (if $block_cn_enabled and ($cached_whitelist | length > 0) then
+            [$cached_whitelist[] | select(type == "object")]
+          else
+            []
+          end) as $valid_whitelist
+        | ([$node_specs[] | . as $n |
+            (
+                ($valid_whitelist | map(. + {inbound: $n.inbound, action: (.action // "route"), outbound: $n.outbound}))
+                + (if $block_cn_enabled then
+                    [
+                        {inbound: $n.inbound, ip_is_private: true, action: "reject"},
+                        {inbound: $n.inbound, rule_set: ["geosite-cn", "geoip-cn"], action: "reject"}
+                    ]
+                  else
+                    []
+                  end)
+                + [{inbound: $n.inbound, action: "route", outbound: $n.outbound}]
+            )[]
+        ]) as $managed_node_rules
+        | .dns = (.dns // {})
         | if (($has_direct or (($proxy_outbounds | length) > 0)) and $resolver == "local") then
             .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end)
             | if any(.dns.servers[]?; .tag == "local") then . else .dns.servers += [{tag:"local",type:"local"}] end
@@ -1579,14 +1742,14 @@ render_runtime_node_outbound_modes() {
                 del(.route.rule_set)
             else . end
           end
-        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule or is_managed_sniff_rule) | not)))) as $existing_rules
+        | (.route.rules // [] | map(select((((( .outbound // "") as $tag | is_managed_route_tag($tag)) or is_managed_block_rule or is_managed_whitelist_rule($managed_inbounds) or is_managed_sniff_rule) | not)))) as $existing_rules
         | .outbounds = ((.outbounds // []) | map(select((((.tag // "") as $tag | is_managed_outbound_tag($tag)) | not))))
         | if $has_direct then .outbounds += managed_direct_outbounds($resolver) else . end
         | .outbounds += $proxy_outbounds
         | .route.rules = (
-            (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules end) as $sniff_rules
-            | ([$existing_rules[] | select(is_broad_direct_rule)]) as $fallback_rules
-            | ([$existing_rules[] | select(is_broad_direct_rule | not)]) as $custom_rules
+            (if any($existing_rules[]; .action == "sniff") then [] else managed_sniff_rules($managed_inbounds) end) as $sniff_rules
+            | ([$existing_rules[] | select(is_broad_direct_rule($managed_inbounds))]) as $fallback_rules
+            | ([$existing_rules[] | select(is_broad_direct_rule($managed_inbounds) | not)]) as $custom_rules
             | $sniff_rules + $custom_rules + $managed_node_rules + $fallback_rules
           )
     ' "$source_config" >"$output" || {
@@ -1598,20 +1761,67 @@ render_runtime_node_outbound_modes() {
 }
 
 upgrade_legacy_node_outbound_metadata() {
-    local config_dir=${1:-$is_conf_dir} file cfg meta_path
+    local config_dir=${1:-$is_conf_dir} file cfg meta_path meta_tmp
+    local -a node_files=() node_cfgs=() meta_files=() meta_unique_files=()
+    local -a node_fields=() meta_fields=()
+    local -A node_valid_by_file=() node_seen_count=() meta_has_mode=() meta_seen_count=()
+    local i batch_nodes_ok=1 batch_metas_ok=1
+
     [[ -d $config_dir ]] || return 0
-    shopt -s nullglob
-    for file in "$config_dir"/*.json; do
-        [[ -f $file ]] || continue
-        cfg=${file##*/}
-        [[ $cfg =~ dynamic-port-.*-link || $cfg == relay-*.json ]] && continue
-        jq -e 'type == "object" and ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | length > 0)' "$file" >/dev/null 2>&1 || continue
-        meta_path="$config_dir/.quan-meta/$cfg.meta.json"
-        if [[ ! -f $meta_path ]] || ! jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
+    _collect_managed_node_files "$config_dir" "" "" node_files node_cfgs meta_files meta_unique_files
+    (( ${#node_files[@]} > 0 )) || return 0
+
+    mapfile -d '' -t node_fields < <(jq -j '
+        [input_filename, (if type == "object" and ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | length > 0) then "1" else "0" end)]
+        | .[0], "\u0000", .[1], "\u0000"
+    ' "${node_files[@]}" 2>/dev/null)
+    wait "$!" || batch_nodes_ok=0
+    if (( batch_nodes_ok == 1 )); then
+        for ((i = 0; i + 1 < ${#node_fields[@]}; i += 2)); do
+            file=${node_fields[i]}
+            node_valid_by_file[$file]=${node_fields[i + 1]}
+            node_seen_count[$file]=$(( ${node_seen_count[$file]:-0} + 1 ))
+        done
+    fi
+
+    if (( ${#meta_unique_files[@]} > 0 )); then
+        mapfile -d '' -t meta_fields < <(jq -j '
+            [input_filename, (if type == "object" and has("outbound_mode") and (.outbound_mode | type == "string" and length > 0) then "1" else "0" end)]
+            | .[0], "\u0000", .[1], "\u0000"
+        ' "${meta_unique_files[@]}" 2>/dev/null)
+        wait "$!" || batch_metas_ok=0
+        if (( batch_metas_ok == 1 )); then
+            for ((i = 0; i + 1 < ${#meta_fields[@]}; i += 2)); do
+                meta_path=${meta_fields[i]}
+                meta_has_mode[$meta_path]=${meta_fields[i + 1]}
+                meta_seen_count[$meta_path]=$(( ${meta_seen_count[$meta_path]:-0} + 1 ))
+            done
+        fi
+    fi
+
+    for i in "${!node_files[@]}"; do
+        file=${node_files[i]}
+        cfg=${node_cfgs[i]}
+        meta_path=${meta_files[i]}
+        if (( batch_nodes_ok == 1 && ${node_seen_count[$file]:-0} == 1 )); then
+            [[ ${node_valid_by_file[$file]:-0} == 1 ]] || continue
+        else
+            jq -e 'type == "object" and ([.inbounds[]? | .tag? // empty | select(type == "string" and length > 0)] | length > 0)' "$file" >/dev/null 2>&1 || continue
+        fi
+        if [[ ! -f $meta_path ]]; then
+            mkdir -p "$config_dir/.quan-meta" &&
+                meta_tmp=$(mktemp "$meta_path.tmp.XXXXXX") &&
+                printf '{"outbound_mode":"V4优先"}\n' >"$meta_tmp" &&
+                mv -f "$meta_tmp" "$meta_path"
+        elif (( batch_metas_ok == 1 && ${meta_seen_count[$meta_path]:-0} == 1 )); then
+            if [[ ${meta_has_mode[$meta_path]:-0} != 1 ]]; then
+                is_conf_dir=$config_dir meta_set_unlocked "$cfg" outbound_mode "V4优先"
+            fi
+        elif ! jq -e 'has("outbound_mode") and (.outbound_mode | type == "string" and length > 0)' "$meta_path" >/dev/null 2>&1; then
             is_conf_dir=$config_dir meta_set_unlocked "$cfg" outbound_mode "V4优先"
         fi
     done
-    shopt -u nullglob
+
     return 0
 }
 
