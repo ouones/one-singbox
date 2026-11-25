@@ -13,13 +13,13 @@ magenta='\e[95m'
 cyan='\e[96m'
 none='\e[0m'
 
-_red() { echo -e ${red}$@${none}; }
-_blue() { echo -e ${blue}$@${none}; }
-_cyan() { echo -e ${cyan}$@${none}; }
-_green() { echo -e ${green}$@${none}; }
-_yellow() { echo -e ${yellow}$@${none}; }
-_magenta() { echo -e ${magenta}$@${none}; }
-_red_bg() { echo -e "\e[41m$@${none}"; }
+_red() { echo -e "${red}$*${none}"; }
+_blue() { echo -e "${blue}$*${none}"; }
+_cyan() { echo -e "${cyan}$*${none}"; }
+_green() { echo -e "${green}$*${none}"; }
+_yellow() { echo -e "${yellow}$*${none}"; }
+_magenta() { echo -e "${magenta}$*${none}"; }
+_red_bg() { echo -e "\e[41m$*${none}"; }
 
 _rm() {
     rm -rf "$@"
@@ -38,13 +38,13 @@ is_err=$(_red_bg 错误!)
 is_warn=$(_red_bg 警告!)
 
 err() {
-    echo -e "\n$is_err $@\n"
+    echo -e "\n$is_err $*\n"
     [[ $is_dont_auto_exit ]] && return
     exit 1
 }
 
 warn() {
-    echo -e "\n$is_warn $@\n"
+    echo -e "\n$is_warn $*\n"
 }
 
 # load bash script.
@@ -107,9 +107,12 @@ init_arch_detect() {
 init_core_ver() {
     [[ ${is_core_ver:-} ]] && return 0
     if [[ -x $is_core_bin ]]; then
-        is_core_ver=$($is_core_bin version 2>/dev/null | awk 'NR==1{print $3}')
+        is_core_ver=$("$is_core_bin" version 2>/dev/null | awk 'NR==1{print $3}')
     fi
-    [[ -z $is_core_ver ]] && is_core_ver=unknown
+    if [[ -z $is_core_ver ]]; then
+        is_core_ver=unknown
+    fi
+    return 0
 }
 
 init_tls_keypair() {
@@ -129,8 +132,11 @@ init_caddy_service_probe() {
             is_caddy_service=1
         fi
     elif [[ $is_openrc ]]; then
-        [[ -f /etc/init.d/caddy ]] && is_caddy_service=1
+        if [[ -f /etc/init.d/caddy ]]; then
+            is_caddy_service=1
+        fi
     fi
+    return 0
 }
 
 init_caddy_probe() {
@@ -140,13 +146,13 @@ init_caddy_probe() {
     [[ $is_caddy_service ]] || return 0
     is_caddy=1
     if [[ $mode == full && $is_systemd ]]; then
-        [[ -f /lib/systemd/system/caddy.service && ! $(grep '\-\-adapter caddyfile' /lib/systemd/system/caddy.service) ]] && {
+        if [[ -f /lib/systemd/system/caddy.service && ! $(grep '\-\-adapter caddyfile' /lib/systemd/system/caddy.service) ]]; then
             load systemd.sh
             install_service caddy
             systemctl restart caddy &
-        }
+        fi
     fi
-    is_caddy_ver=$($is_caddy_bin version 2>/dev/null | head -n1 | cut -d " " -f1)
+    is_caddy_ver=$("$is_caddy_bin" version 2>/dev/null | head -n1 | cut -d " " -f1)
     [[ $mode == version ]] && return 0
     if [[ $mode == full && -f $is_caddyfile ]]; then
         is_tmp_http_port=$(grep -E '^ {2,}http_port|^http_port' "$is_caddyfile" | grep -E -o '[0-9]+')
@@ -255,7 +261,9 @@ init_entry() {
         main "${args[@]}"
     else
         [[ ! $args ]] && args=main
-        main $args
+        local -a _init_args=()
+        read -ra _init_args <<<"$args"
+        main "${_init_args[@]}"
     fi
 }
 

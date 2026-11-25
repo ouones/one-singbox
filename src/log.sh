@@ -27,7 +27,8 @@ log_usage_read() {
 
 # Copy/truncate keeps the core's open log descriptors usable without restarting it.
 log_limit_check() {
-    local limit=$(($(log_limit_read) * 1048576)) total=0 file size tmp keep
+    local limit total=0 file size tmp keep
+    limit=$(($(log_limit_read) * 1048576))
     local files=()
     for file in "$is_log_dir"/*.log "$is_log_dir"/*.log.1; do
         [[ -f $file && ! -L $file ]] || continue
@@ -138,7 +139,8 @@ log_limit_init() {
 }
 
 log_limit_set() {
-    local current=$(log_limit_read) value
+    local current value
+    current=$(log_limit_read)
     msg "\n当前日志占用上限: $current MB (默认上限 200 MB)"
     while :; do
         msg "输入日志上限 (大于 0 的整数，单位 MB；回车保留当前值):"

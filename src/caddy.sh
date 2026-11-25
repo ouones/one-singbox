@@ -2,8 +2,8 @@ caddy_config() {
     is_caddy_site_file=$is_caddy_conf/${host}.conf
     case $1 in
     new)
-        mkdir -p $is_caddy_dir $is_caddy_dir/sites $is_caddy_conf
-        cat >$is_caddyfile <<-EOF
+        mkdir -p "$is_caddy_dir" "$is_caddy_dir/sites" "$is_caddy_conf"
+        cat >"$is_caddyfile" <<-EOF
 # don't edit this file #
 # for more info, see https://github.com/ouones/one-singbox/blob/main/docs/usage.md
 # 不要编辑这个文件 #
@@ -19,14 +19,14 @@ import $is_caddy_dir/sites/*.conf
 EOF
         ;;
     *ws* | *http*)
-        cat >${is_caddy_site_file} <<<"
+        cat >"${is_caddy_site_file}" <<<"
 ${host}:${is_https_port} {
     reverse_proxy ${path} 127.0.0.1:${port}
     import ${is_caddy_site_file}.add
 }"
         ;;
     *h2*)
-        cat >${is_caddy_site_file} <<<"
+        cat >"${is_caddy_site_file}" <<<"
 ${host}:${is_https_port} {
     reverse_proxy ${path} h2c://127.0.0.1:${port} {
         transport http {
@@ -37,7 +37,7 @@ ${host}:${is_https_port} {
 }"
         ;;
     *grpc*)
-        cat >${is_caddy_site_file} <<<"
+        cat >"${is_caddy_site_file}" <<<"
 ${host}:${is_https_port} {
     reverse_proxy /${path}/* h2c://127.0.0.1:${port}
     import ${is_caddy_site_file}.add
@@ -45,13 +45,14 @@ ${host}:${is_https_port} {
         ;;
     proxy)
 
-        cat >${is_caddy_site_file}.add <<<"
+        cat >"${is_caddy_site_file}.add" <<<"
 reverse_proxy https://$proxy_site {
         header_up Host {upstream_hostport}
 }"
         ;;
     esac
-    [[ $1 != "new" && $1 != 'proxy' ]] && {
-        [[ ! -f ${is_caddy_site_file}.add ]] && echo "# see https://github.com/ouones/one-singbox/blob/main/docs/usage.md" >${is_caddy_site_file}.add
-    }
+    if [[ $1 != "new" && $1 != 'proxy' && ! -f ${is_caddy_site_file}.add ]]; then
+        echo "# see https://github.com/ouones/one-singbox/blob/main/docs/usage.md" >"${is_caddy_site_file}.add"
+    fi
+    return 0
 }

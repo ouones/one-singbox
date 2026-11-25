@@ -195,7 +195,7 @@ reality_sni_pick() {
     local -a pool=("$@")
     local index max=$((${#pool[@]} - 1))
     ((max >= 0)) || return 1
-    index=$(shuf -i 0-$max -n1)
+    index=$(shuf -i "0-$max" -n1)
     [[ $index =~ ^[0-9]+$ ]] && ((index <= max)) || index=0
     printf '%s\n' "${pool[index]}"
 }
@@ -235,7 +235,7 @@ msg() {
 }
 
 msg_ul() {
-    echo -e "\e[4m$@\e[0m"
+    echo -e "\e[4m$*\e[0m"
 }
 
 # Read interactive input. During a menu operation the operation subprocess exits
@@ -486,7 +486,9 @@ get_port() {
 }
 
 get_pbk() {
-    is_tmp_pbk=($($is_core_bin generate reality-keypair | sed 's/.*://'))
+    local pbk_output
+    pbk_output=$("$is_core_bin" generate reality-keypair)
+    mapfile -t is_tmp_pbk < <(sed 's/.*:[[:space:]]*//' <<<"$pbk_output")
     is_public_key=${is_tmp_pbk[1]}
     is_private_key=${is_tmp_pbk[0]}
 }
@@ -508,10 +510,10 @@ show_list() {
 is_test() {
     case $1 in
     number)
-        echo $2 | grep -E '^[1-9][0-9]?+$'
+        echo "$2" | grep -E '^[1-9][0-9]?+$'
         ;;
     port)
-        if [[ $(is_test number $2) ]]; then
+        if [[ $(is_test number "$2") ]]; then
             [[ $2 -le 65535 ]] && echo ok
         fi
         ;;
@@ -519,13 +521,13 @@ is_test() {
         [[ $(node_port_used "$2" "$is_new_protocol") && ! $is_cant_test_port ]] && echo ok
         ;;
     domain)
-        echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
+        echo "$2" | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
         ;;
     path)
-        echo $2 | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
+        echo "$2" | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
         ;;
     uuid)
-        echo $2 | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        echo "$2" | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
         ;;
     esac
 
@@ -534,12 +536,12 @@ is_test() {
 is_port_used() {
     if [[ $(type -P netstat) ]]; then
         [[ ! $is_used_port ]] && is_used_port="$(netstat -tunlp | sed -n 's/.*:\([0-9]\+\).*/\1/p' | sort -nu)"
-        echo $is_used_port | sed 's/ /\n/g' | grep ^${1}$
+        printf '%s\n' "$is_used_port" | tr ' ' '\n' | grep -x -- "$1"
         return
     fi
     if [[ $(type -P ss) ]]; then
         [[ ! $is_used_port ]] && is_used_port="$(ss -tunlp | sed -n 's/.*:\([0-9]\+\).*/\1/p' | sort -nu)"
-        echo $is_used_port | sed 's/ /\n/g' | grep ^${1}$
+        printf '%s\n' "$is_used_port" | tr ' ' '\n' | grep -x -- "$1"
         return
     fi
     is_cant_test_port=1
@@ -637,7 +639,7 @@ ask() {
     local is_secret_input=
     case $1 in
     set_ss_method)
-        is_tmp_list=(${ss_method_list[@]})
+        is_tmp_list=("${ss_method_list[@]}")
         is_default_arg=$is_random_ss_method
         is_opt_msg="\n选择加密方式:\n"
         is_opt_input_msg="(默认\e[92m $is_default_arg\e[0m):"
@@ -654,7 +656,9 @@ ask() {
         ;;
     list)
         is_ask_set=$2
-        [[ ! $is_tmp_list ]] && is_tmp_list=($3)
+        if [[ ! $is_tmp_list ]]; then
+            read -ra is_tmp_list <<<"$3"
+        fi
         is_opt_msg=$4
         is_opt_input_msg=$5
         ;;
@@ -667,12 +671,12 @@ ask() {
         msg "直连可选 V6 优先、V4 优先、仅 V4 或仅 V6；代理出口可选 Shadowsocks 或 VLESS。"
         printf '\n选择出口方式:\n'
     else
-        msg $is_opt_msg
+        msg "$is_opt_msg"
     fi
     [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
     [[ $is_tmp_list ]] && show_list "${is_tmp_list[@]}"
     while :; do
-        echo -ne $is_opt_input_msg
+        echo -ne "$is_opt_input_msg"
         if [[ $is_secret_input ]]; then
             interactive_read -rs REPLY
             echo
@@ -681,7 +685,7 @@ ask() {
         fi
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
         if [[ ! $is_tmp_list ]]; then
-            [[ $(grep port <<<$is_ask_set) ]] && {
+            [[ $(grep port <<<"$is_ask_set") ]] && {
                 [[ ! $(is_test port "$REPLY") ]] && {
                     msg "$is_err 请输入正确的端口, 可选(1-65535)"
                     continue
@@ -691,17 +695,17 @@ ask() {
                     continue
                 fi
             }
-            [[ $(grep path <<<$is_ask_set) && ! $(is_test path "$REPLY") ]] && {
+            [[ $(grep path <<<"$is_ask_set") && ! $(is_test path "$REPLY") ]] && {
                 [[ ! $tmp_uuid ]] && get_uuid
                 msg "$is_err 请输入正确的路径, 例如: /$tmp_uuid"
                 continue
             }
-            [[ $(grep uuid <<<$is_ask_set) && ! $(is_test uuid "$REPLY") ]] && {
+            [[ $(grep uuid <<<"$is_ask_set") && ! $(is_test uuid "$REPLY") ]] && {
                 [[ ! $tmp_uuid ]] && get_uuid
                 msg "$is_err 请输入正确的 UUID, 例如: $tmp_uuid"
                 continue
             }
-            [[ $(grep ^y$ <<<$is_ask_set) ]] && {
+            [[ $(grep ^y$ <<<"$is_ask_set") ]] && {
                 [[ $(grep -i ^y$ <<<"$REPLY") ]] && break
                 msg "请输入 y 确认，或按 Ctrl+C 取消。"
                 continue
@@ -731,7 +735,7 @@ ask() {
                 fi
             fi
             if [[ $is_ask_result ]]; then
-                export $is_ask_set="$is_ask_result"
+                export "$is_ask_set=$is_ask_result"
                 if [[ $is_ask_set == is_outbound_mode ]]; then
                     msg "选择: ${is_tmp_list[$REPLY - 1]}"
                 else
@@ -820,7 +824,10 @@ meta_move_unlocked() {
     local of nf
     of=$(meta_file "$old")
     nf=$(meta_file "$new")
-    [[ -f "$of" ]] && mv -f "$of" "$nf"
+    if [[ -f "$of" ]]; then
+        mv -f "$of" "$nf" || return $?
+    fi
+    return 0
 }
 
 meta_move() {
@@ -980,7 +987,10 @@ meta_rm_unlocked() {
     local cfg=$1
     local f
     f=$(meta_file "$cfg")
-    [[ -f "$f" ]] && rm -f "$f"
+    if [[ -f "$f" ]]; then
+        rm -f "$f" || return $?
+    fi
+    return 0
 }
 
 meta_rm() {
@@ -2460,10 +2470,10 @@ random_node_name() {
 
 ss_password_for_method() {
     local method=$1
-    if [[ $(grep 128 <<<$method) ]]; then
-        $is_core_bin generate rand 16 --base64
+    if [[ $(grep 128 <<<"$method") ]]; then
+        "$is_core_bin" generate rand 16 --base64
     else
-        $is_core_bin generate rand 32 --base64
+        "$is_core_bin" generate rand 32 --base64
     fi
 }
 
@@ -2472,7 +2482,7 @@ ss_password_valid_for_method() {
     local -a keys
     [[ $method != *2022* ]] && return 0
     [[ $password ]] || return 1
-    [[ $(grep 128 <<<$method) ]] && expected_len=16 || expected_len=32
+    [[ $(grep 128 <<<"$method") ]] && expected_len=16 || expected_len=32
     [[ $password != :* && $password != *: && $password != *::* ]] || return 1
     IFS=: read -r -a keys <<<"$password"
     for key in "${keys[@]}"; do
@@ -2529,7 +2539,7 @@ ss_base64_decode() {
 
 ss_method_supported() {
     local method=$1 v
-    for v in ${ss_method_list[@]}; do
+    for v in "${ss_method_list[@]}"; do
         [[ $v == "$method" ]] && return 0
     done
     return 1
@@ -3811,7 +3821,7 @@ create() {
         is_json_file=$is_conf_dir/$is_config_name
         [[ ${2,,} == *reality* && ! $is_servername ]] && is_servername=$(reality_sni_select)
         # get json
-        [[ $is_change || ! $json_str ]] && get protocol $2
+        [[ $is_change || ! $json_str ]] && get protocol "$2"
         [[ $net == "reality" ]] && is_add_public_key=",outbounds:[{type:\"direct\"},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
         if [[ ${2,,} == snell ]]; then
             if [[ $snell_version == 6 ]]; then
@@ -3848,7 +3858,7 @@ create() {
         [[ $is_gen ]] && {
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
             msg
-            jq <<<$is_new_json
+            jq <<<"$is_new_json"
             msg
             return
         }
@@ -3874,10 +3884,12 @@ create() {
             apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$node_lifecycle_error"
             node_migration_applied=1
             is_config_file=$is_config_name
-            msg "\n节点配置已应用: $(_green $is_config_name)\n"
+            msg "\n节点配置已应用: $(_green "$is_config_name")\n"
             if [[ $is_caddy && $is_change && $old_host ]]; then
                 is_del_host=$old_host
-                [[ $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+                if [[ $host != "$old_host" && -f $is_caddy_conf/$is_del_host.conf ]]; then
+                    rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+                fi
             fi
         elif [[ ${2,,} == snell ]]; then
             if ! mv -f "$is_snell_tmp_file" "$is_json_file"; then
@@ -3885,10 +3897,10 @@ create() {
                 err "保存 Snell 配置失败, 原有配置未改变."
             fi
         else
-            cat <<<$is_new_json >"$is_json_file"
+            cat <<<"$is_new_json" >"$is_json_file"
         fi
         [[ $is_config_name ]] && is_config_file=$is_config_name
-        [[ $is_change && $previous_config_file && $previous_config_file != $is_config_name ]] && msg "\n配置文件修改成功: $(_green $previous_config_file) -> $(_green $is_config_name)\n"
+        [[ $is_change && $previous_config_file && $previous_config_file != "$is_config_name" ]] && msg "\n配置文件修改成功: $(_green "$previous_config_file") -> $(_green "$is_config_name")\n"
         if [[ ! $is_change ]]; then
             meta_set "$is_config_name" outbound_mode "V4优先"
         fi
@@ -3904,20 +3916,23 @@ create() {
         fi
         [[ $new_node_lock ]] && shared_config_unlock
         # caddy auto tls
-        [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
-            create caddy $net
-        }
+        if [[ $is_caddy && $host && ! $is_no_auto_tls ]]; then
+            create caddy "$net"
+        fi
         # restart core
-        [[ ! $node_migration_applied ]] && manage restart &
+        if [[ ! $node_migration_applied ]]; then
+            manage restart &
+        fi
+        return 0
         ;;
     client)
         is_tls=tls
         is_client=1
-        get info $2
+        get info "$2"
         [[ ! $is_client_id_json ]] && err "($is_config_name) 不支持生成客户端配置."
-        is_new_json=$(jq '{outbounds:[{tag:'\"$is_config_name\"',protocol:'\"$is_protocol\"','"$is_client_id_json"','"$is_stream"'}]}' <<<{})
+        is_new_json=$(jq --arg tag "$is_config_name" --arg proto "$is_protocol" "{outbounds:[{tag:\$tag,protocol:\$proto,$is_client_id_json,$is_stream}]}" <<<{})
         msg
-        jq <<<$is_new_json
+        jq <<<"$is_new_json"
         msg
         ;;
     caddy)
@@ -3937,7 +3952,7 @@ create() {
             shared_config_unlock
             err "无法创建 Caddy 配置目录."
         fi
-        caddy_config $2
+        caddy_config "$2"
         [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; }
         shared_config_unlock
         manage restart caddy &
@@ -4052,7 +4067,7 @@ change() {
     fi
     [[ $is_try_change ]] && return
     [[ $is_dont_auto_exit ]] && {
-        get info $1
+        get info "$1"
         change_info_status=$?
     } || {
         [[ $is_change_id ]] && {
@@ -4061,11 +4076,15 @@ change() {
             else
                 is_change_msg=${change_labels[$is_change_id]#*|}
             fi
-            [[ $is_change_msg ]] && _green "\n快速执行: $is_change_msg"
+            if [[ $is_change_msg ]]; then
+                _green "\n快速执行: $is_change_msg"
+            fi
         }
-        info $1
+        info "$1"
         change_info_status=$?
-        [[ $is_auto_get_config ]] && msg "\n自动选择: $is_config_file"
+        if [[ $is_auto_get_config ]]; then
+            msg "\n自动选择: $is_config_file"
+        fi
     }
     [[ $change_info_status == 2 ]] && return 2
     is_old_net=$net
@@ -4079,7 +4098,7 @@ change() {
     # if not prefer args, show change list and then get change id.
     [[ ! $is_change_id ]] && {
         is_tmp_list=()
-        for v in ${is_can_change[@]}; do
+        for v in "${is_can_change[@]}"; do
             is_tmp_list+=("${change_labels[$v]%%|*}")
         done
         menu_select parent is_change_str "\n请选择更改:\n" "${is_tmp_list[@]}"
@@ -4106,7 +4125,7 @@ change() {
         fi
         [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
         if [[ $is_new_port && ! $is_auto ]]; then
-            [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
+            [[ ! $(is_test port "$is_new_port") ]] && err "请输入正确的端口, 可选(1-65535)"
             [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
@@ -4115,11 +4134,11 @@ change() {
             net=$is_old_net
             is_https_port=$is_new_port
             load caddy.sh
-            caddy_config $net
+            caddy_config "$net"
             manage restart caddy &
             info
         else
-            add $net $is_new_port
+            add "$net" "$is_new_port"
         fi
         ;;
     2)
@@ -4128,7 +4147,7 @@ change() {
         [[ ! $host ]] && err "($is_config_file) 不支持更改域名."
     [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
         old_host=$host # del old host
-        add $net $is_new_host
+        add "$net" "$is_new_host"
         ;;
     3)
         # new path
@@ -4136,7 +4155,7 @@ change() {
         [[ ! $path ]] && err "($is_config_file) 不支持更改路径."
         [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
     [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
-        add $net auto auto $is_new_path
+        add "$net" auto auto "$is_new_path"
         ;;
     4)
         # new password
@@ -4144,7 +4163,9 @@ change() {
         if [[ $ss_password || $password ]]; then
             [[ $is_auto ]] && {
                 get_uuid && is_new_pass=$tmp_uuid
-                [[ $ss_password ]] && is_new_pass=$(get ss2022)
+                if [[ $ss_password ]]; then
+                    is_new_pass=$(get ss2022)
+                fi
             }
         else
             err "($is_config_file) 不支持更改密码."
@@ -4153,7 +4174,7 @@ change() {
         password=$is_new_pass
         ss_password=$is_new_pass
         is_socks_pass=$is_new_pass
-        add $net
+        add "$net"
         ;;
     5)
         # new uuid
@@ -4161,7 +4182,7 @@ change() {
         [[ ! $uuid ]] && err "($is_config_file) 不支持更改 UUID."
         [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
     [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
-        add $net auto $is_new_uuid
+        add "$net" auto "$is_new_uuid"
         ;;
     6)
         # new method
@@ -4176,11 +4197,15 @@ change() {
             [[ $ss_method_status == 0 ]] || return 1
             is_new_method=$ss_method
         fi
-        if [[ $(grep 2022 <<<$is_new_method) ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
+        if [[ $(grep 2022 <<<"$is_new_method") ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
             is_new_ss_password=$(ss_password_for_method "$is_new_method")
-            msg "\n已根据新的加密方式自动更新密码: $(_green $is_new_ss_password)\n"
+            msg "\n已根据新的加密方式自动更新密码: $(_green "$is_new_ss_password")\n"
         fi
-        [[ $is_new_ss_password ]] && add $net auto "$is_new_ss_password" $is_new_method || add $net auto auto $is_new_method
+        if [[ $is_new_ss_password ]]; then
+            add "$net" auto "$is_new_ss_password" "$is_new_method"
+        else
+            add "$net" auto auto "$is_new_method"
+        fi
         ;;
     7)
         # new remote addr
@@ -4188,7 +4213,7 @@ change() {
         [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标地址."
     [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
         door_addr=$is_new_door_addr
-        add $net
+        add "$net"
         ;;
     8)
         # new remote port
@@ -4198,7 +4223,7 @@ change() {
         ask string door_port "请输入新的目标端口 (1-65535):"
             is_new_door_port=$door_port
         }
-        add $net auto auto $is_new_door_port
+        add "$net" auto auto "$is_new_door_port"
         ;;
     9)
         # new is_private_key is_public_key
@@ -4207,36 +4232,36 @@ change() {
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改密钥."
         if [[ $is_auto ]]; then
             get_pbk
-            add $net
+            add "$net"
         else
             [[ $is_new_private_key && ! $is_new_public_key ]] && {
                 err "无法找到 Public key."
             }
             [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新的私钥 (输入不显示):"
             [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新的公钥:"
-            if [[ $is_new_private_key == $is_new_public_key ]]; then
+            if [[ $is_new_private_key == "$is_new_public_key" ]]; then
                 err "Private key 和 Public key 不能一样."
             fi
             is_tmp_json=$is_conf_dir/$is_config_file-$uuid
             cp -f "$is_conf_dir/$is_config_file" "$is_tmp_json"
-            sed -i s#$is_private_key #$is_new_private_key# $is_tmp_json
-            $is_core_bin check -c $is_tmp_json &>/dev/null
+            sed -i "s#$is_private_key" "#$is_new_private_key#" "$is_tmp_json"
+            "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
             if [[ $? != 0 ]]; then
                 is_key_err=1
                 is_key_err_msg="Private key 无法通过测试."
             fi
-            sed -i s#$is_new_private_key #$is_new_public_key# $is_tmp_json
-            $is_core_bin check -c $is_tmp_json &>/dev/null
+            sed -i "s#$is_new_private_key" "#$is_new_public_key#" "$is_tmp_json"
+            "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
             if [[ $? != 0 ]]; then
                 is_key_err=1
                 is_key_err_msg+="Public key 无法通过测试."
             fi
             rm "$is_tmp_json"
-            [[ $is_key_err ]] && err $is_key_err_msg
+            [[ $is_key_err ]] && err "$is_key_err_msg"
             is_private_key=$is_new_private_key
             is_public_key=$is_new_public_key
             is_test_json=
-            add $net
+            add "$net"
         fi
         ;;
     10)
@@ -4246,7 +4271,7 @@ change() {
         [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
         [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
         is_servername=$is_new_servername
-        add $net
+        add "$net"
         ;;
     11)
         # new proxy site
@@ -4256,17 +4281,17 @@ change() {
         }
         [[ ! -f $is_caddy_conf/${host}.conf.add ]] && err "无法配置伪装网站."
         [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的反向代理目标域名 (例如 example.com):"
-        proxy_site=$(sed 's#^.*//##;s#/$##' <<<$is_new_proxy_site)
+        proxy_site=$(sed 's#^.*//##;s#/$##' <<<"$is_new_proxy_site")
         load caddy.sh
         caddy_config proxy
         manage restart caddy &
-        msg "\n已更新伪装网站为: $(_green $proxy_site) \n"
+        msg "\n已更新伪装网站为: $(_green "$proxy_site") \n"
         ;;
     12)
         # new socks user
         [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
     ask string is_socks_user "请输入新用户名:"
-        add $net
+        add "$net"
         ;;
     13)
         # update share link node name (does not rename json file)
@@ -4277,7 +4302,7 @@ change() {
         is_old_name=$(node_name_for_link "$is_config_file")
         [[ "$is_old_name" == "$is_new_name" ]] && err "新节点名称与当前名称一致."
         meta_set "$is_config_file" node_name "$is_new_name"
-        msg "\n已更新节点名称为: $(_green $is_new_name)\n"
+        msg "\n已更新节点名称为: $(_green "$is_new_name")\n"
         info
         ;;
     14)
@@ -4290,7 +4315,7 @@ change() {
             interactive_read -r is_new_entry_addr
         fi
         is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || err "入口地址更新失败: $is_new_entry_addr"
-        msg "\n已更新入口地址为: $(_green $is_new_entry_addr)\n"
+        msg "\n已更新入口地址为: $(_green "$is_new_entry_addr")\n"
         info
         ;;
     17)
@@ -4427,7 +4452,7 @@ del() {
     [[ $is_select_delete_node ]] && unset is_config_file is_conf_dir_empty
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
-    [[ ! $is_config_file ]] && { get info $1 || return $?; }
+    [[ ! $is_config_file ]] && { get info "$1" || return $?; }
     if [[ $is_config_file ]]; then
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
             if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点，删除后将重启 sing-box。确认删除"; then
@@ -4445,10 +4470,12 @@ del() {
                 [[ ! $old_host ]] && return # no host exist or not set new host;
                 is_del_host=$old_host
             }
-            [[ $is_del_host && $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && {
-                rm -rf $is_caddy_conf/$is_del_host.conf $is_caddy_conf/$is_del_host.conf.add
-                [[ ! $is_new_json ]] && manage restart caddy &
-            }
+            if [[ $is_del_host && $host != "$old_host" && -f $is_caddy_conf/$is_del_host.conf ]]; then
+                rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
+                if [[ ! $is_new_json ]]; then
+                    manage restart caddy &
+                fi
+            fi
         }
     fi
     if [[ ! $(ls $is_conf_dir | grep .json) && ! $is_change ]]; then
@@ -4482,11 +4509,11 @@ uninstall() {
     manage disable &>/dev/null
     load log.sh
     log_limit_remove
-    rm -rf $is_core_dir $is_log_dir $is_sh_bin ${is_sh_bin/$is_core/sb}
+    rm -rf "$is_core_dir" "$is_log_dir" "$is_sh_bin" "${is_sh_bin/$is_core/sb}"
     if [[ $is_systemd ]]; then
-        rm -f /lib/systemd/system/$is_core.service
+        rm -f "/lib/systemd/system/$is_core.service"
     elif [[ $is_openrc ]]; then
-        rm -f /etc/init.d/$is_core
+        rm -f "/etc/init.d/$is_core"
     fi
     sed -i "/$is_core/d" /root/.bashrc
     # uninstall caddy only when the full-removal scope was selected
@@ -4494,15 +4521,15 @@ uninstall() {
         manage stop caddy &>/dev/null
         manage disable caddy &>/dev/null
         if [[ $is_systemd ]]; then
-            rm -rf $is_caddy_dir $is_caddy_bin /lib/systemd/system/caddy.service
+            rm -rf "$is_caddy_dir" "$is_caddy_bin" /lib/systemd/system/caddy.service
         elif [[ $is_openrc ]]; then
-            rm -rf $is_caddy_dir $is_caddy_bin /etc/init.d/caddy
+            rm -rf "$is_caddy_dir" "$is_caddy_bin" /etc/init.d/caddy
         fi
     fi
     [[ $is_install_sh ]] && return # reinstall
     _green "\n卸载完成!"
     msg "脚本哪里需要完善? 请反馈"
-    msg "反馈问题) $(msg_ul https://github.com/${is_sh_repo}/issues)\n"
+    msg "反馈问题) $(msg_ul "https://github.com/${is_sh_repo}/issues")\n"
 }
 
 # manage run status
@@ -4527,17 +4554,17 @@ manage() {
     *) is_do_name=$is_core ;;
     esac
     if [[ $is_systemd ]]; then
-        systemctl $is_do $is_do_name 2>/dev/null
+        systemctl "$is_do" "$is_do_name" 2>/dev/null
     elif [[ $is_openrc ]]; then
         case $is_do in
         enable)
-            rc-update add $is_do_name default 2>/dev/null
+            rc-update add "$is_do_name" default 2>/dev/null
             ;;
         disable)
-            rc-update del $is_do_name default 2>/dev/null
+            rc-update del "$is_do_name" default 2>/dev/null
             ;;
         *)
-            rc-service $is_do_name $is_do 2>/dev/null
+            rc-service "$is_do_name" "$is_do" 2>/dev/null
             ;;
         esac
     fi
@@ -4615,7 +4642,7 @@ add() {
             is_new_protocol=VMess-${is_lower^^}
             ;;
         wss | h2 | hu | vws | vh2 | vhu | tws | th2 | thu)
-            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/^T/Trojan-/;/^(W|H)/{s/^/VMess-/};s/WSS/WS/;s/HU/HTTPUpgrade/" <<<${is_lower^^})-TLS
+            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/^T/Trojan-/;/^(W|H)/{s/^/VMess-/};s/WSS/WS/;s/HU/HTTPUpgrade/" <<<"${is_lower^^}")-TLS
             ;;
         r | reality)
             is_new_protocol=VLESS-REALITY
@@ -4648,8 +4675,8 @@ add() {
             is_new_protocol=Snell
             ;;
         *)
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
+            for v in "${protocol_list[@]}"; do
+                [[ $(grep -E -i "^$is_lower$" <<<"$v") ]] && is_new_protocol=$v && break
             done
 
             [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
@@ -4659,11 +4686,11 @@ add() {
 
     # no prefer protocol
     if [[ ! $is_new_protocol ]]; then
-        is_tmp_list=(${protocol_list[@]})
+        is_tmp_list=("${protocol_list[@]}")
         [[ $is_no_auto_tls ]] && {
             is_tmp_list=()
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list+=("$v")
+            for v in "${protocol_list[@]}"; do
+                [[ $(grep -i "\-tls$" <<<"$v") ]] && is_tmp_list+=("$v")
             done
         }
         menu_select parent is_new_protocol "\n选择协议:\n" "${is_tmp_list[@]}"
@@ -4749,7 +4776,7 @@ add() {
     [[ $1 && ! $is_change ]] && {
         msg "\n使用协议: $is_new_protocol"
         # err msg tips
-        is_err_tips="\n\n请使用: $(_green $is_core add $1 $is_add_opts) 来添加 $is_new_protocol 配置"
+        is_err_tips="\n\n请使用: $(_green "$is_core add $1 $is_add_opts") 来添加 $is_new_protocol 配置"
     }
 
     # remove old protocol args
@@ -4761,14 +4788,14 @@ add() {
             ;;
         reality)
             net_type=
-            [[ ! $(grep -i reality <<<$is_new_protocol) ]] && is_reality=
+            [[ ! $(grep -i reality <<<"$is_new_protocol") ]] && is_reality=
             ;;
         ss)
-            [[ $(is_test uuid $ss_password) ]] && uuid=$ss_password
+            [[ $(is_test uuid "$ss_password") ]] && uuid=$ss_password
             ;;
         esac
-        [[ ! $(is_test uuid $uuid) ]] && uuid=
-        [[ $(is_test uuid $password) ]] && uuid=$password
+        [[ ! $(is_test uuid "$uuid") ]] && uuid=
+        [[ $(is_test uuid "$password") ]] && uuid=$password
     fi
 
     # no-auto-tls only use h2,ws,grpc
@@ -4779,11 +4806,11 @@ add() {
     # prefer args.
     if [[ $2 ]]; then
         for v in is_use_port is_use_uuid is_use_host is_use_path is_use_pass is_use_method is_use_door_addr is_use_door_port is_use_version; do
-            [[ ${!v} == 'auto' ]] && unset $v
+            [[ ${!v} == 'auto' ]] && unset "$v"
         done
 
         if [[ $is_use_port ]]; then
-            [[ ! $(is_test port ${is_use_port}) ]] && {
+            [[ ! $(is_test port "${is_use_port}") ]] && {
                 err "($is_use_port) 不是一个有效的端口. $is_err_tips"
             }
             if [[ $(node_port_used "$is_use_port" "$is_new_protocol") && ! $is_gen && ${is_new_protocol,,} != snell ]]; then
@@ -4792,33 +4819,33 @@ add() {
             port=$is_use_port
         fi
         if [[ $is_use_door_port ]]; then
-            [[ ! $(is_test port ${is_use_door_port}) ]] && {
+            [[ ! $(is_test port "${is_use_door_port}") ]] && {
                 err "(${is_use_door_port}) 不是一个有效的目标端口. $is_err_tips"
             }
             door_port=$is_use_door_port
         fi
         if [[ $is_use_uuid ]]; then
-            [[ ! $(is_test uuid $is_use_uuid) ]] && {
+            [[ ! $(is_test uuid "$is_use_uuid") ]] && {
                 err "($is_use_uuid) 不是一个有效的 UUID. $is_err_tips"
             }
             uuid=$is_use_uuid
         fi
         if [[ $is_use_path ]]; then
-            [[ ! $(is_test path $is_use_path) ]] && {
+            [[ ! $(is_test path "$is_use_path") ]] && {
                 err "($is_use_path) 不是有效的路径. $is_err_tips"
             }
             path=$is_use_path
         fi
         if [[ $is_use_method ]]; then
             is_tmp_use_name=加密方式
-            is_tmp_list=${ss_method_list[@]}
-            for v in ${is_tmp_list[@]}; do
-                [[ $(grep -E -i "^${is_use_method}$" <<<$v) ]] && is_tmp_use_type=$v && break
+            is_tmp_list=("${ss_method_list[@]}")
+            for v in "${is_tmp_list[@]}"; do
+                [[ $(grep -E -i "^${is_use_method}$" <<<"$v") ]] && is_tmp_use_type=$v && break
             done
             [[ ! ${is_tmp_use_type} ]] && {
                 warn "(${is_use_method}) 不是一个可用的${is_tmp_use_name}."
                 msg "${is_tmp_use_name}可用如下: "
-                for v in ${is_tmp_list[@]}; do
+                for v in "${is_tmp_list[@]}"; do
                     msg "\t\t$v"
                 done
                 msg "$is_err_tips\n"
@@ -4905,7 +4932,7 @@ add() {
                 fi
                 # set password
                 [[ ! $ss_password ]] && {
-                    if [[ $(grep 2022 <<<$ss_method) ]]; then
+                    if [[ $(grep 2022 <<<"$ss_method") ]]; then
                         is_default_arg=$(get ss2022)
                     else
                         [[ ! $tmp_uuid ]] && get_uuid
@@ -4942,15 +4969,15 @@ add() {
     fi
 
     # Shadowsocks 2022
-    if [[ $(grep 2022 <<<$ss_method) ]]; then
+    if [[ $(grep 2022 <<<"$ss_method") ]]; then
         # test ss2022 password
         [[ $ss_password ]] && {
             is_test_json=1
             create server Shadowsocks
             [[ ! $tmp_uuid ]] && get_uuid
             is_test_json_save=$is_conf_dir/tmp-test-$tmp_uuid
-            cat <<<"$is_new_json" >$is_test_json_save
-            $is_core_bin check -c $is_test_json_save &>/dev/null
+            cat <<<"$is_new_json" >"$is_test_json_save"
+            "$is_core_bin" check -c "$is_test_json_save" &>/dev/null
             if [[ $? != 0 ]]; then
                 warn "当前 Shadowsocks 加密方式 ($ss_method) 不支持此密码。脚本将自动生成可用密码。"
                 ss_password=
@@ -4958,7 +4985,7 @@ add() {
                 json_str=
             fi
             is_test_json=
-            rm -f $is_test_json_save
+            rm -f "$is_test_json_save"
         }
 
     fi
@@ -4992,7 +5019,7 @@ add() {
     fi
 
     # create json
-    create server $is_new_protocol
+    create server "$is_new_protocol"
     if [[ ! $is_change && ! $is_gen && $is_config_name ]]; then
         [[ $is_custom_node_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
         if [[ $is_custom_node_note ]] && declare -F note_set >/dev/null 2>&1; then
@@ -5019,15 +5046,21 @@ get() {
         [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
-            [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
+            [[ $(grep ":" <<<"$ip") ]] && is_addr="[$ip]"
         }
         # IPv6 地址加方括号 (URL 格式要求)
-        [[ $is_addr == *:* && $is_addr != \[*\] ]] && is_addr="[$is_addr]"
+        if [[ $is_addr == *:* && $is_addr != \[*\] ]]; then
+            is_addr="[$is_addr]"
+        fi
+        return 0
         ;;
     new)
         [[ ! $host ]] && get_ip
         [[ ! $port ]] && get_port && port=$tmp_port
-        [[ ! $uuid ]] && get_uuid && uuid=$tmp_uuid
+        if [[ ! $uuid ]]; then
+            get_uuid && uuid=$tmp_uuid
+        fi
+        return 0
         ;;
     file)
         is_file_str=$2
@@ -5064,12 +5097,12 @@ get() {
         ;;
     info)
         is_tcp_http=
-        get file $2
+        get file "$2"
         get_status=$?
         [[ $get_status == 2 ]] && return 2
         if [[ $is_config_file ]]; then
             is_json_str=$(json_strip_comments "$is_conf_dir/$is_config_file")
-            is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<$is_json_str)
+            is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<"$is_json_str")
             [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
             is_up_var_set=(null is_protocol port is_listen_addr uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key snell_version snell_psk snell_obfs_mode snell_mode)
             [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
@@ -5082,8 +5115,8 @@ get() {
                 printf -v "${is_up_var_set[$i]}" '%s' "$v"
                 export "${is_up_var_set[$i]}"
             done
-            for v in ${is_up_var_set[@]}; do
-                [[ ${!v} == 'null' ]] && unset $v
+            for v in "${is_up_var_set[@]}"; do
+                [[ ${!v} == 'null' ]] && unset "$v"
             done
 
             if [[ $is_private_key ]]; then
@@ -5096,20 +5129,20 @@ get() {
 
             # extract anytls ACME domain
             [[ $is_protocol == 'anytls' ]] && {
-                is_anytls_domain=$(jq -r '(.inbounds[0].tls.certificate_provider.domain[0] // .inbounds[0].tls.acme.domain[0]) // empty' <<<$is_json_str 2>/dev/null)
+                is_anytls_domain=$(jq -r '(.inbounds[0].tls.certificate_provider.domain[0] // .inbounds[0].tls.acme.domain[0]) // empty' <<<"$is_json_str" 2>/dev/null)
             }
 
             is_config_name=$is_config_file
 
             if [[ $is_caddy && $host && -f $is_caddy_conf/$host.conf ]]; then
-                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
+                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" "$is_caddy_conf/$host.conf" | sed 's/.*://')
             fi
             if [[ $host && ! -f $is_caddy_conf/$host.conf ]]; then
                 is_no_auto_tls=1
             fi
             [[ $is_tmp_https_port ]] && is_https_port=$is_tmp_https_port
             [[ $is_client && $host ]] && port=$is_https_port
-            get protocol $is_protocol-$net_type
+            get protocol "$is_protocol-$net_type"
         fi
         ;;
     protocol)
@@ -5154,7 +5187,9 @@ get() {
             [[ ! $ss_method ]] && ss_method=$is_random_ss_method
             [[ ! $ss_password ]] && {
                 ss_password=$uuid
-                [[ $(grep 2022 <<<$ss_method) ]] && ss_password=$(get ss2022)
+                if [[ $(grep 2022 <<<"$ss_method") ]]; then
+                    ss_password=$(get ss2022)
+                fi
             }
             json_str="method:\"$ss_method\",password:\"$ss_password\""
             ;;
@@ -5247,22 +5282,22 @@ get() {
         [[ $is_no_auto_tls || $is_gen || $is_dont_test_host ]] && return
         get_ip
         get ping
-        if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
-            msg "\n请将 ($(_red_bg $host)) 解析到 ($(_red_bg $ip))"
+        if [[ ! $(grep "$ip" <<<"$is_host_dns") ]]; then
+            msg "\n请将 ($(_red_bg "$host")) 解析到 ($(_red_bg "$ip"))"
             msg "\n如果使用 Cloudflare, 在 DNS 那; 关闭 (Proxy status / 代理状态), 即是 (DNS only / 仅限 DNS)"
             ask string y "确认域名已解析到本机公网 IP；如使用 Cloudflare，代理状态为“仅 DNS”。输入 y 继续:"
             get ping
-            if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
+            if [[ ! $(grep "$ip" <<<"$is_host_dns") ]]; then
                 _cyan "\n测试结果: $is_host_dns"
                 err "域名 ($host) 没有解析到 ($ip)"
             fi
         fi
         ;;
     ssss | ss2022)
-        if [[ $(grep 128 <<<$ss_method) ]]; then
-            $is_core_bin generate rand 16 --base64
+        if [[ $(grep 128 <<<"$ss_method") ]]; then
+            "$is_core_bin" generate rand 16 --base64
         else
-            $is_core_bin generate rand 32 --base64
+            "$is_core_bin" generate rand 32 --base64
         fi
         ;;
     ping)
@@ -5270,7 +5305,7 @@ get() {
         # [[ $(grep ":" <<<$ip) ]] && is_ip_type="-6"
         # is_host_dns=$(ping $host $is_ip_type -c 1 -W 2 | head -1)
         is_dns_type="a"
-        [[ $(grep ":" <<<$ip) ]] && is_dns_type="aaaa"
+        [[ $(grep ":" <<<"$ip") ]] && is_dns_type="aaaa"
         is_host_dns=$(_wget -qO- --header="accept: application/dns-json" "https://one.one.one.one/dns-query?name=$host&type=$is_dns_type")
         ;;
     install-caddy)
@@ -5283,9 +5318,9 @@ get() {
         _green "安装 Caddy 成功.\n"
         ;;
     reinstall)
-        is_install_sh=$(cat $is_sh_dir/install.sh)
+        is_install_sh=$(cat "$is_sh_dir/install.sh")
         uninstall || return $?
-        bash <<<$is_install_sh
+        bash <<<"$is_install_sh"
         ;;
     esac
 }
@@ -5302,7 +5337,7 @@ info() {
         info_status=$?
         [[ $info_status == 2 ]] && return 2
     elif [[ ! $is_protocol ]]; then
-        get info $1
+        get info "$1"
         info_status=$?
         [[ $info_status == 2 ]] && return 2
     fi
@@ -5316,8 +5351,8 @@ info() {
             is_can_change=(0 1 2 3 5 13 14 15 16)
             is_info_show=(0 1 2 3 4 6 7 8)
             [[ $is_protocol == 'vmess' ]] && {
-                is_vmess_url=$(jq -c '{v:2,ps:'\"$is_node_name\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
-                is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
+                is_vmess_url=$(jq -cn --arg ps "$is_node_name" --arg add "$is_addr" --arg port "$is_https_port" --arg id "$uuid" --arg net "$net" --arg host "$host" --arg path "$path" '{v:2,ps:$ps,add:$add,port:$port,id:$id,aid:"0",net:$net,host:$host,path:$path,tls:"tls"}')
+                is_url=vmess://$(echo -n "$is_vmess_url" | base64 -w 0)
             } || {
                 [[ $is_protocol == "trojan" ]] && {
                     uuid=$password
@@ -5328,18 +5363,18 @@ info() {
                 is_url="$is_protocol://$uuid@$host:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#$is_node_name"
             }
             [[ $is_caddy ]] && is_can_change+=(11)
-            is_info_str=($is_protocol $is_addr $is_https_port $uuid $net $host $path 'tls')
+            is_info_str=("$is_protocol" "$is_addr" "$is_https_port" "$uuid" "$net" "$host" "$path" 'tls')
         else
             is_type=none
             is_can_change=(0 1 5 13 14 15 16)
             is_info_show=(0 1 2 3 4)
-            is_info_str=($is_protocol $is_addr $port $uuid $net)
+            is_info_str=("$is_protocol" "$is_addr" "$port" "$uuid" "$net")
             [[ $net == "http" ]] && {
                 net=tcp
                 is_type=http
                 is_tcp_http=1
                 is_info_show+=(5)
-                is_info_str=(${is_info_str[@]/http/tcp http})
+                is_info_str=("$is_protocol" "$is_addr" "$port" "$uuid" "tcp" "http")
             }
             [[ $net == "quic" ]] && {
                 is_insecure=1
@@ -5348,36 +5383,36 @@ info() {
                 is_quic_add=",tls:\"tls\",alpn:\"h3\"" # cant add allowInsecure
             }
             is_vmess_url=$(jq -c "{v:2,ps:\"$is_node_name\",add:\"$is_addr\",port:\"$port\",id:\"$uuid\",aid:\"0\",net:\"$net\",type:\"$is_type\"$is_quic_add}" <<<{})
-            is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
+            is_url=vmess://$(echo -n "$is_vmess_url" | base64 -w 0)
         fi
         ;;
     ss)
         is_can_change=(0 1 4 6 13 14 15 16)
         is_info_show=(0 1 2 10 11)
-        is_url="ss://$(echo -n ${ss_method}:${ss_password} | base64 -w 0)@${is_addr}:${port}#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $ss_password $ss_method)
+        is_url="ss://$(echo -n "${ss_method}:${ss_password}" | base64 -w 0)@${is_addr}:${port}#$is_node_name"
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$ss_password" "$ss_method")
         ;;
     trojan)
         is_insecure=1
         is_can_change=(0 1 4 13 14 15 16)
         is_info_show=(0 1 2 10 4 8 20)
         is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $password tcp tls true)
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tcp tls true)
         ;;
     hy*)
         is_can_change=(0 1 4 12 13 14 15)
         is_info_show=(0 1 2 10 8 9 20)
         # fix xray core for client use.
-        is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
+        is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in "$is_core_dir/bin/tls.cer" | sed 's/.*=//;s/://g')
         is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $password tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5 13 14 15 16)
         is_info_show=(0 1 2 3 10 8 9 20 21)
         is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$is_node_name"
-        is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$uuid" "$password" tls h3 true bbr)
         ;;
     reality)
         is_color=41
@@ -5388,21 +5423,21 @@ info() {
         [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]] && {
             is_flow=
             is_net_type=h2
-            is_info_show=(${is_info_show[@]/15/})
+            is_info_show=(0 1 2 3 4 8 16 17 18)
         }
-        is_info_str=($is_protocol $is_addr "${is_public_port:-$port}" $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
+        is_info_str=("$is_protocol" "$is_addr" "${is_public_port:-$port}" "$uuid" "$is_flow" "$is_net_type" reality "$is_servername" chrome "$is_public_key")
         is_url="$is_protocol://$uuid@$is_addr:${is_public_port:-$port}?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
         ;;
     anytls)
         is_can_change=(0 1 4 12 13 14 15)
         if [[ $is_anytls_domain ]]; then
             is_info_show=(0 1 2 10 8)
-            is_info_str=($is_protocol $is_anytls_domain $port $password tls)
+            is_info_str=("$is_protocol" "$is_anytls_domain" "$port" "$password" tls)
             is_url="anytls://$password@$is_anytls_domain:$port#$is_node_name"
         else
             is_insecure=1
             is_info_show=(0 1 2 10 8 20)
-            is_info_str=($is_protocol $is_addr $port $password tls true)
+            is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tls true)
             is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#$is_node_name"
         fi
         ;;
@@ -5436,13 +5471,13 @@ info() {
     direct)
         is_can_change=(0 1 7 8 13 14 15 16)
         is_info_show=(0 1 2 13 14)
-        is_info_str=($is_protocol $is_addr $port $door_addr $door_port)
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$door_addr" "$door_port")
         ;;
     socks)
         is_can_change=(0 1 12 4 13 14 15 16)
         is_info_show=(0 1 2 19 10)
-        is_info_str=($is_protocol $is_addr $port $is_socks_user $is_socks_pass)
-        is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#$is_node_name"
+        is_info_str=("$is_protocol" "$is_addr" "$port" "$is_socks_user" "$is_socks_pass")
+        is_url="socks://$(echo -n "${is_socks_user}:${is_socks_pass}" | base64 -w 0)@${is_addr}:${port}#$is_node_name"
         ;;
     esac
     is_can_change+=(21)
@@ -5544,7 +5579,7 @@ show_qrcode_link() {
 # URL or qrcode
 url_qr() {
     is_dont_show_info=1
-    info $2
+    info "$2"
     if [[ $1 == 'qr' && $is_protocol == snell ]]; then
         err "Snell 不支持二维码生成，请使用 URL 链接或 Surge 配置"
     fi
@@ -5578,7 +5613,7 @@ is_reload_exit_code=75
 # update core, sh, caddy
 update() {
     case $1 in
-    1 | core | $is_core)
+    1 | core | "$is_core")
         is_update_name=core
         is_show_name=$is_core_name
         is_run_ver=v${is_core_ver##* }
@@ -5617,17 +5652,17 @@ update() {
     }
     load download.sh
     if [[ $is_new_ver ]]; then
-        msg "\n使用自定义版本更新 $is_show_name: $(_green $is_new_ver)\n"
+        msg "\n使用自定义版本更新 $is_show_name: $(_green "$is_new_ver")\n"
     else
-        get_latest_version $is_update_name
-        [[ $is_run_ver == $latest_ver ]] && {
+        get_latest_version "$is_update_name"
+        [[ $is_run_ver == "$latest_ver" ]] && {
             msg "\n$is_show_name 当前已经是最新版本了.\n"
             return 0
         }
-        msg "\n发现 $is_show_name 新版本: $(_green $latest_ver)\n"
+        msg "\n发现 $is_show_name 新版本: $(_green "$latest_ver")\n"
         is_new_ver=$latest_ver
     fi
-    download $is_update_name $is_new_ver
+    download "$is_update_name" "$is_new_ver"
     case $is_update_name in
     sh)
         if [[ -f $is_config_json ]] && ! "$is_sh_bin" __post-update; then
@@ -5638,18 +5673,18 @@ update() {
         if ! migrate_runtime_config; then
             err "内核更新后配置校验发现异常，已阻断内核重启以防服务故障。请检查配置或运行: sb fix-config.json"
         fi
-        if ! manage restart $is_update_name; then
+        if ! manage restart "$is_update_name"; then
             err "$is_show_name 更新后服务重启失败，请检查服务状态."
         fi
         ;;
     caddy)
-        if ! manage restart $is_update_name; then
+        if ! manage restart "$is_update_name"; then
             err "$is_show_name 更新后服务重启失败，请检查服务状态."
         fi
         ;;
     esac
-    msg "更新成功, 当前 $is_show_name 版本: $(_green $is_new_ver)\n"
-    msg "$(_green 请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver)\n"
+    msg "更新成功, 当前 $is_show_name 版本: $(_green "$is_new_ver")\n"
+    msg "$(_green "请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver")\n"
     if [[ $is_update_name == 'sh' && ${is_interactive_operation:-0} == 1 ]]; then
         msg "正在重新加载新版本面板...\n"
         return "$is_reload_exit_code"
@@ -6241,15 +6276,16 @@ main() {
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
         [[ $1 == 'no-auto-tls' ]] && is_no_auto_tls=1
-        add ${@:2}
+        add "${@:2}"
         ;;
     bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools)
         is_run_command=$1
         if [[ $1 == 'bin' ]]; then
-            $is_core_bin ${@:2}
+            "$is_core_bin" "${@:2}"
+        elif [[ $is_run_command == 'pbk' ]]; then
+            "$is_core_bin" generate reality-keypair "${@:2}"
         else
-            [[ $is_run_command == 'pbk' ]] && is_run_command="generate reality-keypair"
-            $is_core_bin $is_run_command ${@:2}
+            "$is_core_bin" "$is_run_command" "${@:2}"
         fi
         ;;
     bbr)
@@ -6267,13 +6303,13 @@ main() {
     #     create client $2
     #     ;;
     d | del | rm)
-        del $2
+        del "$2"
         ;;
     dd | ddel | fix | fix-all)
         case $1 in
         fix)
             [[ $2 ]] && {
-                change $2 full
+                change "$2" full
             } || {
                 is_change_id=full && change
             }
@@ -6300,8 +6336,8 @@ main() {
             [[ ! $2 ]] && {
                 err "无法找到需要删除的参数"
             } || {
-                for v in ${@:2}; do
-                    del $v
+                for v in "${@:2}"; do
+                    del "$v"
                 done
             }
             ;;
@@ -6309,12 +6345,17 @@ main() {
         is_dont_auto_exit=
         if [[ $fix_all_locked ]]; then
             manage restart
-            [[ $is_del_host ]] && manage restart caddy
+            if [[ $is_del_host ]]; then
+                manage restart caddy
+            fi
             shared_config_unlock
         else
             manage restart &
-            [[ $is_del_host ]] && manage restart caddy &
+            if [[ $is_del_host ]]; then
+                manage restart caddy &
+            fi
         fi
+        return 0
         ;;
     dns)
         load dns.sh
@@ -6322,7 +6363,7 @@ main() {
         ;;
     debug)
         is_debug=1
-        get info $2
+        get info "$2"
         warn "如果需要复制; 请把 *uuid, *password, *host, *key 的值改写, 以避免泄露."
         ;;
     fix-config.json)
@@ -6343,11 +6384,11 @@ main() {
         fi
         ;;
     i | info)
-        info $2
+        info "$2"
         ;;
     ip)
         get_ip
-        msg $ip
+        msg "$ip"
         ;;
     in | import)
         load import.sh
@@ -6357,7 +6398,7 @@ main() {
         log_set "${@:2}"
         ;;
     url | qr)
-        url_qr $@
+        url_qr "$@"
         ;;
     un | uninstall)
         uninstall
@@ -6370,10 +6411,10 @@ main() {
             is_update_name=sh
             is_update_ver=
         }
-        update $is_update_name $is_update_ver
+        update "$is_update_name" ${is_update_ver:+"$is_update_ver"}
         ;;
     ssss | ss2022)
-        get $@
+        get "$@"
         ;;
     s | status)
         [[ ${is_core_ver:-} ]] || init_core_ver
@@ -6388,23 +6429,23 @@ main() {
         service_action_result "$1" "$2"
         ;;
     reinstall)
-        get $1
+        get "$1"
         ;;
     get-port)
         get_port
-        msg $tmp_port
+        msg "$tmp_port"
         ;;
     main)
         is_main_menu
         ;;
     v | ver | version)
         [[ ${is_core_ver:-} ]] || init_core_ver
-        [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy $is_caddy_ver)"
-        msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_script_name script $is_sh_ver) $is_caddy_ver\n"
+        [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy "$is_caddy_ver")"
+        msg "\n$(_green "$is_core_name" "$is_core_ver") / $(_cyan "$is_script_name" script "$is_sh_ver") $is_caddy_ver\n"
         ;;
     h | help | --help)
         load help.sh
-        show_help ${@:2}
+        show_help "${@:2}"
         ;;
     relay)
         relay_main "${@:2}"

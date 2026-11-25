@@ -369,7 +369,7 @@ done
 (
     unset ip EVIL_INJECTED
     export FAKE_WGET4_BODY=$'EVIL_INJECTED=pwned\nip=198.51.100.7\n'
-    source <(sed -e '/EUID != 0/d' -e '/^main \$@$/d' "$REPO_ROOT/install.sh")
+    source <(sed -e '/EUID != 0/d' -e '/^main "\?\$@"\?$/d' "$REPO_ROOT/install.sh")
     get_ip
     [[ ${EVIL_INJECTED:-} == "" ]] || exit 2
     [[ ${ip:-} == "198.51.100.7" ]] || exit 3
@@ -379,7 +379,7 @@ done
     unset ip EVIL_INJECTED
     export FAKE_WGET4_BODY=$'ip=198.51.100.7 EVIL_INJECTED=pwned\n'
     export FAKE_WGET6_BODY=$'ip=2001:db8::77\n'
-    source <(sed -e '/EUID != 0/d' -e '/^main \$@$/d' "$REPO_ROOT/install.sh")
+    source <(sed -e '/EUID != 0/d' -e '/^main "\?\$@"\?$/d' "$REPO_ROOT/install.sh")
     get_ip
     [[ ${EVIL_INJECTED:-} == "" ]] || exit 2
     [[ ${ip:-} == "2001:db8::77" ]] || exit 3
@@ -389,7 +389,7 @@ if (
     unset ip
     export FAKE_WGET4_BODY="ip=1.2.3.4\$(touch $marker)"$'\n'
     export FAKE_WGET6_BODY=$'ip=not-an-ip\n'
-    source <(sed -e '/EUID != 0/d' -e '/^main \$@$/d' "$REPO_ROOT/install.sh")
+    source <(sed -e '/EUID != 0/d' -e '/^main "\?\$@"\?$/d' "$REPO_ROOT/install.sh")
     get_ip
     [[ -n ${ip:-} ]]
 ); then

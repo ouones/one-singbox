@@ -12,23 +12,23 @@ blue='\e[94m'
 magenta='\e[95m'
 cyan='\e[96m'
 none='\e[0m'
-_red() { echo -e ${red}$@${none}; }
-_blue() { echo -e ${blue}$@${none}; }
-_cyan() { echo -e ${cyan}$@${none}; }
-_green() { echo -e ${green}$@${none}; }
-_yellow() { echo -e ${yellow}$@${none}; }
-_magenta() { echo -e ${magenta}$@${none}; }
-_red_bg() { echo -e "\e[41m$@${none}"; }
+_red() { echo -e "${red}$*${none}"; }
+_blue() { echo -e "${blue}$*${none}"; }
+_cyan() { echo -e "${cyan}$*${none}"; }
+_green() { echo -e "${green}$*${none}"; }
+_yellow() { echo -e "${yellow}$*${none}"; }
+_magenta() { echo -e "${magenta}$*${none}"; }
+_red_bg() { echo -e "\e[41m$*${none}"; }
 
 is_err=$(_red_bg 错误!)
 is_warn=$(_red_bg 警告!)
 
 err() {
-    echo -e "\n$is_err $@\n" && exit 1
+    echo -e "\n$is_err $*\n" && exit 1
 }
 
 warn() {
-    echo -e "\n$is_warn $@\n"
+    echo -e "\n$is_warn $*\n"
 }
 
 # root
@@ -71,9 +71,9 @@ is_log_dir=/var/log/$is_core
 is_sh_bin=/usr/local/bin/$is_core
 is_sh_dir=$is_core_dir/sh
 is_sh_repo=ouones/one-singbox
-is_pkg="wget tar bash"
+is_pkg=(wget tar bash)
 # Alpine: gcompat provides glibc compatibility for prebuilt binaries
-[[ $cmd =~ apk ]] && is_pkg="$is_pkg gcompat jq"
+[[ $cmd =~ apk ]] && is_pkg+=(gcompat jq)
 is_config_json=$is_core_dir/config.json
 tmp_var_lists=(
     tmpcore
@@ -93,19 +93,19 @@ tmpdir=$(mktemp -d 2>/dev/null)
 }
 
 # set up var
-for i in ${tmp_var_lists[*]}; do
-    export $i=$tmpdir/$i
+for i in "${tmp_var_lists[@]}"; do
+    export "$i=$tmpdir/$i"
 done
 
 # load bash script.
 load() {
-    . $is_sh_dir/src/$1
+    . "$is_sh_dir/src/$1"
 }
 
 # wget add --no-check-certificate
 _wget() {
     [[ $proxy ]] && export https_proxy=$proxy
-    wget --no-check-certificate $*
+    wget --no-check-certificate "$@"
 }
 
 # print a mesage
@@ -139,31 +139,31 @@ show_help() {
 
 # install dependent pkg
 install_pkg() {
-    cmd_not_found=
-    for i in $*; do
-        [[ ! $(type -P $i) ]] && cmd_not_found="$cmd_not_found,$i"
+    local -a missing_pkgs=()
+    local i
+    for i in "$@"; do
+        [[ ! $(type -P "$i") ]] && missing_pkgs+=("$i")
     done
-    if [[ $cmd_not_found ]]; then
-        pkg=$(echo $cmd_not_found | sed 's/,/ /g')
-        msg warn "安装依赖包 >${pkg}"
+    if ((${#missing_pkgs[@]} > 0)); then
+        msg warn "安装依赖包 > ${missing_pkgs[*]}"
         if [[ $cmd =~ apk ]]; then
             apk update &>/dev/null
-            apk add $pkg &>/dev/null
+            apk add "${missing_pkgs[@]}" &>/dev/null
         else
-            $cmd install -y $pkg &>/dev/null
+            "$cmd" install -y "${missing_pkgs[@]}" &>/dev/null
             if [[ $? != 0 ]]; then
                 [[ $cmd =~ yum ]] && yum install epel-release -y &>/dev/null
                 if [[ $cmd =~ zypper ]]; then
-                    $cmd --non-interactive refresh &>/dev/null
+                    "$cmd" --non-interactive refresh &>/dev/null
                 else
-                    $cmd update -y &>/dev/null
+                    "$cmd" update -y &>/dev/null
                 fi
-                $cmd install -y $pkg &>/dev/null
+                "$cmd" install -y "${missing_pkgs[@]}" &>/dev/null
             fi
         fi
-        [[ $? == 0 ]] && >$is_pkg_ok
+        [[ $? == 0 ]] && >"$is_pkg_ok"
     else
-        >$is_pkg_ok
+        >"$is_pkg_ok"
     fi
 }
 
@@ -193,8 +193,8 @@ download() {
 
     [[ $link ]] && {
         msg warn "下载 ${name} > ${link}"
-        if _wget -t 3 -q -c $link -O $tmpfile; then
-            mv -f $tmpfile $is_ok
+        if _wget -t 3 -q -c "$link" -O "$tmpfile"; then
+            mv -f "$tmpfile" "$is_ok"
         fi
     }
 }
@@ -269,9 +269,9 @@ check_status() {
     [[ ! -f $is_pkg_ok ]] && {
         msg err "安装依赖包失败"
         if [[ $cmd =~ apk ]]; then
-            msg err "请尝试手动安装依赖包: apk update; apk add $is_pkg"
+            msg err "请尝试手动安装依赖包: apk update; apk add ${is_pkg[*]}"
         else
-            msg err "请尝试手动安装依赖包: $cmd update -y; $cmd install -y $is_pkg"
+            msg err "请尝试手动安装依赖包: $cmd update -y; $cmd install -y ${is_pkg[*]}"
         fi
         is_fail=1
     }
@@ -346,7 +346,7 @@ pass_args() {
             show_help
             ;;
         *)
-            echo -e "\n${is_err} ($@) 为未知参数...\n"
+            echo -e "\n${is_err} ($*) 为未知参数...\n"
             show_help
             ;;
         esac
@@ -358,7 +358,7 @@ pass_args() {
 
 # exit and remove tmpdir
 exit_and_del_tmpdir() {
-    rm -rf $tmpdir
+    rm -rf "$tmpdir"
     [[ ! $1 ]] && {
         msg err "哦豁.."
         msg err "安装过程出现错误..."
@@ -378,7 +378,7 @@ main() {
     }
 
     # check parameters
-    [[ $# -gt 0 ]] && pass_args $@
+    [[ $# -gt 0 ]] && pass_args "$@"
 
     # show welcome msg
     clear
@@ -391,15 +391,15 @@ main() {
     [[ $is_core_ver ]] && msg warn "${is_core_name} 版本: ${yellow}$is_core_ver${none}"
     [[ $proxy ]] && msg warn "使用代理: ${yellow}$proxy${none}"
     # create tmpdir
-    mkdir -p $tmpdir
+    mkdir -p "$tmpdir"
     # if is_core_file, copy file
     [[ $is_core_file ]] && {
-        cp -f $is_core_file $is_core_ok
+        cp -f "$is_core_file" "$is_core_ok"
         msg warn "${yellow}${is_core_name} 文件使用 > $is_core_file${none}"
     }
     # local dir install sh script
     [[ $local_install ]] && {
-        >$is_sh_ok
+        >"$is_sh_ok"
         msg warn "${yellow}本地获取安装脚本 > $PWD ${none}"
     }
 
@@ -414,15 +414,15 @@ main() {
     if [[ $cmd =~ apk ]]; then
         # Alpine: force install full versions to replace BusyBox applets
         apk update &>/dev/null
-        apk add $is_pkg &>/dev/null
-        [[ $? == 0 ]] && >$is_pkg_ok
+        apk add "${is_pkg[@]}" &>/dev/null
+        [[ $? == 0 ]] && >"$is_pkg_ok"
     else
-        install_pkg $is_pkg &
+        install_pkg "${is_pkg[@]}" &
     fi
 
     # jq
     if [[ $(type -P jq) ]]; then
-        >$is_jq_ok
+        >"$is_jq_ok"
     else
         jq_not_found=1
     fi
@@ -442,8 +442,8 @@ main() {
 
     # test $is_core_file
     if [[ $is_core_file ]]; then
-        mkdir -p $tmpdir/testzip
-        tar zxf $is_core_ok --strip-components 1 -C $tmpdir/testzip &>/dev/null
+        mkdir -p "$tmpdir/testzip"
+        tar zxf "$is_core_ok" --strip-components 1 -C "$tmpdir/testzip" &>/dev/null
         [[ $? != 0 ]] && {
             msg err "${is_core_name} 文件无法通过测试."
             exit_and_del_tmpdir
@@ -461,22 +461,22 @@ main() {
     }
 
     # create sh dir...
-    mkdir -p $is_sh_dir
+    mkdir -p "$is_sh_dir"
 
     # copy sh file or unzip sh zip file.
     if [[ $local_install ]]; then
-        cp -rf $PWD/* $is_sh_dir
+        cp -rf "$PWD"/* "$is_sh_dir"
     else
-        tar zxf $is_sh_ok -C $is_sh_dir
+        tar zxf "$is_sh_ok" -C "$is_sh_dir"
     fi
 
     # create core bin dir
-    mkdir -p $is_core_dir/bin
+    mkdir -p "$is_core_dir/bin"
     # copy core file or unzip core zip file
     if [[ $is_core_file ]]; then
-        cp -rf $tmpdir/testzip/* $is_core_dir/bin
+        cp -rf "$tmpdir/testzip"/* "$is_core_dir/bin"
     else
-        tar zxf $is_core_ok --strip-components 1 -C $is_core_dir/bin
+        tar zxf "$is_core_ok" --strip-components 1 -C "$is_core_dir/bin"
     fi
 
     # add alias
@@ -484,17 +484,17 @@ main() {
     grep -qxF "alias $is_core=$is_sh_bin" /root/.bashrc || echo "alias $is_core=$is_sh_bin" >>/root/.bashrc
 
     # core command
-    ln -sf $is_sh_dir/$is_core.sh $is_sh_bin
-    ln -sf $is_sh_dir/$is_core.sh ${is_sh_bin/$is_core/sb}
+    ln -sf "$is_sh_dir/$is_core.sh" "$is_sh_bin"
+    ln -sf "$is_sh_dir/$is_core.sh" "${is_sh_bin/$is_core/sb}"
 
     # jq
-    [[ $jq_not_found ]] && mv -f $is_jq_ok /usr/bin/jq
+    [[ $jq_not_found ]] && mv -f "$is_jq_ok" /usr/bin/jq
 
     # chmod
-    chmod +x $is_core_bin $is_sh_bin /usr/bin/jq ${is_sh_bin/$is_core/sb}
+    chmod +x "$is_core_bin" "$is_sh_bin" /usr/bin/jq "${is_sh_bin/$is_core/sb}"
 
     # create log dir
-    mkdir -p $is_log_dir
+    mkdir -p "$is_log_dir"
 
     # show a tips msg
     msg ok "生成配置文件..."
@@ -502,13 +502,13 @@ main() {
     # create service
     load systemd.sh
     is_new_install=1
-    install_service $is_core &>/dev/null
+    install_service "$is_core" &>/dev/null
 
     load log.sh
     log_limit_init || warn "无法启用日志大小限制，请在其他菜单中重新设置."
 
     # create condf dir
-    mkdir -p $is_conf_dir
+    mkdir -p "$is_conf_dir"
 
     load core.sh
     qrcode_dependency_install || :
@@ -521,4 +521,4 @@ main() {
 }
 
 # start.
-main $@
+main "$@"
