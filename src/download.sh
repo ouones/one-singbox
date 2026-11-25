@@ -20,6 +20,7 @@ get_latest_version() {
     unset name url
 }
 download() {
+    [[ ${is_arch:-} ]] || init_arch_detect
     latest_ver=$2
     [[ ! $latest_ver ]] && get_latest_version $1
     # tmp dir
@@ -64,8 +65,8 @@ download() {
     unset latest_ver
 }
 download_file() {
-    if ! _wget -t 5 -c $link -O $tmpfile; then
-        rm -rf $tmpdir
+    if ! _wget -t 5 -c "$link" -O "$tmpfile"; then
+        rm -rf "$tmpdir"
         err "\n下载 ${name} 失败.\n"
     fi
 }
