@@ -26,8 +26,6 @@ if [[ ! ${is_init_loaded:-} ]]; then
     unset is_core_init_source is_core_init_candidate
 fi
 
-[[ $EUID != 0 ]] && err "请以 root 用户重新运行此脚本。"
-
 [[ ! $cmd ]] && err "未检测到受支持的包管理器 (apt-get、yum、zypper 或 apk)。"
 
 [[ ! $is_systemd && ! $is_openrc ]] && {
@@ -5579,6 +5577,9 @@ is_reload_exit_code=75
 update() {
     case $1 in
     1 | core | $is_core)
+        if [[ -z ${is_core_ver:-} ]] && declare -F init_core_ver >/dev/null 2>&1; then
+            init_core_ver
+        fi
         is_update_name=core
         is_show_name=$is_core_name
         is_run_ver=v${is_core_ver##* }
@@ -6232,6 +6233,9 @@ relay_main() {
 
 # check prefer args, if not exist prefer args and show main menu
 main() {
+    if declare -F require_root_for_system_exec >/dev/null 2>&1; then
+        require_root_for_system_exec || return 1
+    fi
     local fix_all_locked=
     [[ ! $1 ]] && {
         is_main_menu
