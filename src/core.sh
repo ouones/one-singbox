@@ -508,7 +508,9 @@ show_list() {
 is_test() {
     case $1 in
     number)
-        echo "$2" | grep -E '^[1-9][0-9]?+$'
+        if [[ $2 != *$'\n'* && $2 != *$'\r'* ]]; then
+            echo "$2" | grep -E '^[1-9][0-9]?+$'
+        fi
         ;;
     port)
         if [[ $(is_test number "$2") ]]; then
@@ -519,13 +521,19 @@ is_test() {
         [[ $(node_port_used "$2" "$is_new_protocol") && ! $is_cant_test_port ]] && echo ok
         ;;
     domain)
-        echo "$2" | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
+        if [[ $2 != *$'\n'* && $2 != *$'\r'* ]]; then
+            echo "$2" | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
+        fi
         ;;
     path)
-        echo "$2" | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
+        if [[ $2 != *$'\n'* && $2 != *$'\r'* ]]; then
+            echo "$2" | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
+        fi
         ;;
     uuid)
-        echo "$2" | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        if [[ $2 != *$'\n'* && $2 != *$'\r'* ]]; then
+            echo "$2" | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        fi
         ;;
     esac
 
