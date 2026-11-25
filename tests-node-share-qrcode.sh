@@ -329,7 +329,7 @@ run_core_case "$repo_root/src/core.sh" src || fail "src core QR tests failed"
 if qrencode_bin=$(command -v qrencode); then
   issue16_url='vless://00000000-0000-4000-8000-000000000000@203.0.113.10:40018?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome#TEST-NODE'
   qr_output=$("$qrencode_bin" -t UTF8 "$issue16_url") || fail "real qrencode failed to render the issue URL"
-  qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | wc -L)
+  qr_width=$(printf '%s\n' "$qr_output" | sed $'s/\033\\[[0-9;]*m//g' | LC_ALL=C wc -L)
   qr_height=$(printf '%s\n' "$qr_output" | wc -l)
   [[ $qr_width == 21 && $qr_height == 29 ]] || fail "real qrencode UTF8 dimensions changed: ${qr_width}x${qr_height}"
   echo "PASS: real qrencode UTF8 dimensions are ${qr_width} columns x ${qr_height} rows"

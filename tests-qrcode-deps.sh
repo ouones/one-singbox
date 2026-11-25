@@ -176,6 +176,7 @@ run_install_case() {
   [[ ! -e $app_dir/core.sh ]] || fail "$case_name app directory still contains the legacy root core.sh"
   rewrite_paths "$app_dir/install.sh" "$root"
   rewrite_paths "$app_dir/src/core.sh" "$root"
+  rewrite_paths "$app_dir/src/init.sh" "$root"
   rewrite_paths "$app_dir/src/systemd.sh" "$root"
   rewrite_paths "$app_dir/src/log.sh" "$root"
 

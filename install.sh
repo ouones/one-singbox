@@ -31,19 +31,12 @@ warn() {
     echo -e "\n$is_warn $*\n"
 }
 
-# root
-[[ $EUID != 0 ]] && err "当前非 ${yellow}ROOT用户.${none}"
-
 # apt-get, yum, zypper or apk
 cmd=$(type -P apt-get || type -P yum || type -P zypper || type -P apk)
-[[ ! $cmd ]] && err "此脚本仅支持 ${yellow}(Ubuntu or Debian or CentOS or SUSE or Alpine)${none}."
 
 # systemd or openrc
 is_systemd=$(type -P systemctl)
 is_openrc=$(type -P rc-service)
-[[ ! $is_systemd && ! $is_openrc ]] && {
-    err "此系统缺少 ${yellow}(systemctl 或 rc-service)${none}, 请安装 systemd 或确认 OpenRC 已启用."
-}
 
 # wget installed or none
 is_wget=$(type -P wget)
@@ -57,7 +50,7 @@ amd64 | x86_64)
     is_arch=arm64
     ;;
 *)
-    err "此脚本仅支持 64 位系统..."
+    is_arch=
     ;;
 esac
 
@@ -84,18 +77,6 @@ tmp_var_lists=(
     is_jq_ok
     is_pkg_ok
 )
-
-# tmp dir
-tmpdir=$(mktemp -d 2>/dev/null)
-[[ ! $tmpdir ]] && {
-    tmpdir=/tmp/tmp-$RANDOM
-    mkdir -p "$tmpdir"
-}
-
-# set up var
-for i in "${tmp_var_lists[@]}"; do
-    export "$i=$tmpdir/$i"
-done
 
 # load bash script.
 load() {
@@ -371,6 +352,25 @@ exit_and_del_tmpdir() {
 
 # main
 main() {
+    # root
+    [[ $EUID -ne 0 && ${is_core_dir:-} == "/etc/${is_core:-sing-box}" ]] && err "当前非 ${yellow}ROOT用户.${none}"
+    [[ ! $cmd ]] && err "此脚本仅支持 ${yellow}(Ubuntu or Debian or CentOS or SUSE or Alpine)${none}."
+    [[ ! $is_systemd && ! $is_openrc ]] && {
+        err "此系统缺少 ${yellow}(systemctl 或 rc-service)${none}, 请安装 systemd 或确认 OpenRC 已启用."
+    }
+    [[ ! $is_arch ]] && err "此脚本仅支持 64 位系统..."
+
+    # tmp dir
+    tmpdir=$(mktemp -d 2>/dev/null)
+    [[ ! $tmpdir ]] && {
+        tmpdir=/tmp/tmp-$RANDOM
+        mkdir -p "$tmpdir"
+    }
+
+    # set up var
+    for i in "${tmp_var_lists[@]}"; do
+        export "$i=$tmpdir/$i"
+    done
 
     # check old version
     [[ -f $is_sh_bin && -d $is_core_dir/bin && -d $is_sh_dir && -d $is_conf_dir ]] && {
@@ -521,4 +521,6 @@ main() {
 }
 
 # start.
-main "$@"
+if [[ -z ${BASH_SOURCE[0]:-} || ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi
