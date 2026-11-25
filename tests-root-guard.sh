@@ -15,14 +15,14 @@ if [[ $EUID == 0 ]]; then
     exit 0
 fi
 
-# 1. Side-effect-free loading of src/core.sh, src/init.sh, and install.sh as non-root.
+# 1. Side-effect-free loading of src/core.sh and install.sh as non-root.
 out=$(
-    REPO_ROOT="$repo_root" bash <<'CASE' 2>&1
+    REPO_ROOT="$repo_root" WORKDIR="$workdir" bash <<'CASE' 2>&1
 set -o pipefail
 source "$REPO_ROOT/src/core.sh" || exit 11
 declare -F main >/dev/null || exit 12
-declare -F add >/dev/null || exit 13
-declare -F change >/dev/null || exit 14
+is_core_dir="$WORKDIR/nonroot-help"
+main help >/dev/null || exit 13
 CASE
 )
 rc=$?
@@ -32,24 +32,8 @@ rc=$?
 out=$(
     REPO_ROOT="$repo_root" bash <<'CASE' 2>&1
 set -o pipefail
-is_init_defs_only=1 source "$REPO_ROOT/src/init.sh" || exit 21
-declare -F init_entry >/dev/null || exit 22
-declare -F service_status_read >/dev/null || exit 23
-CASE
-)
-rc=$?
-[[ $rc == 0 ]] || fail "sourcing src/init.sh with is_init_defs_only=1 failed (rc=$rc): $out"
-[[ -z $out ]] || fail "sourcing src/init.sh with is_init_defs_only=1 produced unexpected output: $out"
-
-out=$(
-    REPO_ROOT="$repo_root" bash <<'CASE' 2>&1
-set -o pipefail
 source "$REPO_ROOT/install.sh" || exit 31
-_wget() { printf 'ip=203.0.113.42\n'; }
-declare -F get_ip >/dev/null || exit 32
-declare -F main >/dev/null || exit 33
-get_ip || exit 34
-[[ ${ip:-} == 203.0.113.42 ]] || exit 35
+declare -F main >/dev/null || exit 32
 CASE
 )
 rc=$?
@@ -128,5 +112,7 @@ chmod +x "$iso_root/etc/sing-box/sh/sing-box.sh" "$iso_root/etc/sing-box/bin/sin
 
 out=$(TEST_SYS_LOG="$iso_root/sys.log" PATH="$iso_root/bin:$PATH" bash "$iso_root/etc/sing-box/sh/sing-box.sh" version 2>&1) || fail "isolated sing-box.sh version failed: $out"
 [[ $out == *'sing-box 1.14.4'* ]] || fail "isolated sing-box.sh version output unexpected: $out"
+out=$(TEST_SYS_LOG="$iso_root/sys.log" PATH="$iso_root/bin:$PATH" bash "$iso_root/etc/sing-box/sh/sing-box.sh" status 2>&1) || fail "isolated sing-box.sh status failed: $out"
+[[ $out == *'sing-box 1.14.4'* ]] || fail "isolated sing-box.sh status output unexpected: $out"
 
 echo "PASS: tests-root-guard.sh"

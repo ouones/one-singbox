@@ -21,45 +21,26 @@ done
 core_lines=$(wc -l <"$repo_root/src/core.sh")
 ((core_lines < 4000)) || fail "src/core.sh is still too large ($core_lines lines)"
 
-# 2. Direct source of src/core.sh loads all submodules cleanly with zero output.
+# 2. Direct source of src/core.sh loads all submodules cleanly with zero output and supports main entrypoints.
 out=$(
-    REPO_ROOT="$repo_root" bash <<'CASE' 2>&1
+    REPO_ROOT="$repo_root" WORKDIR="$workdir" bash <<'CASE' 2>&1
 set -o pipefail
 source "$REPO_ROOT/src/core.sh" || exit 11
-for fn in meta_get parse_vless_uri render_runtime_node_outbound_modes validate_snell relay_note main; do
-    declare -F "$fn" >/dev/null || { echo "missing fn: $fn" >&2; exit 12; }
-done
+declare -F main >/dev/null || { echo "missing main" >&2; exit 12; }
+is_core_dir="$WORKDIR/direct-core"
+is_conf_dir="$WORKDIR/direct-conf"
+is_core_ver=1.14.4
+mkdir -p "$is_core_dir" "$is_conf_dir/.quan-meta"
+main help >/dev/null || exit 13
+main relay list >/dev/null || exit 14
+main block-cn status >/dev/null || exit 15
 CASE
 )
 rc=$?
 [[ $rc == 0 ]] || fail "direct source src/core.sh failed (rc=$rc): $out"
 [[ -z $out ]] || fail "direct source src/core.sh produced unexpected output: $out"
 
-# 3. Deferred loading works for lightweight CLI commands and loads full modules for heavy commands.
-out=$(
-    REPO_ROOT="$repo_root" bash <<'CASE' 2>&1
-set -o pipefail
-is_core_defer_modules=1 source "$REPO_ROOT/src/core.sh" || exit 21
-if declare -F parse_vless_uri >/dev/null 2>&1; then
-    echo "parse_vless_uri should be deferred under is_core_defer_modules=1" >&2
-    exit 22
-fi
-is_core_dir=/tmp/nonexistent-sb-root
-is_core_ver=1.14.4
-main version >/dev/null || exit 23
-if declare -F parse_vless_uri >/dev/null 2>&1; then
-    echo "main version unexpectedly loaded heavy uri module" >&2
-    exit 24
-fi
-core_load_modules || exit 25
-declare -F parse_vless_uri >/dev/null || exit 26
-declare -F render_runtime_node_outbound_modes >/dev/null || exit 27
-CASE
-)
-rc=$?
-[[ $rc == 0 ]] || fail "deferred module loading check failed (rc=$rc): $out"
-
-# 4. Isolated sing-box.sh entry exercises lightweight fast-path and heavy subcommands end-to-end.
+# 3. Isolated sing-box.sh entry exercises lightweight fast-path and heavy subcommands end-to-end.
 root="$workdir/root"
 sh_dir="$root/etc/sing-box/sh"
 entry="$sh_dir/sing-box.sh"
@@ -80,6 +61,14 @@ cat >"$root/etc/sing-box/bin/sing-box" <<'FAKE_CORE'
 #!/usr/bin/env bash
 case $1 in
 version) printf 'sing-box version 1.14.4\n' ;;
+generate)
+    if [[ $2 == reality-keypair ]]; then
+        printf 'Private key: priv\nPublic key: pub\n'
+    elif [[ $2 == tls-keypair ]]; then
+        printf '-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n'
+        printf '-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n'
+    fi
+    ;;
 check) exit 0 ;;
 esac
 exit 0
@@ -93,7 +82,16 @@ cat >"$workdir/bin/systemctl" <<'FAKE_SYS'
 [[ $1 == is-active ]] && printf 'active\n'
 exit 0
 FAKE_SYS
-chmod +x "$root/etc/sing-box/bin/sing-box" "$workdir/bin/apt-get" "$workdir/bin/systemctl"
+cat >"$workdir/bin/ss" <<'FAKE_SS'
+#!/usr/bin/env bash
+exit 0
+FAKE_SS
+cat >"$workdir/bin/wget" <<'FAKE_WGET'
+#!/usr/bin/env bash
+[[ $* == *cdn-cgi/trace* ]] && printf 'ip=203.0.113.10\n'
+exit 0
+FAKE_WGET
+chmod +x "$root/etc/sing-box/bin/sing-box" "$workdir/bin/apt-get" "$workdir/bin/systemctl" "$workdir/bin/ss" "$workdir/bin/wget"
 printf '{"log":{"level":"info"},"outbounds":[{"tag":"direct","type":"direct"}]}\n' >"$root/etc/sing-box/config.json"
 
 out=$(PATH="$workdir/bin:$PATH" bash "$entry" version 2>&1) || fail "entry version failed: $out"
@@ -102,13 +100,19 @@ out=$(PATH="$workdir/bin:$PATH" bash "$entry" version 2>&1) || fail "entry versi
 out=$(PATH="$workdir/bin:$PATH" bash "$entry" help 2>&1) || fail "entry help failed: $out"
 [[ $out == *'Usage: sing-box'* ]] || fail "entry help output unexpected: $out"
 
+out=$(PATH="$workdir/bin:$PATH" bash "$entry" status 2>&1) || fail "entry status failed: $out"
+[[ $out == *'sing-box 1.14.4'* ]] || fail "entry status output unexpected: $out"
+
 out=$(PATH="$workdir/bin:$PATH" bash "$entry" block-cn status 2>&1) || fail "entry block-cn status failed: $out"
 [[ $out == *'屏蔽回国流量: 未启用'* ]] || fail "entry block-cn status unexpected: $out"
 
 out=$(PATH="$workdir/bin:$PATH" bash "$entry" relay list 2>&1) || fail "entry relay list failed: $out"
 [[ $out == *'当前未配置任何端口转发'* ]] || fail "entry relay list unexpected: $out"
 
-# 5. Local variable scope isolation: helper calls do not clobber caller scratch globals.
+out=$(PATH="$workdir/bin:$PATH" bash "$entry" add ss 30011 secret aes-128-gcm 2>&1) || fail "entry add ss failed: $out"
+[[ -f $root/etc/sing-box/conf/Shadowsocks-30011.json ]] || fail "entry add ss did not create node config"
+
+# 4. Local variable scope isolation: main subcommand calls do not clobber caller scratch globals.
 out=$(
     REPO_ROOT="$repo_root" WORKDIR="$workdir" bash <<'CASE' 2>&1
 set -o pipefail
@@ -146,25 +150,27 @@ is_dont_show_info=
 
 port=10001
 is_new_protocol=Shadowsocks
-get_port
-[[ $tmp_port =~ ^[0-9]+$ ]] || { echo "get_port failed" >&2; exit 32; }
-[[ $is_count == sentinel_count ]] || { echo "get_port leaked is_count=$is_count" >&2; exit 33; }
+main get-port >/dev/null || exit 32
+[[ $tmp_port =~ ^[0-9]+$ ]] || { echo "main get-port failed" >&2; exit 32; }
+[[ $is_count == sentinel_count ]] || { echo "main get-port leaked is_count=$is_count" >&2; exit 33; }
 
-get_pbk
-[[ $is_private_key == priv123 && $is_public_key == pub123 ]] || { echo "get_pbk failed" >&2; exit 34; }
-[[ $is_tmp_pbk == sentinel_pbk ]] || { echo "get_pbk leaked is_tmp_pbk" >&2; exit 35; }
+main gen reality 10002 11111111-1111-4111-8111-111111111111 www.amazon.com >/dev/null || exit 34
+[[ $is_private_key == priv123 && $is_public_key == pub123 ]] || { echo "main gen reality failed" >&2; exit 34; }
+[[ $is_tmp_pbk == sentinel_pbk ]] || { echo "main gen reality leaked is_tmp_pbk" >&2; exit 35; }
 
-vless_grpc_default_authority "example.com" 443 tls "example.com"
-[[ $vless_grpc_default_authority_value == example.com ]] || { echo "vless_grpc_default_authority failed" >&2; exit 36; }
-[[ $tag == sentinel_tag ]] || { echo "vless_grpc_default_authority leaked tag=$tag" >&2; exit 37; }
+main no-auto-tls >/dev/null 2>&1 || true
+is_no_auto_tls=1
+main gen vh2 example.com 11111111-1111-4111-8111-111111111111 /h2 >/dev/null || exit 36
+is_no_auto_tls=
+[[ $tag == sentinel_tag ]] || { echo "main gen vh2 leaked tag=$tag" >&2; exit 37; }
 
-url_qr url ss-10001.json >/dev/null
-[[ $is_url == ss://* ]] || { echo "url_qr failed" >&2; exit 38; }
+main url ss-10001.json >/dev/null || exit 38
+[[ $is_url == ss://* ]] || { echo "main url failed" >&2; exit 38; }
 [[ $i == sentinel_i && $a == sentinel_a && $tt == sentinel_tt && $is_node_name == sentinel_name ]] || {
-    echo "info leaked loop/display vars: i=$i a=$a tt=$tt is_node_name=$is_node_name" >&2
+    echo "main url leaked loop/display vars: i=$i a=$a tt=$tt is_node_name=$is_node_name" >&2
     exit 39
 }
-[[ -z $is_dont_show_info ]] || { echo "url_qr leaked is_dont_show_info=$is_dont_show_info" >&2; exit 40; }
+[[ -z $is_dont_show_info ]] || { echo "main url leaked is_dont_show_info=$is_dont_show_info" >&2; exit 40; }
 CASE
 )
 rc=$?

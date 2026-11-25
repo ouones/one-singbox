@@ -4,7 +4,7 @@ repo_root=$(cd "$(dirname "$0")" && pwd)
 for core_file in "$repo_root/src/core.sh"; do
   for choice in 18 8; do
     CORE_FILE=$core_file CHOICE=$choice timeout 10 bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_core_dir=$case_dir
@@ -38,7 +38,7 @@ CASE
 done
 for core_file in "$repo_root/src/core.sh"; do
   CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_conf_dir=$case_dir
@@ -70,7 +70,7 @@ done
 for core_file in "$repo_root/src/core.sh"; do
   for action in 2 3; do
     CORE_FILE=$core_file ACTION=$action bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_conf_dir=$case_dir
@@ -104,7 +104,7 @@ CASE
 done
 for core_file in "$repo_root/src/core.sh"; do
   CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_conf_dir=$case_dir
@@ -121,7 +121,7 @@ CASE
 done
 for core_file in "$repo_root/src/core.sh"; do
   CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_core_dir=$case_dir

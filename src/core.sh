@@ -1,7 +1,7 @@
 #!/bin/bash
 
 _core_resolve_src_dir() {
-    local candidate dir
+    local dir
     if [[ ${BASH_SOURCE[0]:-} ]]; then
         dir=$(dirname -- "${BASH_SOURCE[0]}")
         if [[ -f $dir/meta.sh || -f $dir/init.sh ]]; then
@@ -9,22 +9,10 @@ _core_resolve_src_dir() {
             return 0
         fi
     fi
-    for candidate in \
-        "${CORE_FILE:+$(dirname -- "$CORE_FILE")}" \
-        "${UPDATE_CORE_FILE:+$(dirname -- "$UPDATE_CORE_FILE")}" \
-        "${QRCODE_TEST_CORE:+$(dirname -- "$QRCODE_TEST_CORE")}" \
-        "${core:+$(dirname -- "$core")}" \
-        "${core_file:+$(dirname -- "$core_file")}" \
-        "${REPO_ROOT:+${REPO_ROOT}/src}" \
-        "${repo_root:+${repo_root}/src}" \
-        "${REPO_DIR:+${REPO_DIR}/src}" \
-        "${is_sh_dir:+${is_sh_dir}/src}" \
-        "$PWD/src"; do
-        if [[ $candidate && ( -f $candidate/meta.sh || -f $candidate/init.sh ) ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
+    if [[ ${is_sh_dir:-} && ( -f $is_sh_dir/src/meta.sh || -f $is_sh_dir/src/init.sh ) ]]; then
+        printf '%s\n' "$is_sh_dir/src"
+        return 0
+    fi
     return 1
 }
 
@@ -554,11 +542,11 @@ edit_node_outbound_mode() {
         echo
         [[ $is_outbound_ss_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_ss_uri ]]; then
-            parse_proxy_uri ss "$is_outbound_ss_uri" || err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"
+            parse_proxy_uri ss "$is_outbound_ss_uri" || { err "${outbound_proxy_parse_error:-SS 链接格式或参数无效，请检查地址、端口和加密方式.}"; return 1; }
             proxy_config=$outbound_proxy_config_json
             proxy_name=$outbound_proxy_name
         else
-            [[ $current_proxy_type == shadowsocks ]] || err "没有可复用的 Shadowsocks 配置，请粘贴 SS 分享链接."
+            [[ $current_proxy_type == shadowsocks ]] || { err "没有可复用的 Shadowsocks 配置，请粘贴 SS 分享链接."; return 1; }
             proxy_config=
             proxy_name=
         fi
@@ -576,16 +564,16 @@ edit_node_outbound_mode() {
         echo
         [[ $is_outbound_vless_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_vless_uri ]]; then
-            parse_proxy_uri vless "$is_outbound_vless_uri" || err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"
+            parse_proxy_uri vless "$is_outbound_vless_uri" || { err "${outbound_proxy_parse_error:-VLESS 链接格式或参数无效}"; return 1; }
             proxy_config=$outbound_proxy_config_json
             proxy_name=$outbound_proxy_name
         else
-            [[ $current_proxy_type == vless ]] || err "没有可复用的 VLESS 配置，请粘贴 VLESS 分享链接."
+            [[ $current_proxy_type == vless ]] || { err "没有可复用的 VLESS 配置，请粘贴 VLESS 分享链接."; return 1; }
             proxy_config=
             proxy_name=
         fi
     fi
-    apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || err "$outbound_apply_error"
+    apply_node_outbound_mode "$is_config_file" "$is_outbound_mode" "$proxy_config" "$proxy_name" || { err "$outbound_apply_error"; return 1; }
     msg_outbound_mode_display "配置已应用:" "$is_config_file"
 }
 
@@ -627,11 +615,12 @@ create() {
                     --argjson version 5 \
                     '{inbounds:[{tag:$tag,type:"snell",listen:"::",listen_port:$port,version:$version,psk:$psk,obfs_mode:$obfs_mode}]}')
             fi
-            is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || err "无法创建 Snell 临时配置文件."
+            is_snell_tmp_file=$(mktemp "$is_conf_dir/.snell-XXXXXX") || { err "无法创建 Snell 临时配置文件."; return 1; }
             printf '%s\n' "$is_new_json" >"$is_snell_tmp_file"
             if ! "$is_core_bin" check -c "$is_snell_tmp_file" &>/dev/null; then
                 rm -f "$is_snell_tmp_file"
                 err "Snell 配置校验失败."
+                return 1
             fi
         else
             is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
@@ -650,24 +639,26 @@ create() {
         }
         node_migration_applied=
         if [[ ! $is_change || ! $previous_config_file ]]; then
-            shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+            shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
             new_node_lock=1
             if [[ ${2,,} != snell ]]; then
                 is_used_port=
                 if [[ $(node_port_used "$port" "$is_new_protocol") ]]; then
                     shared_config_unlock
                     err "无法使用 ($port) 端口"
+                    return 1
                 fi
             fi
             new_node_transport=$(node_protocol_transport "$is_new_protocol")
             if config_port_used "$port" "$previous_config_file" "$new_node_transport"; then
                 shared_config_unlock
                 err "节点监听端口 ($port) 已被现有配置占用"
+                return 1
             fi
         fi
         if [[ $is_change && $previous_config_file ]]; then
             [[ $is_snell_tmp_file ]] && rm -f "$is_snell_tmp_file"
-            apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || err "$node_lifecycle_error"
+            apply_node_config_lifecycle replace "$previous_config_file" "$is_config_name" "$is_new_json" || { err "$node_lifecycle_error"; return 1; }
             node_migration_applied=1
             is_config_file=$is_config_name
             msg "\n节点配置已应用: $(_green "$is_config_name")\n"
@@ -680,7 +671,9 @@ create() {
         elif [[ ${2,,} == snell ]]; then
             if ! mv -f "$is_snell_tmp_file" "$is_json_file"; then
                 rm -f "$is_snell_tmp_file"
+                [[ $new_node_lock ]] && shared_config_unlock
                 err "保存 Snell 配置失败, 原有配置未改变."
+                return 1
             fi
         else
             cat <<<"$is_new_json" >"$is_json_file"
@@ -693,7 +686,9 @@ create() {
         if [[ ! $node_migration_applied ]]; then
             sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1 || {
                 [[ ! $is_change ]] && rm -f "$is_json_file" "$is_conf_dir/.quan-meta/$is_config_name.meta.json"
+                [[ $new_node_lock ]] && shared_config_unlock
                 err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+                return 1
             }
             if [[ $is_new_install ]]; then
                 # config.json
@@ -715,37 +710,39 @@ create() {
         is_tls=tls
         is_client=1
         get info "$2"
-        [[ ! $is_client_id_json ]] && err "($is_config_name) 不支持生成客户端配置."
+        [[ ! $is_client_id_json ]] && { err "($is_config_name) 不支持生成客户端配置."; return 1; }
         is_new_json=$(jq --arg tag "$is_config_name" --arg proto "$is_protocol" "{outbounds:[{tag:\$tag,protocol:\$proto,$is_client_id_json,$is_stream}]}" <<<{})
         msg
         jq <<<"$is_new_json"
         msg
         ;;
     caddy)
-        shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+        shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
         load caddy.sh
         if [[ $is_install_caddy ]]; then
             caddy_config new
-            [[ -f $is_caddyfile ]] || { shared_config_unlock; err "无法创建 Caddy 主配置文件."; }
+            [[ -f $is_caddyfile ]] || { shared_config_unlock; err "无法创建 Caddy 主配置文件."; return 1; }
         fi
         if [[ ! $(grep "$is_caddy_conf" "$is_caddyfile" 2>/dev/null) ]]; then
             msg "import $is_caddy_conf/*.conf" >>"$is_caddyfile" || {
                 shared_config_unlock
                 err "无法更新 Caddy 主配置文件."
+                return 1
             }
         fi
         if [[ ! -d $is_caddy_conf ]] && ! mkdir -p "$is_caddy_conf"; then
             shared_config_unlock
             err "无法创建 Caddy 配置目录."
+            return 1
         fi
         caddy_config "$2"
-        [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; }
+        [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; return 1; }
         shared_config_unlock
         manage_restart_checked caddy "Caddy 配置已更新" || return 1
         ;;
     config.json)
         local candidate_config
-        shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+        shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
         is_log='log:{output:"/var/log/'$is_core'/access.log",level:"info","timestamp":true}'
         is_dns='dns:{}'
         is_ntp='ntp:{"enabled":true,"server":"time.apple.com"},'
@@ -756,12 +753,13 @@ create() {
         fi
         is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
-        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || { shared_config_unlock; err "无法创建候选公共配置"; }
-        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; shared_config_unlock; err "无法写入候选公共配置"; }
+        candidate_config=$(mktemp "$is_config_json.rebuild.XXXXXX") || { shared_config_unlock; err "无法创建候选公共配置"; return 1; }
+        printf '%s\n' "$is_server_config_json" >"$candidate_config" || { rm -f "$candidate_config"; shared_config_unlock; err "无法写入候选公共配置"; return 1; }
         if ! sync_runtime_node_outbound_modes "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
             rm -f "$candidate_config"
             shared_config_unlock
             err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            return 1
         fi
         rm -f "$candidate_config"
         shared_config_unlock
@@ -848,6 +846,7 @@ change() {
         *)
             [[ $is_try_change ]] && return
             err "无法识别 ($2) 更改类型."
+            return 1
             ;;
         esac
     fi
@@ -873,6 +872,7 @@ change() {
         fi
     }
     [[ $change_info_status == 2 ]] && return 2
+    [[ $change_info_status == 0 ]] || return "$change_info_status"
     is_old_net=$net
     [[ $is_tcp_http ]] && net=http
     [[ $host ]] && net=$is_protocol-$net-tls
@@ -909,10 +909,10 @@ change() {
             is_new_servername=$4
             is_servername=$4
         fi
-        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
+        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && { err "($is_config_file) 不支持更改端口, 因为没啥意义."; return 1; }
         if [[ $is_new_port && ! $is_auto ]]; then
-            [[ ! $(is_test port "$is_new_port") ]] && err "请输入正确的端口, 可选(1-65535)"
-            [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && err "无法使用 ($is_new_port) 端口"
+            [[ ! $(is_test port "$is_new_port") ]] && { err "请输入正确的端口, 可选(1-65535)"; return 1; }
+            [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && { err "无法使用 ($is_new_port) 端口"; return 1; }
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
     [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
@@ -930,7 +930,7 @@ change() {
     2)
         # new host
         is_new_host=$3
-        [[ ! $host ]] && err "($is_config_file) 不支持更改域名."
+        [[ ! $host ]] && { err "($is_config_file) 不支持更改域名."; return 1; }
     [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
         old_host=$host # del old host
         add "$net" "$is_new_host"
@@ -938,7 +938,7 @@ change() {
     3)
         # new path
         is_new_path=$3
-        [[ ! $path ]] && err "($is_config_file) 不支持更改路径."
+        [[ ! $path ]] && { err "($is_config_file) 不支持更改路径."; return 1; }
         [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
     [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
         add "$net" auto auto "$is_new_path"
@@ -955,6 +955,7 @@ change() {
             }
         else
             err "($is_config_file) 不支持更改密码."
+            return 1
         fi
     [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
         password=$is_new_pass
@@ -965,7 +966,7 @@ change() {
     5)
         # new uuid
         is_new_uuid=$3
-        [[ ! $uuid ]] && err "($is_config_file) 不支持更改 UUID."
+        [[ ! $uuid ]] && { err "($is_config_file) 不支持更改 UUID."; return 1; }
         [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
     [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
         add "$net" auto "$is_new_uuid"
@@ -974,7 +975,7 @@ change() {
         # new method
         is_new_method=$3
         is_new_ss_password=$ss_password
-        [[ $net != 'ss' ]] && err "($is_config_file) 不支持更改加密方式."
+        [[ $net != 'ss' ]] && { err "($is_config_file) 不支持更改加密方式."; return 1; }
         [[ $is_auto ]] && is_new_method=$is_random_ss_method
         if [[ ! $is_new_method ]]; then
             select_ss_method
@@ -996,7 +997,7 @@ change() {
     7)
         # new remote addr
         is_new_door_addr=$3
-        [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标地址."
+        [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标地址."; return 1; }
     [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
         door_addr=$is_new_door_addr
         add "$net"
@@ -1004,7 +1005,7 @@ change() {
     8)
         # new remote port
         is_new_door_port=$3
-        [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标端口."
+        [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标端口."; return 1; }
         [[ ! $is_new_door_port ]] && {
         ask string door_port "请输入新的目标端口 (1-65535):"
             is_new_door_port=$door_port
@@ -1015,18 +1016,20 @@ change() {
         # new is_private_key is_public_key
         is_new_private_key=$3
         is_new_public_key=$4
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改密钥."
+        [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改密钥."; return 1; }
         if [[ $is_auto ]]; then
             get_pbk
             add "$net"
         else
             [[ $is_new_private_key && ! $is_new_public_key ]] && {
                 err "无法找到 Public key."
+                return 1
             }
             [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新的私钥 (输入不显示):"
             [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新的公钥:"
             if [[ $is_new_private_key == "$is_new_public_key" ]]; then
                 err "Private key 和 Public key 不能一样."
+                return 1
             fi
             is_tmp_json=$is_conf_dir/$is_config_file-$uuid
             cp -f "$is_conf_dir/$is_config_file" "$is_tmp_json"
@@ -1043,7 +1046,7 @@ change() {
                 is_key_err_msg+="Public key 无法通过测试."
             fi
             rm "$is_tmp_json"
-            [[ $is_key_err ]] && err "$is_key_err_msg"
+            [[ $is_key_err ]] && { err "$is_key_err_msg"; return 1; }
             is_private_key=$is_new_private_key
             is_public_key=$is_new_public_key
             is_test_json=
@@ -1053,7 +1056,7 @@ change() {
     10)
         # new serverName
         is_new_servername=$3
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改 serverName."
+        [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改 serverName."; return 1; }
         [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
         [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
         is_servername=$is_new_servername
@@ -1064,8 +1067,9 @@ change() {
         is_new_proxy_site=$3
         [[ ! $is_caddy && ! $host ]] && {
             err "($is_config_file) 不支持更改伪装网站."
+            return 1
         }
-        [[ ! -f $is_caddy_conf/${host}.conf.add ]] && err "无法配置伪装网站."
+        [[ ! -f $is_caddy_conf/${host}.conf.add ]] && { err "无法配置伪装网站."; return 1; }
         [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的反向代理目标域名 (例如 example.com):"
         proxy_site=$(sed 's#^.*//##;s#/$##' <<<"$is_new_proxy_site")
         load caddy.sh
@@ -1075,7 +1079,7 @@ change() {
         ;;
     12)
         # new socks user
-        [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
+        [[ ! $is_socks_user ]] && { err "($is_config_file) 不支持更改用户名 (Username)."; return 1; }
     ask string is_socks_user "请输入新用户名:"
         add "$net"
         ;;
@@ -1084,9 +1088,9 @@ change() {
         is_new_name=$3
     [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
         is_new_name=${is_new_name%.json}
-        [[ ! $is_new_name ]] && err "节点名称不能为空."
+        [[ ! $is_new_name ]] && { err "节点名称不能为空."; return 1; }
         is_old_name=$(node_name_for_link "$is_config_file")
-        [[ "$is_old_name" == "$is_new_name" ]] && err "新节点名称与当前名称一致."
+        [[ "$is_old_name" == "$is_new_name" ]] && { err "新节点名称与当前名称一致."; return 1; }
         meta_set "$is_config_file" node_name "$is_new_name"
         msg "\n已更新节点名称为: $(_green "$is_new_name")\n"
         info
@@ -1100,31 +1104,31 @@ change() {
             echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
             interactive_read -r is_new_entry_addr
         fi
-        is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || err "入口地址更新失败: $is_new_entry_addr"
+        is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || { err "入口地址更新失败: $is_new_entry_addr"; return 1; }
         msg "\n已更新入口地址为: $(_green "$is_new_entry_addr")\n"
         info
         ;;
     17)
         # psk
-        [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell PSK."
+        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell PSK."; return 1; }
         is_new_snell_psk=$3
         [[ $is_auto ]] && is_new_snell_psk=$(get_snell_psk)
     [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
         if [[ $snell_version == 6 ]]; then
-            ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"
+            ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || { err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"; return 1; }
         fi
         snell_psk=$is_new_snell_psk
         add snell
         ;;
     18)
         # snell-version
-        [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell 版本."
+        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 版本."; return 1; }
         is_new_snell_version=$3
         [[ $is_auto ]] && is_new_snell_version=6
         [[ ! $is_new_snell_version ]] && {
     ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
         }
-        snell_version_valid "$is_new_snell_version" || err "Snell 版本只支持 5 或 6. $is_err_tips"
+        snell_version_valid "$is_new_snell_version" || { err "Snell 版本只支持 5 或 6. $is_err_tips"; return 1; }
         if [[ $is_new_snell_version == 6 && $snell_version != 6 ]]; then
             # migrating v5 -> v6
             unset snell_obfs_mode
@@ -1143,7 +1147,7 @@ change() {
         ;;
     19)
         # obfs-mode
-        [[ $is_protocol == snell ]] || err "($is_config_file) 不支持更改 Snell 混淆模式."
+        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 混淆模式."; return 1; }
         if [[ $snell_version == 6 ]]; then
             # smart routing for v6 node
             if [[ $3 =~ ^(default|unshaped|unsafe-raw)$ ]]; then
@@ -1213,7 +1217,7 @@ change() {
             [[ $snell_status == 2 ]] && return 2
             [[ $snell_status == 0 ]] || return 1
         fi
-        snell_mode_valid "$is_new_snell_mode" || err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"
+        snell_mode_valid "$is_new_snell_mode" || { err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"; return 1; }
         snell_mode=$is_new_snell_mode
         add snell
         ;;
@@ -1247,7 +1251,10 @@ del() {
             fi
         fi
         deleted_config_file=$is_config_file
-        apply_node_config_lifecycle delete "$deleted_config_file" || err "$node_lifecycle_error"
+        apply_node_config_lifecycle delete "$deleted_config_file" || {
+            err "$node_lifecycle_error"
+            return 1
+        }
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {
@@ -1356,6 +1363,8 @@ manage() {
     fi
 }
 
+# Lightweight restart wrapper with context-aware error diagnostics and log hints.
+# Transactional node lifecycle operations use manage_restart_confirmed (src/route.sh) instead.
 manage_restart_checked() {
     local service_arg=${1:-} context=${2:-}
     local service_name=${is_core_name:-sing-box} unit_name=${is_core:-sing-box}
@@ -1491,7 +1500,7 @@ add() {
                 [[ $(grep -E -i "^$is_lower$" <<<"$v") ]] && is_new_protocol=$v && break
             done
 
-            [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
+            [[ ! $is_new_protocol ]] && { err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"; return 1; }
             ;;
         esac
     fi
@@ -1520,6 +1529,7 @@ add() {
         is_core_minor=$(echo "$is_core_ver" | cut -d. -f2)
         if [[ ${is_core_major:-0} -lt 1 || ${is_core_major:-0} -eq 1 && ${is_core_minor:-0} -lt 12 ]]; then
             err "当前 sing-box 版本 ($is_core_ver) 不支持 AnyTLS，请先升级 sing-box core 到 1.12.0 或更高版本。"
+            return 1
         fi
     fi
 
@@ -1613,6 +1623,7 @@ add() {
     # no-auto-tls only use h2,ws,grpc
     if [[ $is_no_auto_tls && ! $is_use_tls ]]; then
         err "$is_new_protocol 不支持手动配置 tls."
+        return 1
     fi
 
     # prefer args.
@@ -1624,27 +1635,32 @@ add() {
         if [[ $is_use_port ]]; then
             [[ ! $(is_test port "${is_use_port}") ]] && {
                 err "($is_use_port) 不是一个有效的端口. $is_err_tips"
+                return 1
             }
             if [[ $(node_port_used "$is_use_port" "$is_new_protocol") && ! $is_gen && ${is_new_protocol,,} != snell ]]; then
                 err "无法使用 ($is_use_port) 端口. $is_err_tips"
+                return 1
             fi
             port=$is_use_port
         fi
         if [[ $is_use_door_port ]]; then
             [[ ! $(is_test port "${is_use_door_port}") ]] && {
                 err "(${is_use_door_port}) 不是一个有效的目标端口. $is_err_tips"
+                return 1
             }
             door_port=$is_use_door_port
         fi
         if [[ $is_use_uuid ]]; then
             [[ ! $(is_test uuid "$is_use_uuid") ]] && {
                 err "($is_use_uuid) 不是一个有效的 UUID. $is_err_tips"
+                return 1
             }
             uuid=$is_use_uuid
         fi
         if [[ $is_use_path ]]; then
             [[ ! $(is_test path "$is_use_path") ]] && {
                 err "($is_use_path) 不是有效的路径. $is_err_tips"
+                return 1
             }
             path=$is_use_path
         fi
@@ -1769,7 +1785,7 @@ add() {
             [[ ! $snell_obfs_mode ]] && snell_obfs_mode=none
             unset snell_mode
         fi
-        validate_snell
+        validate_snell || return $?
     fi
 
     # Dokodemo-Door
@@ -1808,7 +1824,7 @@ add() {
     fi
 
     if [[ $is_caddy && $host && ! $is_no_auto_tls && ! $is_gen ]]; then
-        shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+        shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
         caddy_shared_lock=1
     fi
 
@@ -1827,7 +1843,12 @@ add() {
     fi
 
     # create json
-    create server "$is_new_protocol" || return $?
+    local add_rc=0
+    create server "$is_new_protocol" || {
+        add_rc=$?
+        [[ $caddy_shared_lock ]] && shared_config_unlock
+        return "$add_rc"
+    }
     if [[ ! $is_change && ! $is_gen && $is_config_name ]]; then
         [[ $is_custom_node_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
         if [[ $is_custom_node_note ]]; then
@@ -1883,10 +1904,10 @@ get() {
             [[ ${#is_all_json[@]} -ge 233 ]] && break
         done
         shopt -u nullglob
-        [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
+        [[ ! $is_all_json ]] && { err "无法找到相关的配置文件: $2"; return 1; }
         [[ ${#is_all_json[@]} -eq 1 && ! $is_select_delete_node ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
-            [[ $is_dont_auto_exit ]] && return
+            [[ $is_dont_auto_exit ]] && return 0
             is_file_display_list=()
             for is_cfg_item in "${is_all_json[@]}"; do
                 is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
@@ -1898,16 +1919,18 @@ get() {
             is_config_file=${is_all_json[REPLY - 1]}
             export is_config_file
         }
+        return 0
         ;;
     info)
         is_tcp_http=
         get file "$2"
         get_status=$?
         [[ $get_status == 2 ]] && return 2
+        [[ $get_status == 0 ]] || return "$get_status"
         if [[ $is_config_file ]]; then
             is_json_str=$(json_strip_comments "$is_conf_dir/$is_config_file")
             is_json_data=$(jq -r '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag,.inbounds[0].version,.inbounds[0].psk,.inbounds[0].obfs_mode,.inbounds[0].mode)' <<<"$is_json_str")
-            [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
+            [[ $? != 0 ]] && { err "无法读取此文件: $is_config_file"; return 1; }
             is_up_var_set=(null is_protocol port is_listen_addr uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key snell_version snell_psk snell_obfs_mode snell_mode)
             [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
             mapfile -t is_json_data_list <<<"$is_json_data"
@@ -1946,8 +1969,9 @@ get() {
             fi
             [[ $is_tmp_https_port ]] && is_https_port=$is_tmp_https_port
             [[ $is_client && $host ]] && port=$is_https_port
-            get protocol "$is_protocol-$net_type"
+            get protocol "$is_protocol-$net_type" || return $?
         fi
+        return 0
         ;;
     protocol)
         get addr # get host or server ip
@@ -2041,6 +2065,7 @@ get() {
             ;;
         *)
             err "无法识别协议: $is_config_file"
+            return 1
             ;;
         esac
         [[ $net ]] && return # if net exist, dont need more json args
@@ -2078,6 +2103,7 @@ get() {
             ;;
         *)
             err "无法识别传输协议: $is_config_file"
+            return 1
             ;;
         esac
         json_str="$is_users,$is_json_add"
@@ -2094,6 +2120,7 @@ get() {
             if [[ ! $(grep "$ip" <<<"$is_host_dns") ]]; then
                 _cyan "\n测试结果: $is_host_dns"
                 err "域名 ($host) 没有解析到 ($ip)"
+                return 1
             fi
         fi
         ;;
@@ -2351,7 +2378,7 @@ update() {
         is_update_repo=$is_sh_repo
         ;;
     3 | caddy)
-        [[ ! $is_caddy ]] && err "不支持更新 Caddy."
+        [[ ! $is_caddy ]] && { err "不支持更新 Caddy."; return 1; }
         is_update_name=caddy
         is_show_name="Caddy"
         is_run_ver=$is_caddy_ver
@@ -2359,6 +2386,7 @@ update() {
         ;;
     *)
         err "无法识别 ($1), 请使用: $is_core update [core | sh | caddy] [ver]"
+        return 1
         ;;
     esac
     if [[ $is_update_name == 'sh' ]]; then
@@ -2392,19 +2420,23 @@ update() {
     sh)
         if [[ -f $is_config_json ]] && ! "$is_sh_bin" __post-update; then
             err "脚本更新后配置迁移失败，已安装新脚本但配置尚未完成同步。请运行: sb fix-config.json"
+            return 1
         fi
         ;;
     core)
         if ! migrate_runtime_config; then
             err "内核更新后配置校验发现异常，已阻断内核重启以防服务故障。请检查配置或运行: sb fix-config.json"
+            return 1
         fi
         if ! manage restart "$is_update_name"; then
             err "$is_show_name 更新后服务重启失败，请检查服务状态."
+            return 1
         fi
         ;;
     caddy)
         if ! manage restart "$is_update_name"; then
             err "$is_show_name 更新后服务重启失败，请检查服务状态."
+            return 1
         fi
         ;;
     esac
@@ -2729,7 +2761,7 @@ main() {
             return
             ;;
         fix-all)
-            shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+            shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
             fix_all_locked=1
             is_dont_auto_exit=1
             msg
@@ -2746,13 +2778,21 @@ main() {
             ;;
         *)
             is_dont_auto_exit=1
-            [[ ! $2 ]] && {
+            if [[ ! $2 ]]; then
+                is_dont_auto_exit=
                 err "无法找到需要删除的参数"
-            } || {
-                for v in "${@:2}"; do
-                    del "$v"
-                done
-            }
+                return 1
+            fi
+            local del_ok=0
+            for v in "${@:2}"; do
+                if del "$v"; then
+                    del_ok=1
+                fi
+            done
+            if ((del_ok == 0)); then
+                is_dont_auto_exit=
+                return 1
+            fi
             ;;
         esac
         is_dont_auto_exit=
@@ -2779,7 +2819,7 @@ main() {
         create config.json
         ;;
     __post-update)
-        migrate_runtime_config || err "更新后配置迁移失败: ${runtime_sync_error:-未知错误}"
+        migrate_runtime_config || { err "更新后配置迁移失败: ${runtime_sync_error:-未知错误}"; return 1; }
         ;;
     fix-caddyfile)
         if [[ $is_caddy ]]; then
@@ -2789,6 +2829,7 @@ main() {
             _green "\nfix 完成.\n"
         else
             err "无法执行此操作"
+            return 1
         fi
         ;;
     i | info)
@@ -2833,7 +2874,7 @@ main() {
         fi
         ;;
     start | stop | r | restart)
-        [[ $2 && $2 != 'caddy' ]] && err "无法识别 ($2), 请使用: $is_core $1 [caddy]"
+        [[ $2 && $2 != 'caddy' ]] && { err "无法识别 ($2), 请使用: $is_core $1 [caddy]"; return 1; }
         service_action_result "$1" "$2"
         ;;
     reinstall)
@@ -2871,6 +2912,7 @@ main() {
             }
         else
             err "无法识别 ($1), 获取帮助请使用: $is_core help"
+            return 1
         fi
         ;;
     esac

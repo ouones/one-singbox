@@ -777,6 +777,9 @@ migrate_runtime_config() {
     sync_runtime_node_outbound_modes "$is_config_json" "$is_config_json" "$is_conf_dir" 1
 }
 
+# Transactional restart verifier for node lifecycle and outbound changes: waits for service settle,
+# checks active state, and validates systemd MainPID before committing (rollback triggers on failure).
+# CLI/menu write paths use manage_restart_checked (src/core.sh) instead.
 manage_restart_confirmed() {
     local pid
     if [[ $is_systemd ]]; then
@@ -1293,7 +1296,7 @@ sync_entry_addr_config_unlocked() {
     local file="$is_conf_dir/$cfg"
     local listen_addr new_json normalized_entry
 
-    [[ -f "$file" ]] || err "配置文件不存在: $cfg"
+    [[ -f "$file" ]] || { err "配置文件不存在: $cfg"; return 1; }
 
     normalized_entry=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$entry")
     if [[ ! $normalized_entry ]] || ! is_valid_entry_addr "$normalized_entry"; then
@@ -1319,7 +1322,7 @@ sync_entry_addr_config_unlocked() {
 }
 
 sync_entry_addr_config() {
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+    shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
     sync_entry_addr_config_unlocked "$@"
     local status=$?
     shared_config_unlock

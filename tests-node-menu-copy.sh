@@ -4,7 +4,7 @@ repo_root=$(cd "$(dirname "$0")" && pwd)
 
 for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_core_dir=$case_dir/core
@@ -105,7 +105,7 @@ done
 
 for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 fail() { echo "FAIL($CORE_FILE): $*"; exit 1; }
 _green() { printf '%b\n' "$*"; }
 info() { exit 0; }
@@ -121,7 +121,7 @@ done
 
 for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_core_dir=$case_dir/core
@@ -153,7 +153,7 @@ done
 
 for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_conf_dir=$case_dir/conf
@@ -199,7 +199,7 @@ done
 
 for core_file in "$repo_root/src/core.sh"; do
     CORE_FILE=$core_file bash <<'CASE' || exit 1
-source <(sed '/EUID != 0/d' "$CORE_FILE")
+source "$CORE_FILE"
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
 is_core_dir=$case_dir/core
