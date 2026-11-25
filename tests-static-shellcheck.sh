@@ -64,7 +64,7 @@ while (($# > 0)); do
     esac
 done
 if [[ -n $log_file ]]; then
-    printf 'SHELL=%s\nINCLUDE=%s\nFILES=%s\n' "$shell_arg" "$include_arg" "${files[*]}" >"$log_file"
+    printf 'SHELL=%s\nINCLUDE=%s\nFILES=%s\n' "$shell_arg" "$include_arg" "${files[*]}" >>"$log_file"
 fi
 if [[ $mode == pass ]]; then
     exit 0
@@ -124,6 +124,9 @@ for rule in SC2086 SC2155 SC2164; do
     grep -q "$rule" <<<"$include_line" || fail "expected $rule in shellcheck --include, got: $include_line"
 done
 files_line=$(grep '^FILES=' <<<"$log_content" || true)
+if grep -q ' ' <<<"$files_line"; then
+    fail "expected per-file shellcheck invocation, got multi-file line: $files_line"
+fi
 for target in sing-box.sh install.sh src/core.sh src/init.sh src/log.sh src/dns.sh; do
     grep -q "$target" <<<"$files_line" || fail "expected $target in shellcheck targets, got: $files_line"
 done
@@ -149,5 +152,20 @@ for kind in SC2086 SC2155 SC2164; do
         fail "expected static check to fail on injected $kind violation, but it passed: $out3"
     fi
 done
+
+# Case 4: --no-shellcheck skips shellcheck while still running LF, bash -n, and blocking-read checks.
+case4_dir="$workdir/case4"
+copy_repo_to "$case4_dir"
+sc_bin4="$workdir/sc-bin4"
+sc_log4="$workdir/sc4.log"
+make_fake_shellcheck "$sc_bin4" pass "$sc_log4"
+out4=$(PATH="$sc_bin4:$PATH" bash "$case4_dir/scripts/run-offline-tests.sh" --static-only --no-shellcheck 2>&1) || fail "light static check failed: $out4"
+[[ ! -f $sc_log4 ]] || fail "shellcheck should not be invoked when --no-shellcheck is set"
+grep -q 'shellcheck skipped: --no-shellcheck' <<<"$out4" || fail "expected --no-shellcheck status in output, got: $out4"
+grep -q 'STATIC OK' <<<"$out4" || fail "expected STATIC OK in --no-shellcheck output, got: $out4"
+printf '\nif [[ "$broken" == 1\n' >>"$case4_dir/src/bbr.sh"
+if out4_bad=$(PATH="$sc_bin4:$PATH" bash "$case4_dir/scripts/run-offline-tests.sh" --static-only --no-shellcheck 2>&1); then
+    fail "expected --no-shellcheck static mode to still reject bash -n syntax errors: $out4_bad"
+fi
 
 echo "PASS: tests-static-shellcheck"
