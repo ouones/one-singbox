@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: offline regression and static checks
@@ -30,33 +30,84 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: read and validate delivery version
-        id: version
+      - name: bump version and push tag
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
-          if [[ ! "$version" =~ ^v1\.[0-9]+$ ]]; then
-            echo "Delivery version in sing-box.sh must be v1.N, got: ${version:-<empty>}" >&2
-            exit 1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main --tags --force
+          matching_tag=""
+          if [[ "$GITHUB_RUN_ATTEMPT" -gt 1 ]]; then
+            for tag in $(git tag --list 'v1.*' --sort=-version:refname); do
+              tag_commit="$(git rev-parse "${tag}^{commit}")"
+              tag_parent="$(git rev-list --parents -n1 "$tag_commit" | cut -d' ' -f2)"
+              if [[ "$tag_commit" == "$GITHUB_SHA" || "$tag_parent" == "$GITHUB_SHA" ]]; then
+                matching_tag="$tag"
+                break
+              fi
+            done
           fi
-          echo "delivery_version=${version}" >> "$GITHUB_ENV"
-          if git ls-remote --exit-code --tags origin "refs/tags/${version}" >/dev/null; then
-            echo "Tag ${version} already exists; skipping release for this merge." >> "$GITHUB_STEP_SUMMARY"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "$matching_tag" ]]; then
+            if [[ ! "$matching_tag" =~ ^v1\.[0-9]+$ ]]; then
+              echo "Could not determine the current v1.N release version." >&2
+              exit 1
+            fi
+            release_version="$matching_tag"
+            release_commit="$(git rev-parse "${matching_tag}^{commit}")"
+            git checkout --detach "$release_commit"
           else
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            claimed=0
+            for attempt in {1..10}; do
+              git fetch origin main --tags --force
+              git checkout --detach "$GITHUB_SHA"
+              latest_tag="$(git tag --list 'v1.*' --sort=-version:refname | head -n1)"
+              latest_minor="${latest_tag#v1.}"
+              current_version="$(sed -n 's/^is_sh_ver=//p' sing-box.sh)"
+              current_minor="${current_version#v1.}"
+              if [[ ! "$latest_minor" =~ ^[0-9]+$ || ! "$current_minor" =~ ^[0-9]+$ ]]; then
+                echo "Could not determine the current v1.N release version (latest=${latest_tag:-<empty>}, current=${current_version:-<empty>})." >&2
+                exit 1
+              fi
+              if (( current_minor > latest_minor )); then
+                release_minor="$current_minor"
+              else
+                release_minor=$((latest_minor + 1))
+              fi
+              release_version="v1.${release_minor}"
+              sed -i "s/^is_sh_ver=.*/is_sh_ver=${release_version}/" sing-box.sh
+              bash -n sing-box.sh
+              git add sing-box.sh
+              if ! git diff --cached --quiet; then
+                git commit -m "chore: bump version to ${release_version}"
+              fi
+              release_commit="$(git rev-parse HEAD)"
+              git tag -f "$release_version" "$release_commit"
+              if git push origin "refs/tags/${release_version}"; then
+                claimed=1
+                break
+              fi
+              git tag -d "$release_version" >/dev/null 2>&1 || true
+              sleep 2
+            done
+            if (( claimed == 0 )); then
+              echo "Failed to claim a unique release tag after 10 attempts." >&2
+              exit 1
+            fi
           fi
+
+          echo "delivery_version=${release_version}" >> "$GITHUB_ENV"
+          echo "release_commit=${release_commit}" >> "$GITHUB_ENV"
       - name: build release package
-        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           mkdir -p .release-artifacts
           tar zcvf .release-artifacts/code.tar.gz install.sh sing-box.sh src LICENSE README.md docs/usage.md assets/readme
       - name: verify package layout
-        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           archive=.release-artifacts/code.tar.gz
@@ -71,8 +122,12 @@ jobs:
             echo "Release package must not contain the removed root management script." >&2
             exit 1
           fi
+          archived_ver="$(tar -xOf "$archive" sing-box.sh | sed -n 's/^is_sh_ver=//p')"
+          if [[ "$archived_ver" != "$delivery_version" ]]; then
+            echo "Packaged sing-box.sh version ${archived_ver:-<empty>} does not match ${delivery_version}." >&2
+            exit 1
+          fi
       - name: record package checksum
-        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           sha256sum .release-artifacts/code.tar.gz > .release-artifacts/code.tar.gz.sha256
@@ -84,16 +139,14 @@ jobs:
             echo "- sha256: ${checksum}"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: publish release
-        if: steps.version.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v1
         with:
           files: .release-artifacts/code.tar.gz
           tag_name: ${{ env.delivery_version }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ env.release_commit }}
           prerelease: false
           generate_release_notes: true
       - name: re-download and verify published asset
-        if: steps.version.outputs.should_release == 'true'
         run: |
           set -euo pipefail
           published_dir=.release-artifacts/published
@@ -137,3 +190,38 @@ jobs:
             echo "- version: ${delivery_version}"
             echo "- sha256: ${published_sha256}"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: update main version
+        run: |
+          set -euo pipefail
+          release_minor="${delivery_version#v1.}"
+          for attempt in {1..10}; do
+            git fetch origin main
+            main_sha="$(git rev-parse origin/main)"
+            main_version="$(git show origin/main:sing-box.sh | sed -n 's/^is_sh_ver=//p')"
+            main_minor="${main_version#v1.}"
+            if [[ "$main_minor" =~ ^[0-9]+$ ]] && (( main_minor >= release_minor )); then
+              break
+            fi
+            if [[ "$main_sha" == "$GITHUB_SHA" && "$release_commit" != "$GITHUB_SHA" ]]; then
+              if git push origin "${release_commit}:refs/heads/main"; then
+                break
+              fi
+            else
+              git checkout --detach origin/main
+              sed -i "s/^is_sh_ver=.*/is_sh_ver=${delivery_version}/" sing-box.sh
+              bash -n sing-box.sh
+              git add sing-box.sh
+              if git diff --cached --quiet; then
+                break
+              fi
+              git commit -m "chore: bump version to ${delivery_version}"
+              if git push origin HEAD:refs/heads/main; then
+                break
+              fi
+            fi
+            if (( attempt == 10 )); then
+              echo "Failed to update main version to ${delivery_version} after 10 attempts." >&2
+              exit 1
+            fi
+            sleep 2
+          done
