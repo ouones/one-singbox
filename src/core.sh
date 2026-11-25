@@ -1,64 +1,37 @@
 #!/bin/bash
 
-author=ouones
-is_script_name=one-singbox
-
-red='\e[31m'
-yellow='\e[33m'
-gray='\e[90m'
-green='\e[92m'
-blue='\e[94m'
-magenta='\e[95m'
-cyan='\e[96m'
-none='\e[0m'
-_red() { echo -e ${red}$@${none}; }
-_blue() { echo -e ${blue}$@${none}; }
-_cyan() { echo -e ${cyan}$@${none}; }
-_green() { echo -e ${green}$@${none}; }
-_yellow() { echo -e ${yellow}$@${none}; }
-_magenta() { echo -e ${magenta}$@${none}; }
-_red_bg() { echo -e "\e[41m$@${none}"; }
-
-is_err=$(_red_bg 错误!)
-is_warn=$(_red_bg 警告!)
-
-err() {
-    echo -e "\n$is_err $@\n" && exit 1
-}
-
-warn() {
-    echo -e "\n$is_warn $@\n"
-}
+if [[ ! ${is_init_loaded:-} ]]; then
+    is_core_init_source=
+    for is_core_init_candidate in \
+        "${is_sh_dir:+${is_sh_dir}/src/init.sh}" \
+        "${BASH_SOURCE[0]:+$(dirname -- "${BASH_SOURCE[0]}")/init.sh}" \
+        "${BASH_SOURCE[0]:+$(dirname -- "${BASH_SOURCE[0]}")/src/init.sh}" \
+        "${CORE_FILE:+$(dirname -- "$CORE_FILE")/init.sh}" \
+        "${UPDATE_CORE_FILE:+$(dirname -- "$UPDATE_CORE_FILE")/init.sh}" \
+        "${QRCODE_TEST_CORE:+$(dirname -- "$QRCODE_TEST_CORE")/init.sh}" \
+        "${REPO_ROOT:+${REPO_ROOT}/src/init.sh}" \
+        "${repo_root:+${repo_root}/src/init.sh}" \
+        "${REPO_DIR:+${REPO_DIR}/src/init.sh}" \
+        "${core:+$(dirname -- "$core")/init.sh}" \
+        "$PWD/src/init.sh"; do
+        if [[ $is_core_init_candidate && -f $is_core_init_candidate ]]; then
+            is_core_init_source=$is_core_init_candidate
+            break
+        fi
+    done
+    if [[ $is_core_init_source ]]; then
+        is_init_defs_only=1 . "$is_core_init_source"
+        unset is_init_defs_only
+    fi
+    unset is_core_init_source is_core_init_candidate
+fi
 
 [[ $EUID != 0 ]] && err "请以 root 用户重新运行此脚本。"
 
-cmd=$(type -P apt-get || type -P yum || type -P zypper || type -P apk)
 [[ ! $cmd ]] && err "未检测到受支持的包管理器 (apt-get、yum、zypper 或 apk)。"
 
-is_systemd=$(type -P systemctl)
-is_openrc=$(type -P rc-service)
 [[ ! $is_systemd && ! $is_openrc ]] && {
     err "未检测到 systemd 或 OpenRC 服务管理器。请先安装并启用其中之一。"
-}
-
-is_core=sing-box
-is_core_name=sing-box
-is_core_dir=/etc/$is_core
-is_core_bin=$is_core_dir/bin/$is_core
-is_core_repo=SagerNet/$is_core
-is_conf_dir=$is_core_dir/conf
-is_log_dir=/var/log/$is_core
-is_sh_bin=/usr/local/bin/$is_core
-is_sh_dir=$is_core_dir/sh
-is_sh_repo=ouones/one-singbox
-is_config_json=$is_core_dir/config.json
-is_caddy_dir=/etc/caddy
-is_caddy_bin=$(type -P caddy)
-is_caddyfile=$is_caddy_dir/Caddyfile
-is_caddy_conf=$is_caddy_dir/conf.d
-
-load() {
-    . $is_sh_dir/src/$1
 }
 
 shared_config_lock() {
@@ -101,19 +74,6 @@ if [[ ! -f $qrcode_dependency_source ]]; then
 fi
 [[ -f $qrcode_dependency_source ]] && . "$qrcode_dependency_source"
 unset qrcode_dependency_source qrcode_core_dir
-
-_wget() {
-    [[ $proxy ]] && export https_proxy=$proxy
-    wget --no-check-certificate $*
-}
-
-if [[ -x $is_core_bin ]]; then
-    is_core_ver=$($is_core_bin version 2>/dev/null | awk 'NR==1{print $3}')
-fi
-[[ -z $is_core_ver ]] && is_core_ver=unknown
-[[ -x $is_caddy_bin ]] && is_caddy=1
-
-export LC_ALL=C
 
 protocol_list=(
     TUIC
@@ -6158,9 +6118,12 @@ main() {
         get $@
         ;;
     s | status)
+        [[ ${is_core_ver:-} ]] || init_core_ver
         core_status_read
         msg "\n$is_core_name $is_core_ver: $is_core_status\n"
-        [[ $is_caddy ]] && msg "Caddy $is_caddy_ver: $is_caddy_status\n"
+        if [[ $is_caddy ]]; then
+            msg "Caddy $is_caddy_ver: $is_caddy_status\n"
+        fi
         ;;
     start | stop | r | restart)
         [[ $2 && $2 != 'caddy' ]] && err "无法识别 ($2), 请使用: $is_core $1 [caddy]"
@@ -6177,6 +6140,7 @@ main() {
         is_main_menu
         ;;
     v | ver | version)
+        [[ ${is_core_ver:-} ]] || init_core_ver
         [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy $is_caddy_ver)"
         msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_script_name script $is_sh_ver) $is_caddy_ver\n"
         ;;

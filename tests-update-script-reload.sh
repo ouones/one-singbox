@@ -226,7 +226,7 @@ fail() {
 }
 
 source <(sed -n '/^is_reload_exit_code=/p' "$CORE_FILE")
-source <(sed -n '/^_green() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^_green() {/,/^}/p' "${CORE_FILE%/*}/init.sh")
 source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")

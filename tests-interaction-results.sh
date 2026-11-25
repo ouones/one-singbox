@@ -67,7 +67,7 @@ fail() {
     exit 1
 }
 
-source <(sed -n '/^_green() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^_green() {/,/^}/p' "${CORE_FILE%/*}/init.sh")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
@@ -110,7 +110,7 @@ fail() {
     exit 1
 }
 
-source <(sed -n '/^_green() {/,/^}/p' "$CORE_FILE")
+source <(sed -n '/^_green() {/,/^}/p' "${CORE_FILE%/*}/init.sh")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^update() {/,/^}/p' "$CORE_FILE")
 
@@ -144,7 +144,7 @@ fail() {
     exit 1
 }
 
-source <(sed -n '/^red=/p; /^green=/p; /^none=/p; /^_red() {/p; /^_green() {/p' "$CORE_FILE")
+source <(sed -n '/^red=/p; /^green=/p; /^none=/p; /^_red() {/p; /^_green() {/p' "${CORE_FILE%/*}/init.sh")
 source <(sed -n '/^core_status_read() {/,/^}/p' "$REPO_ROOT/src/init.sh")
 source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
 source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")

@@ -1,6 +1,6 @@
 # detect init system
-is_systemd=$(type -P systemctl)
-is_openrc=$(type -P rc-service)
+[[ ${is_systemd+x} ]] || is_systemd=$(type -P systemctl)
+[[ ${is_openrc+x} ]] || is_openrc=$(type -P rc-service)
 
 install_service() {
     if [[ $is_systemd ]]; then
