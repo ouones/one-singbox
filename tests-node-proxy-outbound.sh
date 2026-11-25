@@ -1513,6 +1513,67 @@ EOF
 
     exit 0
     ;;
+jq-budget)
+    real_jq=$(type -P jq)
+    [[ $real_jq ]] || fail "real jq binary not found"
+    jq_wrap_dir="$case_dir/jq-wrap"
+    mkdir -p "$jq_wrap_dir"
+    jq_count_file="$case_dir/jq.calls"
+    cat >"$jq_wrap_dir/jq" <<JQWRAP
+#!/usr/bin/env bash
+echo 1 >>"$jq_count_file"
+exec "$real_jq" "\$@"
+JQWRAP
+    chmod +x "$jq_wrap_dir/jq"
+
+    vless_uuid=550e8400-e29b-41d4-a716-446655440000
+    ws_budget_uri="vless://${vless_uuid}@ws.example.com:443?type=ws&security=tls&sni=tls.example.com&host=ws.example.com&path=%2Fsocket%3Ftoken%3Da%2526b%26ed%3D16&alpn=h2%2Chttp%2F1.1&fp=none&allowInsecure=1&packetEncoding=xudp#WS-Upstream"
+    : >"$jq_count_file"
+    PATH="$jq_wrap_dir:$PATH" parse_proxy_uri vless "$ws_budget_uri" || fail "WS VLESS URI should parse in jq-budget"
+    ws_jq_calls=$(wc -l <"$jq_count_file")
+    (( ws_jq_calls <= 2 )) || fail "VLESS WS URI parsing spawned $ws_jq_calls jq subprocesses (expected <= 2)"
+    [[ $outbound_proxy_name == "WS-Upstream" ]] || fail "VLESS WS name mismatch in jq-budget"
+
+    is_core_ver=1.15.0-alpha.13
+    pin_zero_base64=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    pin_text_hex=3031323334353637383961626364656630313233343536373839616263646566
+    http_budget_uri="vless://${vless_uuid}@http.example.com:443?type=http&security=tls&path=%2Fapi&host=a.example.com%2Cb.example.com&ech=AA%3D%3D&pcs=${pin_zero_base64},${pin_text_hex}#HTTP-TLS"
+    : >"$jq_count_file"
+    PATH="$jq_wrap_dir:$PATH" parse_proxy_uri vless "$http_budget_uri" || fail "HTTP VLESS URI with ECH/PCS should parse in jq-budget"
+    http_jq_calls=$(wc -l <"$jq_count_file")
+    (( http_jq_calls <= 2 )) || fail "VLESS HTTP/ECH/PCS URI parsing spawned $http_jq_calls jq subprocesses (expected <= 2)"
+    is_core_ver=1.14.0
+
+    : >"$jq_count_file"
+    if PATH="$jq_wrap_dir:$PATH" parse_proxy_uri vless "vless://${vless_uuid}@vless.example.com:443?type=ws&unknown=1"; then
+        fail "invalid VLESS URI should be rejected in jq-budget"
+    fi
+    err_jq_calls=$(wc -l <"$jq_count_file")
+    (( err_jq_calls <= 2 )) || fail "invalid VLESS URI spawned $err_jq_calls jq subprocesses (expected <= 2)"
+
+    jq -n '{outbound_mode:"VLESS 出站",outbound_proxy:{name:"Unified",config:{type:"vless",server:"vless.example.com",server_port:443,uuid:"550e8400-e29b-41d4-a716-446655440000"}}}' >"$meta_file"
+    : >"$jq_count_file"
+    PATH="$jq_wrap_dir:$PATH" outbound_proxy_from_metadata node-one.json "$meta_file" || fail "valid unified metadata should succeed in jq-budget"
+    unified_jq_calls=$(wc -l <"$jq_count_file")
+    (( unified_jq_calls == 1 )) || fail "unified outbound_proxy_from_metadata spawned $unified_jq_calls jq subprocesses (expected 1)"
+    [[ $outbound_proxy_name == "Unified" && -n $outbound_proxy_config_json && -n $outbound_proxy_json ]] || fail "unified metadata outputs missing"
+
+    jq -n '{outbound_mode:"VLESS 出站",outbound_proxy:{name:"Bad",config:{type:"vless",server:"vless.example.com",server_port:443,uuid:""}}}' >"$meta_file"
+    : >"$jq_count_file"
+    if PATH="$jq_wrap_dir:$PATH" outbound_proxy_from_metadata node-one.json "$meta_file"; then
+        fail "invalid unified metadata should fail in VLESS 出站 mode"
+    fi
+    bad_unified_jq_calls=$(wc -l <"$jq_count_file")
+    (( bad_unified_jq_calls == 1 )) || fail "invalid unified outbound_proxy_from_metadata spawned $bad_unified_jq_calls jq subprocesses (expected 1)"
+
+    jq -n '{outbound_mode:"SS 出站",outbound_ss_server:"127.0.0.1",outbound_ss_port:"8388",outbound_ss_method:"aes-128-gcm",outbound_ss_password:"secret",outbound_ss_name:"Legacy"}' >"$meta_file"
+    : >"$jq_count_file"
+    PATH="$jq_wrap_dir:$PATH" outbound_proxy_from_metadata node-one.json "$meta_file" || fail "valid legacy metadata should succeed in jq-budget"
+    legacy_jq_calls=$(wc -l <"$jq_count_file")
+    (( legacy_jq_calls == 1 )) || fail "legacy outbound_proxy_from_metadata spawned $legacy_jq_calls jq subprocesses (expected 1)"
+    [[ $outbound_proxy_name == "Legacy" && -n $outbound_proxy_config_json && -n $outbound_proxy_json ]] || fail "legacy metadata outputs missing"
+    exit 0
+    ;;
 *)
     fail "unknown test scenario: $TEST_SCENARIO"
     ;;
@@ -1570,7 +1631,7 @@ if [[ ${1:-} ]]; then
 fi
 
 run_core_case "$repo_root/src/core.sh" happy || exit 1
-for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback direct-fallback-rule-order; do
+for scenario in parser-ss2022 ss-import-encoding ss-import-invalid parser-ss-encoding vless-menu vless-display-escaped-name vless-pcs-hex-compat vless-check-diagnostics vless-http-quic jq-budget reject-check restart-fail-recovered restart-fail-unrecovered inactive-service empty-mainpid legacy-migration legacy-migration-check-fail broken-cache-replace broken-cache-reuse missing-config-success missing-config-check-fail missing-config-restart-fail no-files-restart-fail config-install-failure file-restore-failure multiple-nodes tag-collision direct-switches compatibility-aliases openrc-success openrc-fail-recovered sync-failure-no-restart dns-sync-fail lifecycle-port-migration lifecycle-migration-check-fail lifecycle-migration-restart-fail delete-proxy delete-sync-fail rebuild-preserves-cache lifecycle-protocol-migration new-node-default-outbound legacy-node-upgrade-default-outbound sniff-and-custom-rule-priority-block-cn-off sniff-and-relay-isolation-block-cn-on empty-nodes-sniff-handling block-cn-whitelist-binding-and-atomic-switch block-cn-multi-node-isolation-and-delete block-cn-atomic-switch-rollback direct-fallback-rule-order; do
     echo "[src/core.sh: $scenario]"
     run_core_case "$repo_root/src/core.sh" "$scenario" || exit 1
 done
