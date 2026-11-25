@@ -475,32 +475,6 @@ select_snell_obfs_mode() {
     return "$status"
 }
 
-note_trim() {
-    local val=${1-}
-    val=${val//$'\r'/ }
-    val=${val//$'\n'/ }
-    val=${val#"${val%%[![:space:]]*}"}
-    val=${val%"${val##*[![:space:]]}"}
-    printf '%s\n' "$val"
-}
-
-note_read_line() {
-    local target_var=$1
-    local raw= status=0 read_timeout=${ONE_SINGBOX_READ_TIMEOUT:-3}
-    local IFS=
-    if [[ -t 0 ]]; then
-        interactive_read -r raw || status=$?
-    else
-        interactive_read -t "$read_timeout" -r raw || status=$?
-    fi
-    if ((status > 128)); then
-        printf -v "$target_var" '%s' ''
-        return 1
-    fi
-    printf -v "$target_var" '%s' "$raw"
-    [[ $status == 0 || -n $raw ]]
-}
-
 current_outbound_mode_display() {
     local cfg=$1 mode mode_label name server port tls_enabled insecure tls_status=
     [[ $cfg ]] || {
@@ -729,11 +703,11 @@ create() {
         [[ $new_node_lock ]] && shared_config_unlock
         # caddy auto tls
         if [[ $is_caddy && $host && ! $is_no_auto_tls ]]; then
-            create caddy "$net"
+            create caddy "$net" || return $?
         fi
         # restart core
         if [[ ! $node_migration_applied ]]; then
-            manage restart &
+            manage_restart_checked "" "节点配置已保存" || return 1
         fi
         return 0
         ;;
@@ -767,7 +741,7 @@ create() {
         caddy_config "$2"
         [[ -s $is_caddy_conf/${host}.conf ]] || { shared_config_unlock; err "无法创建 Caddy 站点配置文件."; }
         shared_config_unlock
-        manage restart caddy &
+        manage_restart_checked caddy "Caddy 配置已更新" || return 1
         ;;
     config.json)
         local candidate_config
@@ -790,8 +764,8 @@ create() {
             err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
         fi
         rm -f "$candidate_config"
-        manage restart &
         shared_config_unlock
+        manage_restart_checked "" "公共配置已更新" || return 1
         ;;
     esac
 }
@@ -947,7 +921,7 @@ change() {
             is_https_port=$is_new_port
             load caddy.sh
             caddy_config "$net"
-            manage restart caddy &
+            manage_restart_checked caddy "Caddy 端口配置已更新" || return 1
             info
         else
             add "$net" "$is_new_port"
@@ -1096,7 +1070,7 @@ change() {
         proxy_site=$(sed 's#^.*//##;s#/$##' <<<"$is_new_proxy_site")
         load caddy.sh
         caddy_config proxy
-        manage restart caddy &
+        manage_restart_checked caddy "伪装网站配置已更新" || return 1
         msg "\n已更新伪装网站为: $(_green "$proxy_site") \n"
         ;;
     12)
@@ -1285,7 +1259,7 @@ del() {
             if [[ $is_del_host && $host != "$old_host" && -f $is_caddy_conf/$is_del_host.conf ]]; then
                 rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
                 if [[ ! $is_new_json ]]; then
-                    manage restart caddy &
+                    manage_restart_checked caddy "已移除 Caddy 站点配置" || return 1
                 fi
             fi
         }
@@ -1380,6 +1354,32 @@ manage() {
             ;;
         esac
     fi
+}
+
+manage_restart_checked() {
+    local service_arg=${1:-} context=${2:-}
+    local service_name=${is_core_name:-sing-box} unit_name=${is_core:-sing-box}
+    local log_hint='请查看服务日志'
+    if [[ $service_arg == caddy ]]; then
+        service_name=Caddy
+        unit_name=caddy
+    fi
+    if manage restart ${service_arg:+"$service_arg"}; then
+        return 0
+    fi
+    if [[ $is_systemd ]]; then
+        log_hint="查看服务日志：journalctl -u ${unit_name}.service -n 100 --no-pager"
+    elif [[ $is_openrc && $unit_name == "${is_core:-sing-box}" ]]; then
+        log_hint="查看服务错误日志：tail -n 100 ${is_log_dir:-/var/log/${is_core:-sing-box}}/error.log"
+    elif [[ $is_openrc ]]; then
+        log_hint='请查看 OpenRC 服务日志（logread，或 /var/log/messages）'
+    fi
+    if [[ $context ]]; then
+        err "${context}，但 ${service_name} 服务重启失败，请检查服务状态（${log_hint}）。"
+    else
+        err "${service_name} 服务重启失败，请检查服务状态（${log_hint}）。"
+    fi
+    return 1
 }
 
 service_action_result() {
@@ -1818,23 +1818,19 @@ add() {
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
-        if declare -F note_read_line >/dev/null 2>&1; then
-            echo -ne "输入备注 (可选，直接回车跳过):"
-            if note_read_line is_custom_node_note; then
-                if declare -F note_trim >/dev/null 2>&1; then
-                    is_custom_node_note=$(note_trim "$is_custom_node_note")
-                fi
-            else
-                is_custom_node_note=
-            fi
+        echo -ne "输入备注 (可选，直接回车跳过):"
+        if note_read_line is_custom_node_note; then
+            is_custom_node_note=$(note_trim "$is_custom_node_note")
+        else
+            is_custom_node_note=
         fi
     fi
 
     # create json
-    create server "$is_new_protocol"
+    create server "$is_new_protocol" || return $?
     if [[ ! $is_change && ! $is_gen && $is_config_name ]]; then
         [[ $is_custom_node_name ]] && meta_set "$is_config_name" node_name "$is_custom_node_name"
-        if [[ $is_custom_node_note ]] && declare -F note_set >/dev/null 2>&1; then
+        if [[ $is_custom_node_note ]]; then
             note_set "$is_config_name" "$is_custom_node_note"
         fi
     fi
@@ -1893,11 +1889,7 @@ get() {
             [[ $is_dont_auto_exit ]] && return
             is_file_display_list=()
             for is_cfg_item in "${is_all_json[@]}"; do
-                if declare -F note_format_list_label >/dev/null 2>&1; then
-                    is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
-                else
-                    is_file_display_list+=("$is_cfg_item")
-                fi
+                is_file_display_list+=("$(note_format_list_label "$is_cfg_item" "$is_cfg_item")")
             done
             menu_select parent is_config_file "\n选择节点:\n" "${is_file_display_list[@]}"
             get_status=$?
@@ -2346,9 +2338,7 @@ is_reload_exit_code=75
 update() {
     case $1 in
     1 | core | "$is_core")
-        if [[ -z ${is_core_ver:-} ]] && declare -F init_core_ver >/dev/null 2>&1; then
-            init_core_ver
-        fi
+        [[ ${is_core_ver:-} ]] || init_core_ver
         is_update_name=core
         is_show_name=$is_core_name
         is_run_ver=v${is_core_ver##* }
@@ -2677,312 +2667,10 @@ is_main_menu() {
     done
 }
 
-relay_warn_security() {
-    if [[ $is_main_start ]]; then
-        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
-    else
-        warn "端口转发没有身份验证。请在系统防火墙或云安全组中限制可访问此监听端口的来源。"
-    fi
-}
-
-relay_info_show() {
-    local l_port=$1 r_addr=$2 r_port=$3 r_note=
-    if declare -F note_get >/dev/null 2>&1; then
-        r_note=$(note_get "relay-${l_port}.json")
-    fi
-    msg "类型: TCP/UDP 端口转发"
-    msg "监听地址: ::"
-    msg "监听端口: $l_port"
-    msg "目标地址: $r_addr"
-    msg "目标端口: $r_port"
-    if [[ $r_note ]]; then
-        printf '备注: %s\n' "$r_note"
-    fi
-}
-
-relay_add() {
-    local local_port=${1-} remote_addr=${2-} remote_port=${3-} relay_note= interactive_add=0 raw_note=
-    if (($# >= 4)); then
-        local IFS=' '
-        relay_note=$(note_trim "${*:4}")
-    fi
-    if [[ ! $local_port ]]; then
-        interactive_add=1
-        while :; do
-            get_port
-            local_port=$tmp_port
-            config_port_used "$local_port" || break
-        done
-        local auto_port=$local_port
-        is_default_arg=$auto_port
-        ask string local_port "输入监听端口 (1-65535，回车自动分配 $local_port):"
-        [[ -z "$REPLY" ]] && msg "自动分配本地端口: $local_port"
-    fi
-    local_port=$(echo "$local_port" | tr -d ' ')
-    [[ $(is_test port "$local_port") ]] || err "($local_port) 不是一个有效的端口."
-    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
-    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-
-    if [[ ! $remote_addr ]]; then
-        interactive_add=1
-        ask string remote_addr "输入目标地址 (IPv4、IPv6 或域名):"
-    fi
-    remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    [[ -n $remote_addr ]] || err "目标地址不能为空."
-
-    if [[ ! $remote_port ]]; then
-        interactive_add=1
-        ask string remote_port "输入目标端口 (1-65535):"
-    fi
-    remote_port=$(echo "$remote_port" | tr -d ' ')
-    [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
-
-    if ((interactive_add == 1 && $# < 4)); then
-        echo -ne "输入备注 (可选，直接回车跳过):"
-        if note_read_line raw_note; then
-            relay_note=$(note_trim "$raw_note")
-        fi
-    fi
-
-    local relay_file="$is_conf_dir/relay-${local_port}.json"
-    local tmp_file
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
-    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建端口转发临时配置文件."
-
-    local relay_inbound
-    relay_inbound=$(jq -n \
-        --arg tag "relay-${local_port}.json" \
-        --arg addr "$remote_addr" \
-        --argjson local_port "$local_port" \
-        --argjson remote_port "$remote_port" \
-        '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
-        rm -f "$tmp_file"
-        err "生成端口转发配置 JSON 失败."
-    }
-    printf '%s\n' "$relay_inbound" > "$tmp_file"
-
-    if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
-        rm -f "$tmp_file"
-        err "端口转发配置校验失败."
-    fi
-
-    if ! mv -f "$tmp_file" "$relay_file"; then
-        rm -f "$tmp_file"
-        err "保存端口转发配置文件失败."
-    fi
-
-    if [[ -f $is_config_json ]]; then
-        if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
-            rm -f "$relay_file"
-            err "完整运行时配置校验失败，已取消安装该端口转发配置."
-        fi
-    fi
-
-    shared_config_unlock
-    if [[ $relay_note ]]; then
-        note_set "relay-${local_port}.json" "$relay_note" || err "保存备注失败."
-    fi
-    manage restart &
-    if [[ $is_main_start ]]; then
-        msg "\n$(_green '端口转发配置添加成功!')"
-    else
-        msg "\n$(_green '端口转发配置添加成功!')"
-    fi
-    msg "------------------------------------------------"
-    relay_info_show "$local_port" "$remote_addr" "$remote_port"
-    msg "------------------------------------------------"
-    relay_warn_security
-}
-
-relay_info() {
-    local local_port=$1
-    if [[ ! $local_port ]]; then
-        relay_list
-        ask string local_port "输入要查看的监听端口:"
-    fi
-    local_port=${local_port#relay-}
-    local_port=${local_port%.json}
-    local relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
-    local r_addr r_port
-    r_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
-    r_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-    if [[ $is_main_start ]]; then
-        msg "\n------------- 端口转发配置信息 -------------"
-    else
-        msg "\n------------- 端口转发配置信息 -------------"
-    fi
-    relay_info_show "$local_port" "$r_addr" "$r_port"
-    msg "----------------------------------------"
-    relay_warn_security
-}
-
-relay_list() {
-    local files count=0 file l_port r_addr r_port cfg_name base_label
-    shopt -s nullglob
-    files=("$is_conf_dir"/relay-*.json)
-    shopt -u nullglob
-    if [[ ${#files[@]} -eq 0 ]]; then
-        if [[ $is_main_start ]]; then
-            msg "\n暂无端口转发，请先添加\n"
-        else
-            msg "\n当前未配置任何端口转发.\n"
-        fi
-        return
-    fi
-    if [[ $is_main_start ]]; then
-        msg "\n------------- 端口转发列表 -------------"
-    else
-        msg "\n------------- 端口转发列表 -------------"
-    fi
-    for file in "${files[@]}"; do
-        l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
-        r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
-        r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
-        cfg_name=${file##*/}
-        base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
-        if declare -F note_format_list_label >/dev/null 2>&1; then
-            printf '%s\n' "$(note_format_list_label "$cfg_name" "$base_label")"
-        else
-            msg "$base_label"
-        fi
-        ((count++))
-    done
-    msg "------------------------------------"
-    if [[ $is_main_start ]]; then
-        msg "共 $count 个端口转发"
-    else
-        msg "共 $count 个端口转发"
-    fi
-    relay_warn_security
-}
-
-relay_delete() {
-    local local_port=$1 relay_file backup_file remote_addr remote_port
-    if [[ ! $local_port ]]; then
-        relay_list
-        # Existing relays may be listening; only validate the port format here.
-        local is_cant_test_port=1
-        ask string local_port "输入要删除的监听端口:"
-    fi
-    local_port=${local_port#relay-}
-    local_port=${local_port%.json}
-    relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
-    if [[ $is_main_start ]]; then
-        remote_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
-        remote_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-        confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return; }
-    fi
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
-    mv -f "$relay_file" "$backup_file" || err "备份端口转发配置失败，未执行删除."
-    if [[ -f $is_config_json ]]; then
-        if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
-            mv -f "$backup_file" "$relay_file"
-            err "删除端口转发后完整运行时配置校验失败，已恢复端口转发配置."
-        fi
-    fi
-    rm -f "$backup_file"
-    if declare -F meta_rm_unlocked >/dev/null 2>&1; then
-        if ! declare -F meta_file >/dev/null 2>&1 || [[ -f $(meta_file "relay-${local_port}.json") ]]; then
-            meta_rm_unlocked "relay-${local_port}.json" || {
-                shared_config_unlock
-                err "删除端口转发元数据失败: relay-${local_port}.json"
-            }
-        fi
-    fi
-    [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
-        [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
-    }
-    shared_config_unlock
-    manage restart &
-    if [[ $is_main_start ]]; then
-        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
-    else
-        _green "\n已删除端口转发配置: relay-${local_port}.json\n"
-    fi
-}
-
-relay_menu_has_entries() {
-    local files
-    shopt -s nullglob
-    files=("$is_conf_dir"/relay-*.json)
-    shopt -u nullglob
-    ((${#files[@]} > 0))
-}
-
-relay_menu_empty_state() {
-    relay_menu_has_entries && return 1
-    relay_list
-    menu_pause
-    return 0
-}
-
-relay_menu() {
-    local choice_status
-    while :; do
-        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "备注" "删除"
-        choice_status=$?
-        [[ $choice_status == 2 ]] && return
-        [[ $choice_status == 0 ]] || return 1
-        case $REPLY in
-        1)
-            menu_action relay_add
-            ;;
-        2)
-            menu_action relay_list
-            ;;
-        3)
-            relay_menu_empty_state && continue
-            menu_action relay_info
-            ;;
-        4)
-            relay_menu_empty_state && continue
-            menu_action relay_note
-            ;;
-        5)
-            relay_menu_empty_state && continue
-            menu_action relay_delete
-            ;;
-        esac
-    done
-}
-
-relay_main() {
-    case ${1:-} in
-    add)
-        relay_add "${@:2}"
-        ;;
-    list)
-        relay_list
-        ;;
-    info)
-        relay_info "${@:2}"
-        ;;
-    note)
-        relay_note "${@:2}"
-        ;;
-    del | delete | rm)
-        relay_delete "${@:2}"
-        ;;
-    "")
-        relay_menu
-        ;;
-    *)
-        err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|note|delete]"
-        ;;
-    esac
-}
-
 # check prefer args, if not exist prefer args and show main menu
 main() {
-    if declare -F require_root_for_system_exec >/dev/null 2>&1; then
-        require_root_for_system_exec || return 1
-    fi
-    if [[ ${is_core_defer_modules:-0} == 1 ]] && declare -F core_load_modules >/dev/null 2>&1; then
+    require_root_for_system_exec || return 1
+    if [[ ${is_core_defer_modules:-0} == 1 ]]; then
         case ${1:-} in
         h | help | --help | v | ver | version | s | status | start | stop | r | restart | \
         bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools | bbr | log)
@@ -3069,16 +2757,11 @@ main() {
         esac
         is_dont_auto_exit=
         if [[ $fix_all_locked ]]; then
-            manage restart
-            if [[ $is_del_host ]]; then
-                manage restart caddy
-            fi
             shared_config_unlock
-        else
-            manage restart &
-            if [[ $is_del_host ]]; then
-                manage restart caddy &
-            fi
+        fi
+        manage_restart_checked "" "配置操作已保存" || return 1
+        if [[ $is_del_host ]]; then
+            manage_restart_checked caddy "Caddy 配置已更新" || return 1
         fi
         return 0
         ;;
@@ -3102,7 +2785,7 @@ main() {
         if [[ $is_caddy ]]; then
             load caddy.sh
             caddy_config new
-            manage restart caddy &
+            manage_restart_checked caddy "Caddyfile 已更新" || return 1
             _green "\nfix 完成.\n"
         else
             err "无法执行此操作"

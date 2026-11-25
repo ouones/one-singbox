@@ -47,7 +47,6 @@ esac
 FAKE_CORE
 chmod +x "$case_dir/bin/sing-box"
 
-source <(sed '/EUID != 0/d' "$CORE_FILE")
 is_core_dir="$case_dir/core"
 is_conf_dir="$case_dir/conf"
 is_config_json="$case_dir/config.json"
@@ -60,6 +59,7 @@ is_sh_repo=ouones/one-singbox
 is_dont_show_info=1
 is_no_manage_msg=1
 is_systemd=1
+source "$CORE_FILE"
 
 cat >"$is_config_json" <<'CONFIG'
 {
@@ -75,12 +75,12 @@ export UPDATE_RELOAD_ARGS="$case_dir/new-script.args"
 cat >"$is_sh_bin" <<'NEW_SCRIPT'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"$UPDATE_RELOAD_ARGS"
-source <(sed '/EUID != 0/d' "$UPDATE_CORE_FILE")
 is_core_dir="$UPDATE_CASE_DIR/core"
 is_conf_dir="$UPDATE_CASE_DIR/conf"
 is_config_json="$UPDATE_CASE_DIR/config.json"
 is_core_bin="$UPDATE_CASE_DIR/bin/sing-box"
 is_core_ver=1.14.4
+source "$UPDATE_CORE_FILE"
 main "$@"
 NEW_SCRIPT
 chmod +x "$is_sh_bin"
@@ -225,17 +225,10 @@ fail() {
     exit 1
 }
 
-source <(sed -n '/^is_reload_exit_code=/p' "$CORE_FILE")
-source <(sed -n '/^_green() {/,/^}/p' "${CORE_FILE%/*}/init.sh")
-source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_pause() {/,/^}/p; /^menu_action() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^confirm_action() {/,/^}/p; /^menu_system_impact() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^update() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
-
 case_dir=$(mktemp -d)
 trap 'rm -rf "$case_dir"' EXIT
+mkdir -p "$case_dir/core/bin" "$case_dir/conf" "$case_dir/log" "$case_dir/bin" "$case_dir/sh/src"
+cp -R "${CORE_FILE%/*}/." "$case_dir/sh/src/"
 
 cat >"$case_dir/reloaded-entry" <<'ENTRY'
 #!/usr/bin/env bash
@@ -243,28 +236,39 @@ cat >"$case_dir/reloaded-entry" <<'ENTRY'
 printf 'NEW_PANEL_LOADED\n'
 exit 0
 ENTRY
-chmod +x "$case_dir/reloaded-entry"
+cat >"$case_dir/bin/sing-box" <<'FAKE_CORE'
+#!/usr/bin/env bash
+[[ $1 == version ]] && printf 'sing-box version 1.14.0\n'
+exit 0
+FAKE_CORE
+cat >"$case_dir/bin/systemctl" <<'FAKE_SYS'
+#!/usr/bin/env bash
+exit 0
+FAKE_SYS
+cat >"$case_dir/bin/apt-get" <<'FAKE_APT'
+#!/usr/bin/env bash
+exit 0
+FAKE_APT
+chmod +x "$case_dir/reloaded-entry" "$case_dir/bin/sing-box" "$case_dir/bin/systemctl" "$case_dir/bin/apt-get"
+PATH="$case_dir/bin:$PATH"
 
-msg() { printf '%b\n' "$*"; }
-show_list() { printf '%s\n' "$@"; }
-is_err='错误'
-# Pipe-driven test input is intentional; -t bounds any missing input so CI cannot hang.
-interactive_read() { builtin read -t 3 "$@"; }
+is_core_dir="$case_dir/core"
+is_conf_dir="$case_dir/conf"
+is_log_dir="$case_dir/log"
+is_sh_dir="$case_dir/sh"
+is_sh_bin="$case_dir/reloaded-entry"
+is_config_json="$case_dir/no-config.json"
+is_core_bin="$case_dir/bin/sing-box"
+is_core_ver=1.14.0
+is_sh_ver=v1.58
+source "$CORE_FILE"
+
 qrcode_dependency_install() { :; }
 get_latest_version() { latest_ver=v1.59; }
-load() { :; }
+load() { [[ $1 == download.sh ]] && return 0; . "$is_sh_dir/src/$1"; }
 download() { :; }
 migrate_runtime_config() { return 0; }
 manage() { return 0; }
-is_core=sing-box
-is_core_name=sing-box
-is_core_ver=1.14.0
-is_core_repo=SagerNet/sing-box
-is_script_name=one-singbox
-is_sh_ver=v1.58
-is_sh_repo=ouones/one-singbox
-is_sh_bin="$case_dir/reloaded-entry"
-is_config_json="$case_dir/no-config.json"
 
 run_interactive_update_menu() {
     update_menu
@@ -312,7 +316,6 @@ run_entry_cleanup_case() {
     mkdir -p "$sh_dir/src" "$root/etc/sing-box/bin" "$root/etc/sing-box/conf" \
         "$root/usr/local/bin" "$root/var/log/sing-box" "$case_dir/bin"
     cp -R "$repo_root/src/." "$sh_dir/src/"
-    sed -i '/EUID != 0/d' "$sh_dir/src/core.sh"
     cp "$repo_root/sing-box.sh" "$entry"
     sed -i "s|^\. /etc/sing-box/sh/src/init.sh$|. $sh_dir/src/init.sh|" "$entry"
     grep -Fq ". $sh_dir/src/init.sh" "$entry" || fail "test fixture did not rewrite the entry script path"

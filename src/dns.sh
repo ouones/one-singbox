@@ -9,7 +9,7 @@ is_dns_list=(
 )
 dns_set() {
     local candidate_config= is_interactive= is_dns_use_bak= dns_choice_status= dns_impact=
-    local is_dns_new= is_dns_type= config_locked= sync_fn=
+    local is_dns_new= is_dns_type= config_locked=
     [[ ! $1 ]] && is_interactive=1
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
@@ -102,11 +102,7 @@ dns_set() {
         err "无法生成 DNS 候选配置"
         return 1
     fi
-    sync_fn=sync_runtime_node_outbound_modes
-    if declare -F sync_runtime_node_outbound_modes_unlocked >/dev/null 2>&1; then
-        sync_fn=sync_runtime_node_outbound_modes_unlocked
-    fi
-    if ! "$sync_fn" "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
+    if ! sync_runtime_node_outbound_modes_unlocked "$candidate_config" "$is_config_json" "$is_conf_dir" 1; then
         rm -f "$candidate_config"
         [[ $config_locked ]] && shared_config_unlock
         err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
@@ -114,7 +110,7 @@ dns_set() {
     fi
     rm -f "$candidate_config"
     [[ $config_locked ]] && shared_config_unlock
-    manage restart &
+    manage_restart_checked "" "DNS 配置已更新" || return 1
     msg "\n已更新 DNS 为: $(_green "$is_dns_use_bak")\n"
 }
 dns_set_server() {

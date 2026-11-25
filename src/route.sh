@@ -180,7 +180,7 @@ block_cn_enable() {
         err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
         return 1
     }
-    manage restart
+    manage_restart_checked "" "屏蔽回国流量配置已更新" || return 1
 }
 
 block_cn_disable() {
@@ -190,7 +190,7 @@ block_cn_disable() {
         err "同步运行时路由配置失败: ${runtime_sync_error:-未知错误}"
         return 1
     }
-    manage restart
+    manage_restart_checked "" "屏蔽回国流量配置已更新" || return 1
 }
 
 block_cn_toggle() {
@@ -203,10 +203,10 @@ block_cn_toggle() {
 
 block_cn_menu_toggle() {
     if block_cn_is_enabled; then
-        block_cn_disable
+        block_cn_disable || return 1
         msg "\n已禁用屏蔽回国流量。\n"
     else
-        block_cn_enable
+        block_cn_enable || return 1
         msg "\n已启用屏蔽回国流量。\n"
     fi
 }
@@ -216,13 +216,13 @@ block_cn_cli() {
     case $action in
     status) ;;
     enable | on)
-        block_cn_enable
+        block_cn_enable || return 1
         ;;
     disable | off)
-        block_cn_disable
+        block_cn_disable || return 1
         ;;
     toggle)
-        block_cn_toggle
+        block_cn_toggle || return 1
         ;;
     *)
         err "无效参数: $action (支持: status, enable, disable, toggle)"

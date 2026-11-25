@@ -77,10 +77,16 @@ if ((${#is_list[@]} > 0)); then
     done
     wait
     is_dont_auto_exit=
-    manage restart &
-    [[ $is_xray_in ]] && xray restart &
-    [[ $is_v2ray_in ]] && v2ray restart &
-    [[ ${is_list[*],,} =~ "tls" && $is_caddy ]] && manage restart caddy &
+    manage_restart_checked "" "导入配置已保存" || return 1
+    if [[ $is_xray_in ]]; then
+        xray restart || warn "xray 服务重启失败，请手动检查 xray 服务状态。"
+    fi
+    if [[ $is_v2ray_in ]]; then
+        v2ray restart || warn "v2ray 服务重启失败，请手动检查 v2ray 服务状态。"
+    fi
+    if [[ ${is_list[*],,} =~ "tls" && $is_caddy ]]; then
+        manage_restart_checked caddy "导入的 Caddy 配置已保存" || return 1
+    fi
 
 else
     err "没有找到可导入的配置..."

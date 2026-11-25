@@ -22,55 +22,47 @@ CORE_FILE=$1
 LOG_FILE=$2
 SCENARIO=$3
 case_dir=$4
-is_conf_dir=$case_dir/conf
 is_core_dir=$case_dir/core
+is_conf_dir=$case_dir/conf
 is_log_dir=$case_dir/log
-mkdir -p "$is_conf_dir" "$is_core_dir" "$is_log_dir"
+is_sh_dir=$case_dir/apps
+is_caddy_dir=$case_dir/caddy
+is_caddy_bin=$case_dir/bin/caddy
+is_config_json=$case_dir/core/config.json
+is_core_bin=$case_dir/bin/sing-box
+mkdir -p "$is_conf_dir/.quan-meta" "$is_core_dir" "$is_log_dir" "$is_sh_dir/core" "$is_sh_dir/log" "$case_dir/bin"
+touch "$is_core_dir/qrcode-dependency-checked" "$is_sh_dir/core/qrcode-dependency-checked"
+printf '200\n' >"$is_core_dir/log-limit-mb"
+printf '{"outbounds":[{"tag":"direct","type":"direct"}]}\n' >"$is_config_json"
 
-source <(sed -n '/^ask() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^confirm_action() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^confirm_exact_yes() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_system_impact() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_select() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^node_menu_has_nodes() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^node_menu_empty_state() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^node_menu() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_menu_has_entries() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_menu_empty_state() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^relay_menu() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^service_menu() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^system_tools_menu() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^update_menu() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^is_main_menu() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^mainmenu=(/,/^)/p' "$CORE_FILE")
-source <(sed -n '/^log_set() {/,/^}/p' "$LOG_FILE")
-source <(sed -n '/^interactive_read() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^run_interactive_operation() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^menu_action() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^interactive_log_tail() {/,/^}/p' "$LOG_FILE")
-source <(sed -n '/^uninstall() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^get() {/,/^}/p' "$CORE_FILE")
-source <(sed -n '/^del() {/,/^}/p' "$CORE_FILE" | sed '1s/^del()/delete_node_scenario()/')
+cat >"$case_dir/bin/sing-box" <<'FAKE_CORE'
+#!/usr/bin/env bash
+[[ $1 == version ]] && printf 'sing-box version 1.50.0\n'
+exit 0
+FAKE_CORE
+cat >"$case_dir/bin/apt-get" <<'FAKE_APT'
+#!/usr/bin/env bash
+exit 0
+FAKE_APT
+cat >"$case_dir/bin/systemctl" <<'FAKE_SYS'
+#!/usr/bin/env bash
+[[ $1 == is-active ]] && printf 'active\n'
+exit 0
+FAKE_SYS
+real_sed=$(command -v sed)
+cat >"$case_dir/bin/sed" <<FAKE_SED
+#!/usr/bin/env bash
+for arg in "\$@"; do
+    [[ \$arg == /root/.bashrc ]] && exit 0
+done
+exec "$real_sed" "\$@"
+FAKE_SED
+chmod +x "$case_dir/bin/sing-box" "$case_dir/bin/apt-get" "$case_dir/bin/systemctl" "$case_dir/bin/sed"
+export PATH="$case_dir/bin:$PATH"
 
-if ! declare -F interactive_read >/dev/null; then
-    interactive_read() { builtin read "$@"; }
-fi
-if ! declare -F run_interactive_operation >/dev/null; then
-    run_interactive_operation() { "$@"; }
-fi
-if ! declare -F interactive_log_tail >/dev/null; then
-    interactive_log_tail() { tail -f "$1"; }
-fi
+source "$CORE_FILE"
+source "$LOG_FILE"
 
-msg() { printf '%b\n' "$*"; }
-_green() { printf '%s' "$*"; }
-_red() { printf '%s' "$*"; }
-err() { printf '%b\n' "$*" >&2; exit 1; }
-show_list() { printf '%s\n' "$@"; }
-menu_pause() {
-    printf '\n按回车返回菜单。\n'
-    interactive_read -r || :
-}
 load() { :; }
 qrcode_dependency_checked() { return 0; }
 qrcode_dependency_install() { return 0; }
@@ -90,7 +82,6 @@ is_terminal_log_view=
 node_menu_has_nodes() { return 0; }
 node_menu_empty_state() { return 1; }
 info() { printf 'NODE_INFO\n'; }
-del() { printf 'NODE_DELETE\n'; }
 add() {
     printf 'NODE_ADD_INPUT\n'
     ask string node_name '输入节点名称:'
@@ -164,7 +155,7 @@ node-delete-confirm)
     is_config_name=测试节点
     mkdir -p "$is_conf_dir"
     printf '{}\n' >"$is_conf_dir/$is_config_file"
-    run_interactive_operation delete_node_scenario
+    run_interactive_operation del
     printf 'NODE_DELETE_RETURNED\n'
     ;;
 relay-add)
@@ -310,11 +301,11 @@ class PtyProcess:
         return ANSI_RE.sub(b"", bytes(self.output)).decode(errors="replace")
 
     def expect(self, needle):
-        encoded = needle.encode()
         while True:
-            found = bytes(self.output).find(encoded, self.cursor)
+            clean = ANSI_RE.sub(b"", bytes(self.output)).decode(errors="replace")
+            found = clean.find(needle, self.cursor)
             if found >= 0:
-                self.cursor = found + len(encoded)
+                self.cursor = found + len(needle)
                 return self
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
