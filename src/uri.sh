@@ -73,8 +73,41 @@ ss_password_for_method() {
     fi
 }
 
+# Normalize and validate standard or URL-safe Base64 input into padded standard Base64.
+# Usage: _base64_normalize <input> [urlsafe=0|1] [out_padded_var] [out_unpadded_var]
+_base64_normalize() {
+    local _b64_input=$1 _b64_allow_urlsafe=${2:-0} _b64_out_padded=${3:-} _b64_out_unpadded=${4:-}
+    local _b64_raw _b64_padding _b64_normalized _b64_mod _b64_canonical
+    if [[ $_b64_allow_urlsafe == 1 ]]; then
+        [[ $_b64_input =~ ^[A-Za-z0-9+/_-]+={0,2}$ ]] || return 1
+        [[ $_b64_input != *[-_]* || ( $_b64_input != *+* && $_b64_input != */* ) ]] || return 1
+    else
+        [[ $_b64_input =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+    fi
+    _b64_raw=${_b64_input%%=*}
+    _b64_padding=${_b64_input#"$_b64_raw"}
+    _b64_normalized=${_b64_raw//-/+}
+    _b64_normalized=${_b64_normalized//_/\/}
+    _b64_mod=$((${#_b64_normalized} % 4))
+    if [[ $_b64_padding ]]; then
+        [[ $((${#_b64_input} % 4)) == 0 ]] || return 1
+        [[ ($_b64_padding == '==' && $_b64_mod == 2) || ($_b64_padding == '=' && $_b64_mod == 3) ]] || return 1
+    else
+        [[ $_b64_mod != 1 ]] || return 1
+        [[ $_b64_mod == 2 ]] && _b64_padding='=='
+        [[ $_b64_mod == 3 ]] && _b64_padding='='
+    fi
+    if [[ $_b64_allow_urlsafe != 1 ]]; then
+        _b64_canonical=$(printf '%s' "$_b64_normalized$_b64_padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
+        [[ $_b64_canonical == "$_b64_normalized$_b64_padding" ]] || return 1
+    fi
+    [[ $_b64_out_padded ]] && printf -v "$_b64_out_padded" '%s' "$_b64_normalized$_b64_padding"
+    [[ $_b64_out_unpadded ]] && printf -v "$_b64_out_unpadded" '%s' "$_b64_normalized"
+    return 0
+}
+
 ss_password_valid_for_method() {
-    local method=$1 password=$2 expected_len decoded_len key normalized padding mod
+    local method=$1 password=$2 expected_len decoded_len key padded
     local -a keys
     [[ $method != *2022* ]] && return 0
     [[ $password ]] || return 1
@@ -82,54 +115,18 @@ ss_password_valid_for_method() {
     [[ $password != :* && $password != *: && $password != *::* ]] || return 1
     IFS=: read -r -a keys <<<"$password"
     for key in "${keys[@]}"; do
-        ss_base64_shape_valid "$key" || return 1
-        [[ $key != *[-_]* || ( $key != *+* && $key != */* ) ]] || return 1
-        normalized=${key%%=*}
-        padding=${key#"$normalized"}
-        normalized=${normalized//-/+}
-        normalized=${normalized//_/\/}
-        mod=$((${#normalized} % 4))
-        if [[ ! $padding ]]; then
-            [[ $mod != 1 ]] || return 1
-            [[ $mod == 2 ]] && padding='=='
-            [[ $mod == 3 ]] && padding='='
-        fi
-        decoded_len=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null | wc -c)
+        _base64_normalize "$key" 1 padded || return 1
+        decoded_len=$(printf '%s' "$padded" | base64 -d 2>/dev/null | wc -c)
         [[ ${decoded_len// /} -eq $expected_len ]] || return 1
     done
 }
 
-ss_base64_shape_valid() {
-    local input=$1 raw padding mod
-    [[ $input =~ ^[A-Za-z0-9+/_-]+={0,2}$ ]] || return 1
-    raw=${input%%=*}
-    padding=${input#"$raw"}
-    mod=$((${#raw} % 4))
-    if [[ $padding ]]; then
-        [[ $((${#input} % 4)) == 0 ]] || return 1
-        [[ ($padding == '==' && $mod == 2) || ($padding == '=' && $mod == 3) ]]
-    else
-        [[ $mod != 1 ]]
-    fi
-}
-
 ss_base64_decode() {
-    local input=$1 raw padding normalized decoded canonical mod
-    ss_base64_shape_valid "$input" || return 1
-    [[ $input != *[-_]* || ( $input != *+* && $input != */* ) ]] || return 1
-    raw=${input%%=*}
-    padding=${input#"$raw"}
-    normalized=${raw//-/+}
-    normalized=${normalized//_/\/}
-    mod=$((${#normalized} % 4))
-    if [[ ! $padding ]]; then
-        [[ $mod != 1 ]] || return 1
-        [[ $mod == 2 ]] && padding='=='
-        [[ $mod == 3 ]] && padding='='
-    fi
-    decoded=$(printf '%s' "$normalized$padding" | base64 -d 2>/dev/null) 2>/dev/null || return 1
+    local input=$1 padded unpadded decoded canonical
+    _base64_normalize "$input" 1 padded unpadded || return 1
+    decoded=$(printf '%s' "$padded" | base64 -d 2>/dev/null) 2>/dev/null || return 1
     canonical=$(printf '%s' "$decoded" | base64 | tr -d '=\n') || return 1
-    [[ $canonical == "$normalized" ]] || return 1
+    [[ $canonical == "$unpadded" ]] || return 1
     printf '%s' "$decoded"
 }
 
@@ -473,20 +470,7 @@ normalize_vless_ech_config() {
         [[ $input != *$'\r'* && $input != *$'\n'* ]] || return 1
         body=$input
     fi
-    [[ $body =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
-    raw=${body%%=*}
-    padding=${body#"$raw"}
-    mod=$((${#raw} % 4))
-    if [[ $padding ]]; then
-        [[ $((${#body} % 4)) == 0 ]] || return 1
-        [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
-    else
-        [[ $mod != 1 ]] || return 1
-        [[ $mod == 2 ]] && padding='=='
-        [[ $mod == 3 ]] && padding='='
-    fi
-    canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
-    [[ $canonical == "$raw$padding" ]] || return 1
+    _base64_normalize "$body" 0 canonical || return 1
     decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
     [[ $decoded_len != 0 ]] || return 1
     encoded=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | base64) || return 1
@@ -494,7 +478,7 @@ normalize_vless_ech_config() {
 }
 
 normalize_vless_certificate_sha256() {
-    local input=$1 pin raw padding mod decoded_len canonical normalized hex_escaped i
+    local input=$1 pin decoded_len canonical normalized hex_escaped i
     local -a pins=() normalized_pins=()
     vless_certificate_sha256_csv=
     [[ $input ]] || return 0
@@ -508,20 +492,7 @@ normalize_vless_certificate_sha256() {
             done
             normalized=$(printf '%b' "$hex_escaped" | base64 -w 0) || return 1
         else
-            [[ $pin =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
-            raw=${pin%%=*}
-            padding=${pin#"$raw"}
-            mod=$((${#raw} % 4))
-            if [[ $padding ]]; then
-                [[ $((${#pin} % 4)) == 0 ]] || return 1
-                [[ ($padding == '=' && $mod == 3) || ($padding == '==' && $mod == 2) ]] || return 1
-            else
-                [[ $mod != 1 ]] || return 1
-                [[ $mod == 2 ]] && padding='=='
-                [[ $mod == 3 ]] && padding='='
-            fi
-            canonical=$(printf '%s' "$raw$padding" | base64 -d 2>/dev/null | base64 -w 0) || return 1
-            [[ $canonical == "$raw$padding" ]] || return 1
+            _base64_normalize "$pin" 0 canonical || return 1
             decoded_len=$(printf '%s' "$canonical" | base64 -d 2>/dev/null | wc -c | tr -d '[:space:]') || return 1
             [[ $decoded_len == 32 ]] || return 1
             normalized=$canonical

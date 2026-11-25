@@ -111,18 +111,15 @@ export all_proxy=http://script-proxy.invalid
 : >"$FAKE_WGET_ENV_LOG"
 : >"$TIMEOUT_LOG"
 printf '%s' "$TEST_RESPONSE" >"$FAKE_WGET_RESPONSE"
-testable_core="$case_dir/core.sh"
-sed '/^\[\[ \$EUID != 0 \]\] && err/d' "$CORE_FILE" >"$testable_core"
-
 case ${TEST_SCENARIO} in
 no-shuf)
   original_path=$PATH
   PATH=$TEST_NOSHUFBIN
-  source "$testable_core"
+  source "$CORE_FILE"
   PATH="$TEST_BIN:$original_path"
   ;;
 *)
-  source "$testable_core"
+  source "$CORE_FILE"
   ;;
 esac
 

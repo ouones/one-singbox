@@ -6,7 +6,7 @@ trap 'rm -rf "$workdir"' EXIT
 
 for core in "$repo_root/src/core.sh"; do
   (
-    source <(sed '/EUID != 0/d' "$core")
+    source "$core"
     is_core_dir="$workdir/core"
     is_conf_dir="$workdir/conf"
     is_config_json="$workdir/config.json"

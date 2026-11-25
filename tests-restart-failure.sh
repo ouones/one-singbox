@@ -83,6 +83,8 @@ FAKE_CURL
 #!/usr/bin/env bash
 if [[ $* == *cdn-cgi/trace* ]]; then
     printf 'ip=203.0.113.10\n'
+elif [[ $* == *dns-query* ]]; then
+    printf '{"Answer":[{"data":"203.0.113.10"}]}\n'
 fi
 exit 0
 FAKE_WGET
@@ -136,7 +138,7 @@ assert_cli_restart_failure() {
     out=$(WITH_CADDY="$with_caddy" FAIL_UNIT="$fail_unit" SERVICE_LOG="$service_log" PATH="$case_dir/bin:$PATH" bash "$entry" "$@" 2>&1)
     rc=$?
     [[ $rc != 0 ]] || fail "$name: expected non-zero exit when $fail_unit restart fails, got rc=0 output=$out"
-    [[ $out == *'服务重启失败'* ]] || fail "$name: missing restart failure feedback: $out"
+    [[ $out == *'服务重启失败'* || $out == *'节点变更重启失败'* ]] || fail "$name: missing restart failure feedback: $out"
     if [[ -n $forbidden_text ]]; then
         [[ $out != *"$forbidden_text"* ]] || fail "$name: printed misleading success '$forbidden_text' on restart failure: $out"
     fi
@@ -149,7 +151,7 @@ assert_cli_restart_failure dns-set 0 sing-box '已更新 DNS 为' dns set 1.1.1.
 assert_cli_restart_failure relay-add 0 sing-box '端口转发配置添加成功' relay add 12000 203.0.113.10 20000
 assert_cli_restart_failure relay-del 0 sing-box '已删除端口转发配置:' relay delete 12000
 assert_cli_restart_failure node-add 0 sing-box '' add ss 21001 secret aes-128-gcm
-assert_cli_restart_failure dd-node 0 sing-box '' dd Shadowsocks-21001.json
+assert_cli_restart_failure dd-node 0 sing-box '已删除:' dd Shadowsocks-21001.json
 assert_cli_restart_failure block-cn 0 sing-box '' block-cn enable
 assert_cli_restart_failure fix-caddyfile 1 caddy 'fix 完成' fix-caddyfile
 
@@ -164,5 +166,83 @@ menu_rc=$?
 [[ $menu_out == *'服务重启失败'* ]] || fail "menu-dns: interactive DNS write did not surface restart failure: $menu_out"
 [[ $menu_out != *'已更新 DNS 为'* ]] || fail "menu-dns: printed success despite restart failure: $menu_out"
 [[ $menu_out == *'按回车返回菜单。'* ]] || fail "menu-dns: did not pause for user to read restart failure: $menu_out"
+
+# 3. is_dont_auto_exit=1 failure paths must return non-zero without fallthrough or lock leaks
+dd_empty_case=$(setup_entry_fixture dd-empty 0)
+dd_empty_log="$dd_empty_case/service.log"
+: >"$dd_empty_log"
+dd_empty_out=$(
+    SERVICE_LOG="$dd_empty_log" PATH="$dd_empty_case/bin:$PATH" bash -c '
+        source "$1"
+        is_dont_auto_exit=1
+        main dd
+    ' _ "$dd_empty_case/root/etc/sing-box/sh/src/core.sh" 2>&1
+)
+dd_empty_rc=$?
+[[ $dd_empty_rc != 0 ]] || fail "main dd without args with is_dont_auto_exit=1 unexpectedly returned 0: $dd_empty_out"
+[[ ! -s $dd_empty_log ]] || fail "main dd without args triggered restart: $(<"$dd_empty_log")"
+
+del_fail_case=$(setup_entry_fixture del-fail 0)
+del_fail_log="$del_fail_case/service.log"
+: >"$del_fail_log"
+printf '%s\n' '{"inbounds":[{"tag":"Shadowsocks-21001.json","type":"shadowsocks","listen":"::","listen_port":21001,"method":"aes-128-gcm","password":"secret"}]}' \
+    >"$del_fail_case/root/etc/sing-box/conf/Shadowsocks-21001.json"
+del_fail_out=$(
+    FAIL_UNIT=sing-box SERVICE_LOG="$del_fail_log" PATH="$del_fail_case/bin:$PATH" bash -c '
+        source "$1"
+        is_dont_auto_exit=1
+        main del Shadowsocks-21001.json
+    ' _ "$del_fail_case/root/etc/sing-box/sh/src/core.sh" 2>&1
+)
+del_fail_rc=$?
+[[ $del_fail_rc != 0 ]] || fail "main del on lifecycle failure with is_dont_auto_exit=1 unexpectedly returned 0: $del_fail_out"
+[[ $del_fail_out != *'已删除:'* ]] || fail "main del printed '已删除:' despite lifecycle failure: $del_fail_out"
+[[ -f $del_fail_case/root/etc/sing-box/conf/Shadowsocks-21001.json ]] || fail "failed main del did not preserve node config"
+
+for fail_unit in caddy sing-box; do
+    add_lock_case=$(setup_entry_fixture "add-lock-$fail_unit" 1)
+    add_lock_log="$add_lock_case/service.log"
+    : >"$add_lock_log"
+    add_lock_out=$(
+        WITH_CADDY=1 FAIL_UNIT="$fail_unit" SERVICE_LOG="$add_lock_log" PATH="$add_lock_case/bin:$PATH" bash -c '
+            source "$1"
+            init_core_ver
+            init_caddy_probe full
+            main add wss locktest.example.com 11111111-1111-1111-1111-111111111111 /ws
+        ' _ "$add_lock_case/root/etc/sing-box/sh/src/core.sh" 2>&1
+    )
+    add_lock_rc=$?
+    [[ $add_lock_rc != 0 ]] || fail "add wss should fail when $fail_unit restart fails: $add_lock_out"
+    [[ $add_lock_out == *'服务重启失败'* ]] || fail "add wss missing restart failure feedback for $fail_unit: $add_lock_out"
+    lock_file="$add_lock_case/root/etc/sing-box/.frontend-state/lock"
+    if [[ -e $lock_file ]] && ! flock -n "$lock_file" true; then
+        fail "add() leaked shared_config_lock when $fail_unit failed"
+    fi
+done
+
+# Same-process lock leak check under is_dont_auto_exit=1 when create caddy fails mid-add
+add_caddy_fail_case=$(setup_entry_fixture "add-caddy-fail" 1)
+rm -rf "$add_caddy_fail_case/root/etc/caddy/one-singbox"
+chmod 555 "$add_caddy_fail_case/root/etc/caddy"
+add_caddy_fail_out=$(
+    WITH_CADDY=1 SERVICE_LOG="$add_caddy_fail_case/service.log" PATH="$add_caddy_fail_case/bin:$PATH" bash -c '
+        source "$1"
+        init_core_ver
+        init_caddy_probe full
+        is_dont_auto_exit=1
+        main add wss locktest.example.com 11111111-1111-1111-1111-111111111111 /ws
+        rc=$?
+        lock_file="$is_core_dir/.frontend-state/lock"
+        if [[ -e $lock_file ]] && ! flock -n "$lock_file" true; then
+            echo "LOCK_LEAKED"
+            exit 98
+        fi
+        exit "$rc"
+    ' _ "$add_caddy_fail_case/root/etc/sing-box/sh/src/core.sh" 2>&1
+)
+add_caddy_fail_rc=$?
+chmod 755 "$add_caddy_fail_case/root/etc/caddy"
+[[ $add_caddy_fail_rc != 98 && $add_caddy_fail_out != *LOCK_LEAKED* ]] || fail "add() leaked shared_config_lock when create caddy failed: $add_caddy_fail_out"
+[[ $add_caddy_fail_rc != 0 ]] || fail "add wss should return non-zero when create caddy fails under is_dont_auto_exit=1: $add_caddy_fail_out"
 
 echo 'PASS: tests-restart-failure.sh'

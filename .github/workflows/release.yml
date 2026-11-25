@@ -16,26 +16,12 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - name: offline regression and Bash syntax gate
+      - name: offline regression and static checks
         run: |
-          set -euo pipefail
-          shell_count=0
-          while IFS= read -r -d '' shell_file; do
-            bash -n "$shell_file"
-            shell_count=$((shell_count + 1))
-          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
-          if ((shell_count == 0)); then
-            echo "No Bash scripts found for syntax validation." >&2
-            exit 1
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           fi
-          sudo -n bash tests-menu-navigation.sh
-          sudo -n bash tests-node-external-frontend.sh
-          sudo -n bash tests-node-name-label.sh
-          sudo -n bash tests-node-proxy-outbound.sh
-          bash tests-update-script-reload.sh
-          bash tests-block-cn.sh
-          bash tests-skill-inventory.sh
-          bash tests-terminology.sh
+          sudo -n bash scripts/run-offline-tests.sh --jobs 2
 
   release:
     needs: build
@@ -75,10 +61,12 @@ jobs:
           set -euo pipefail
           archive=.release-artifacts/code.tar.gz
           members="$(tar tzf "$archive")"
-          if ! grep -Fxq 'src/core.sh' <<< "$members"; then
-            echo "Release package is missing src/core.sh." >&2
-            exit 1
-          fi
+          for required in src/core.sh src/meta.sh src/uri.sh src/route.sh src/node.sh src/relay.sh; do
+            if ! grep -Fxq "$required" <<< "$members"; then
+              echo "Release package is missing $required." >&2
+              exit 1
+            fi
+          done
           if grep -Fxq 'core.sh' <<< "$members"; then
             echo "Release package must not contain the removed root management script." >&2
             exit 1
@@ -129,8 +117,17 @@ jobs:
 
           with tarfile.open(sys.argv[1], "r:gz") as package:
               members = package.getnames()
-          if "src/core.sh" not in members:
-              raise SystemExit("published asset is missing src/core.sh")
+          required = [
+              "src/core.sh",
+              "src/meta.sh",
+              "src/uri.sh",
+              "src/route.sh",
+              "src/node.sh",
+              "src/relay.sh",
+          ]
+          missing = [m for m in required if m not in members]
+          if missing:
+              raise SystemExit(f"published asset is missing: {', '.join(missing)}")
           if "core.sh" in members:
               raise SystemExit("published asset must not contain the removed root management script")
           PY

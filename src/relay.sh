@@ -36,23 +36,23 @@ relay_add() {
         [[ -z "$REPLY" ]] && msg "自动分配本地端口: $local_port"
     fi
     local_port=$(echo "$local_port" | tr -d ' ')
-    [[ $(is_test port "$local_port") ]] || err "($local_port) 不是一个有效的端口."
-    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
-    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
+    [[ $(is_test port "$local_port") ]] || { err "($local_port) 不是一个有效的端口."; return 1; }
+    [[ $(is_test port_used "$local_port") ]] && { err "本地端口 ($local_port) 已被占用."; return 1; }
+    config_port_used "$local_port" && { err "本地端口 ($local_port) 已被现有配置占用."; return 1; }
 
     if [[ ! $remote_addr ]]; then
         interactive_add=1
         ask string remote_addr "输入目标地址 (IPv4、IPv6 或域名):"
     fi
     remote_addr=$(echo "$remote_addr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    [[ -n $remote_addr ]] || err "目标地址不能为空."
+    [[ -n $remote_addr ]] || { err "目标地址不能为空."; return 1; }
 
     if [[ ! $remote_port ]]; then
         interactive_add=1
         ask string remote_port "输入目标端口 (1-65535):"
     fi
     remote_port=$(echo "$remote_port" | tr -d ' ')
-    [[ $(is_test port "$remote_port") ]] || err "($remote_port) 不是一个有效的目标端口."
+    [[ $(is_test port "$remote_port") ]] || { err "($remote_port) 不是一个有效的目标端口."; return 1; }
 
     if ((interactive_add == 1 && $# < 4)); then
         echo -ne "输入备注 (可选，直接回车跳过):"
@@ -63,10 +63,10 @@ relay_add() {
 
     local relay_file="$is_conf_dir/relay-${local_port}.json"
     local tmp_file
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
-    [[ $(is_test port_used "$local_port") ]] && err "本地端口 ($local_port) 已被占用."
-    config_port_used "$local_port" && err "本地端口 ($local_port) 已被现有配置占用."
-    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || err "无法创建端口转发临时配置文件."
+    shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
+    [[ $(is_test port_used "$local_port") ]] && { shared_config_unlock; err "本地端口 ($local_port) 已被占用."; return 1; }
+    config_port_used "$local_port" && { shared_config_unlock; err "本地端口 ($local_port) 已被现有配置占用."; return 1; }
+    tmp_file=$(mktemp "$is_conf_dir/.relay-XXXXXX") || { shared_config_unlock; err "无法创建端口转发临时配置文件."; return 1; }
 
     local relay_inbound
     relay_inbound=$(jq -n \
@@ -76,30 +76,38 @@ relay_add() {
         --argjson remote_port "$remote_port" \
         '{inbounds:[{tag:$tag,type:"direct",listen:"::",listen_port:$local_port,override_address:$addr,override_port:$remote_port}]}') || {
         rm -f "$tmp_file"
+        shared_config_unlock
         err "生成端口转发配置 JSON 失败."
+        return 1
     }
     printf '%s\n' "$relay_inbound" > "$tmp_file"
 
     if ! "$is_core_bin" check -c "$tmp_file" &>/dev/null; then
         rm -f "$tmp_file"
+        shared_config_unlock
         err "端口转发配置校验失败."
+        return 1
     fi
 
     if ! mv -f "$tmp_file" "$relay_file"; then
         rm -f "$tmp_file"
+        shared_config_unlock
         err "保存端口转发配置文件失败."
+        return 1
     fi
 
     if [[ -f $is_config_json ]]; then
         if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
             rm -f "$relay_file"
+            shared_config_unlock
             err "完整运行时配置校验失败，已取消安装该端口转发配置."
+            return 1
         fi
     fi
 
     shared_config_unlock
     if [[ $relay_note ]]; then
-        note_set "relay-${local_port}.json" "$relay_note" || err "保存备注失败."
+        note_set "relay-${local_port}.json" "$relay_note" || { err "保存备注失败."; return 1; }
     fi
     manage_restart_checked "" "端口转发配置已保存" || return 1
     msg "\n$(_green '端口转发配置添加成功!')"
@@ -118,7 +126,7 @@ relay_info() {
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     local relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
+    [[ -f $relay_file ]] || { err "未找到端口转发配置 (relay-${local_port}.json)."; return 1; }
     local r_addr r_port
     r_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
     r_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
@@ -167,19 +175,21 @@ relay_delete() {
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
     relay_file="$is_conf_dir/relay-${local_port}.json"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 (relay-${local_port}.json)."
+    [[ -f $relay_file ]] || { err "未找到端口转发配置 (relay-${local_port}.json)."; return 1; }
     if [[ $is_main_start ]]; then
         remote_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
         remote_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
         confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return; }
     fi
-    shared_config_lock || err "${shared_config_error:-无法获取公共配置锁}"
+    shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"
-    mv -f "$relay_file" "$backup_file" || err "备份端口转发配置失败，未执行删除."
+    mv -f "$relay_file" "$backup_file" || { shared_config_unlock; err "备份端口转发配置失败，未执行删除."; return 1; }
     if [[ -f $is_config_json ]]; then
         if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" &>/dev/null; then
             mv -f "$backup_file" "$relay_file"
+            shared_config_unlock
             err "删除端口转发后完整运行时配置校验失败，已恢复端口转发配置."
+            return 1
         fi
     fi
     rm -f "$backup_file"
@@ -187,10 +197,15 @@ relay_delete() {
         meta_rm_unlocked "relay-${local_port}.json" || {
             shared_config_unlock
             err "删除端口转发元数据失败: relay-${local_port}.json"
+            return 1
         }
     fi
     [[ -f $is_config_json ]] && sync_runtime_node_outbound_modes || {
-        [[ ! -f $is_config_json ]] || err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+        if [[ -f $is_config_json ]]; then
+            shared_config_unlock
+            err "节点代理路由同步失败: ${runtime_sync_error:-未知错误}"
+            return 1
+        fi
     }
     shared_config_unlock
     manage_restart_checked "" "已删除端口转发配置 relay-${local_port}.json" || return 1
@@ -212,10 +227,10 @@ relay_note() {
     local_port=$(printf '%s' "$local_port" | tr -d '[:space:]')
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
-    [[ $local_port ]] || err "监听端口不能为空."
+    [[ $local_port ]] || { err "监听端口不能为空."; return 1; }
     relay_cfg="relay-${local_port}.json"
     relay_file="$is_conf_dir/$relay_cfg"
-    [[ -f $relay_file ]] || err "未找到端口转发配置 ($relay_cfg)."
+    [[ -f $relay_file ]] || { err "未找到端口转发配置 ($relay_cfg)."; return 1; }
 
     note_apply_cli "$relay_cfg" "${@:2}"
 }
@@ -287,6 +302,7 @@ relay_main() {
         ;;
     *)
         err "无法识别端口转发命令 ($1), 正确用法: $is_core relay [add|list|info|note|delete]"
+        return 1
         ;;
     esac
 }

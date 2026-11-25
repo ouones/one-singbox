@@ -25,7 +25,6 @@ setup_entry_fixture() {
     mkdir -p "$sh_dir/src" "$root/etc/sing-box/bin" "$root/etc/sing-box/conf/.quan-meta" \
         "$root/usr/local/bin" "$root/var/log/sing-box" "$case_dir/bin"
     cp -R "$repo_root/src/." "$sh_dir/src/"
-    sed -i '/EUID != 0/d' "$sh_dir/src/core.sh"
     cp "$repo_root/sing-box.sh" "$entry"
     sed -i "s|^\. /etc/sing-box/sh/src/init.sh$|. $sh_dir/src/init.sh|" "$entry"
     sed -i \
@@ -253,7 +252,7 @@ done
 FAKE_WGET
 chmod +x "$case_dir/bin/wget"
 PATH="$case_dir/bin:$PATH"
-source <(sed '/EUID != 0/d' "$REPO_ROOT/src/core.sh")
+source "$REPO_ROOT/src/core.sh"
 is_dont_auto_exit=1
 err_out=$(err "non fatal err" 2>&1) || fail "err() exited or failed under is_dont_auto_exit=1"
 [[ $err_out == *'non fatal err'* ]] || fail "err() did not print message: $err_out"

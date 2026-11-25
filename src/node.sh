@@ -154,19 +154,20 @@ snell_config_port_used() {
 validate_snell() {
     local current_port
     require_snell_support
-    [[ $(is_test port "$port") ]] || err "($port) 不是一个有效的端口. $is_err_tips"
+    [[ $(is_test port "$port") ]] || { err "($port) 不是一个有效的端口. $is_err_tips"; return 1; }
     current_port=$(jq -r '.inbounds[0].listen_port // empty' "$is_conf_dir/${is_config_file:-missing}" 2>/dev/null)
     if [[ $port != "$current_port" ]] && [[ $(is_test port_used "$port") ]]; then
         err "无法使用 ($port) 端口. $is_err_tips"
+        return 1
     fi
-    config_port_used "$port" "${is_config_file:-}" && err "无法使用 ($port) 端口. $is_err_tips"
-    [[ $snell_psk ]] || err "Snell PSK 不能为空. $is_err_tips"
-    snell_version_valid "$snell_version" || err "Snell 版本只支持 5 或 6. $is_err_tips"
+    config_port_used "$port" "${is_config_file:-}" && { err "无法使用 ($port) 端口. $is_err_tips"; return 1; }
+    [[ $snell_psk ]] || { err "Snell PSK 不能为空. $is_err_tips"; return 1; }
+    snell_version_valid "$snell_version" || { err "Snell 版本只支持 5 或 6. $is_err_tips"; return 1; }
     if [[ $snell_version == 6 ]]; then
-        ((${#snell_psk} >= 12 && ${#snell_psk} <= 255)) || err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"
-        snell_mode_valid "$snell_mode" || err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"
+        ((${#snell_psk} >= 12 && ${#snell_psk} <= 255)) || { err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"; return 1; }
+        snell_mode_valid "$snell_mode" || { err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"; return 1; }
     else
-        snell_obfs_mode_valid "$snell_obfs_mode" || err "Snell 混淆模式只支持 none 或 http. $is_err_tips"
+        snell_obfs_mode_valid "$snell_obfs_mode" || { err "Snell 混淆模式只支持 none 或 http. $is_err_tips"; return 1; }
     fi
 }
 
@@ -274,10 +275,15 @@ node_protocol_transport() {
     esac
 }
 
-is_tcp_port_used() {
-    local wanted=$1 output line state recv send local_address peer process port
+_is_proto_port_used() {
+    local proto=$1 wanted=$2 ss_flag netstat_flag output line state recv send local_address peer process port
+    case $proto in
+    tcp) ss_flag=-Hlnpt; netstat_flag=-tnlp ;;
+    udp) ss_flag=-Hlnpu; netstat_flag=-unlp ;;
+    *) return 1 ;;
+    esac
     if [[ $(type -P ss) ]]; then
-        output=$(ss -Hlnpt 2>/dev/null) || {
+        output=$(ss "$ss_flag" 2>/dev/null) || {
             is_cant_test_port=1
             return 0
         }
@@ -288,12 +294,16 @@ is_tcp_port_used() {
         return 1
     fi
     if [[ $(type -P netstat) ]]; then
-        output=$(netstat -tnlp 2>/dev/null) || {
+        output=$(netstat "$netstat_flag" 2>/dev/null) || {
             is_cant_test_port=1
             return 0
         }
         while read -r line; do
-            [[ $line == tcp* && $line == *LISTEN* ]] || continue
+            if [[ $proto == tcp ]]; then
+                [[ $line == tcp* && $line == *LISTEN* ]] || continue
+            else
+                [[ $line == udp* ]] || continue
+            fi
             local_address=$(awk '{print $4}' <<<"$line")
             port=${local_address##*:}
             [[ $port == "$wanted" ]] && return 0
@@ -304,34 +314,12 @@ is_tcp_port_used() {
     return 0
 }
 
+is_tcp_port_used() {
+    _is_proto_port_used tcp "$1"
+}
+
 is_udp_port_used() {
-    local wanted=$1 output state recv send local_address peer process port line
-    if [[ $(type -P ss) ]]; then
-        output=$(ss -Hlnpu 2>/dev/null) || {
-            is_cant_test_port=1
-            return 0
-        }
-        while read -r state recv send local_address peer process; do
-            port=${local_address##*:}
-            [[ $port == "$wanted" ]] && return 0
-        done <<<"$output"
-        return 1
-    fi
-    if [[ $(type -P netstat) ]]; then
-        output=$(netstat -unlp 2>/dev/null) || {
-            is_cant_test_port=1
-            return 0
-        }
-        while read -r line; do
-            [[ $line == udp* ]] || continue
-            local_address=$(awk '{print $4}' <<<"$line")
-            port=${local_address##*:}
-            [[ $port == "$wanted" ]] && return 0
-        done <<<"$output"
-        return 1
-    fi
-    is_cant_test_port=1
-    return 0
+    _is_proto_port_used udp "$1"
 }
 
 node_port_used() {
