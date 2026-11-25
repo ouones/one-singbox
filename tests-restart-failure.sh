@@ -223,7 +223,7 @@ done
 # Same-process lock leak check under is_dont_auto_exit=1 when create caddy fails mid-add
 add_caddy_fail_case=$(setup_entry_fixture "add-caddy-fail" 1)
 rm -rf "$add_caddy_fail_case/root/etc/caddy/one-singbox"
-chmod 555 "$add_caddy_fail_case/root/etc/caddy"
+: >"$add_caddy_fail_case/root/etc/caddy/one-singbox"
 add_caddy_fail_out=$(
     WITH_CADDY=1 SERVICE_LOG="$add_caddy_fail_case/service.log" PATH="$add_caddy_fail_case/bin:$PATH" bash -c '
         source "$1"
@@ -241,7 +241,6 @@ add_caddy_fail_out=$(
     ' _ "$add_caddy_fail_case/root/etc/sing-box/sh/src/core.sh" 2>&1
 )
 add_caddy_fail_rc=$?
-chmod 755 "$add_caddy_fail_case/root/etc/caddy"
 [[ $add_caddy_fail_rc != 98 && $add_caddy_fail_out != *LOCK_LEAKED* ]] || fail "add() leaked shared_config_lock when create caddy failed: $add_caddy_fail_out"
 [[ $add_caddy_fail_rc != 0 ]] || fail "add wss should return non-zero when create caddy fails under is_dont_auto_exit=1: $add_caddy_fail_out"
 

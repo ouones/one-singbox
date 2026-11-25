@@ -47,9 +47,21 @@ warn() {
     echo -e "\n$is_warn $*\n"
 }
 
+if [[ -n ${BASH_SOURCE[0]:-} ]]; then
+    _init_src_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd) || _init_src_dir=
+else
+    _init_src_dir=
+fi
+
 # load bash script.
 load() {
-    . "$is_sh_dir/src/$1"
+    if [[ -f $is_sh_dir/src/$1 ]]; then
+        . "$is_sh_dir/src/$1"
+    elif [[ $_init_src_dir && -f $_init_src_dir/$1 ]]; then
+        . "$_init_src_dir/$1"
+    else
+        . "$is_sh_dir/src/$1"
+    fi
 }
 
 # wget add --no-check-certificate

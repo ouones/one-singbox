@@ -27,6 +27,7 @@ out=$(
 set -o pipefail
 source "$REPO_ROOT/src/core.sh" || exit 11
 declare -F main >/dev/null || { echo "missing main" >&2; exit 12; }
+is_sh_dir="$REPO_ROOT"
 is_core_dir="$WORKDIR/direct-core"
 is_conf_dir="$WORKDIR/direct-conf"
 is_core_ver=1.14.4

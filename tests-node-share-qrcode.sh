@@ -101,6 +101,7 @@ type() {
 
 export PATH="$QR_BIN:$PATH"
 export QR_PACKAGE_LOG="$CASE_DIR/packages.log"
+is_sh_dir=$(cd "$(dirname "$CORE_FILE")/.." && pwd)
 source "$CORE_FILE"
 is_core_dir="$CASE_DIR/core"
 full_qr_cell='█'
