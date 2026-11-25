@@ -199,10 +199,68 @@ download() {
     }
 }
 
+is_valid_ipv4_addr() {
+    local addr=$1 o1 o2 o3 o4 o
+    [[ $addr =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r o1 o2 o3 o4 <<<"$addr"
+    for o in "$o1" "$o2" "$o3" "$o4"; do
+        [[ $o =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((o <= 255)) || return 1
+    done
+    return 0
+}
+
+is_valid_ipv6_addr() {
+    local addr=$1 compressed=0 ipv4_groups=0 group_count=0 left right side part ipv4
+    local -a groups
+    [[ $addr == *:* ]] || return 1
+    if [[ $addr == *.* ]]; then
+        ipv4=${addr##*:}
+        [[ $ipv4 != "$addr" ]] && is_valid_ipv4_addr "$ipv4" || return 1
+        addr=${addr%:*}
+        ipv4_groups=2
+    fi
+    if [[ $addr == *::* ]]; then
+        compressed=1
+        left=${addr%%::*}
+        right=${addr#*::}
+        [[ $right != *::* && $left != *: && $right != :* ]] || return 1
+    else
+        left=$addr
+        right=
+    fi
+    for side in "$left" "$right"; do
+        [[ $side ]] || continue
+        [[ $side != :* && $side != *: ]] || return 1
+        IFS=: read -r -a groups <<<"$side"
+        for part in "${groups[@]}"; do
+            [[ $part =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
+            group_count=$((group_count + 1))
+        done
+    done
+    group_count=$((group_count + ipv4_groups))
+    if [[ $compressed == 1 ]]; then
+        ((group_count < 8)) || return 1
+    else
+        ((group_count == 8))
+    fi
+}
+
 # get server ip
 get_ip() {
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ -z $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
+    local flag trace line candidate=
+    for flag in -4 -6; do
+        trace=$(_wget "$flag" -qO- https://one.one.one.one/cdn-cgi/trace 2>/dev/null) || continue
+        while IFS= read -r line || [[ -n $line ]]; do
+            line=${line%$'\r'}
+            [[ $line == ip=* ]] || continue
+            candidate=${line#ip=}
+            if is_valid_ipv4_addr "$candidate" || is_valid_ipv6_addr "$candidate"; then
+                export ip="$candidate"
+                return 0
+            fi
+        done <<<"$trace"
+    done
+    return 1
 }
 
 # check background tasks status
