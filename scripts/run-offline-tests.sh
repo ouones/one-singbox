@@ -17,6 +17,7 @@ Options:
   --jobs <N>          Parallel test workers (default: 1)
   --static-only       Run static checks (CRLF, bash -n, blocking read, shellcheck) only
   --no-static         Skip static checks
+  --no-shellcheck     Skip shellcheck in static checks (keep LF, bash -n, blocking read)
   -h, --help          Show this help
 EOF
 }
@@ -27,6 +28,7 @@ clean_reuse=
 jobs=1
 static_only=0
 no_static=0
+no_shellcheck=0
 selected_tests=()
 
 while (($# > 0)); do
@@ -56,6 +58,10 @@ while (($# > 0)); do
             ;;
         --no-static)
             no_static=1
+            shift
+            ;;
+        --no-shellcheck)
+            no_shellcheck=1
             shift
             ;;
         -h|--help)
@@ -246,9 +252,17 @@ run_static_checks() {
     done
 
     local shellcheck_status="shellcheck skipped: not installed"
-    if command -v shellcheck >/dev/null 2>&1; then
+    if ((no_shellcheck == 1)); then
+        shellcheck_status="shellcheck skipped: --no-shellcheck"
+    elif command -v shellcheck >/dev/null 2>&1; then
         if ((${#sc_targets[@]} > 0)); then
-            if ! shellcheck -s bash --include=SC2086,SC2155,SC2164,SC2046,SC2145,SC2068 "${sc_targets[@]}"; then
+            local sc_fail=0 target
+            for target in "${sc_targets[@]}"; do
+                if ! shellcheck -s bash --include=SC2086,SC2155,SC2164,SC2046,SC2145,SC2068 "$target"; then
+                    sc_fail=1
+                fi
+            done
+            if ((sc_fail != 0)); then
                 echo "STATIC FAIL: shellcheck high-severity check failed" >&2
                 return 1
             fi
