@@ -1,7 +1,7 @@
 show_help() {
     case $1 in
     api | x25519 | tls | run | uuid | version)
-        $is_core_bin help $1 ${@:2}
+        "$is_core_bin" help "$1" "${@:2}"
         ;;
     *)
         [[ $1 ]] && warn "未知选项 '$1'"
@@ -94,7 +94,7 @@ show_help() {
             msg "$v"
         done
         msg "命令行 del 和 ddel 会立即删除节点，无需再次确认；从交互菜单删除时会先确认。"
-        msg "问题反馈: $(msg_ul https://github.com/${is_sh_repo}/issues)"
+        msg "问题反馈: $(msg_ul "https://github.com/${is_sh_repo}/issues")"
         ;;
 
     esac
@@ -107,10 +107,10 @@ about() {
     msg "one-singbox 脚本版本: $is_sh_ver"
     msg "sing-box 内核版本: $is_core_ver"
     [[ $is_caddy ]] && msg "Caddy 版本: $is_caddy_ver"
-    msg "项目源码: $(msg_ul https://github.com/${is_sh_repo})"
-    msg "问题反馈: $(msg_ul https://github.com/${is_sh_repo}/issues)"
+    msg "项目源码: $(msg_ul "https://github.com/${is_sh_repo}")"
+    msg "问题反馈: $(msg_ul "https://github.com/${is_sh_repo}/issues")"
     msg "sing-box 文档: $(msg_ul https://sing-box.sagernet.org/)"
-    msg "sing-box 内核源码: $(msg_ul https://github.com/${is_core_repo})"
+    msg "sing-box 内核源码: $(msg_ul "https://github.com/${is_core_repo}")"
     msg
     ####### 要点13脸吗只会改我链接的小人 #######
 }
