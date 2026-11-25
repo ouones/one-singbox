@@ -496,11 +496,21 @@ validate_snell() {
 
 get_ip() {
     [[ $ip || $is_no_auto_tls || $is_gen || $is_dont_get_ip ]] && return
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ ! $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ ! $ip ]] && {
-        err "无法获取服务器公网 IP。请检查网络连接后重试。"
-    }
+    local flag trace line candidate=
+    for flag in -4 -6; do
+        trace=$(_wget "$flag" -qO- https://one.one.one.one/cdn-cgi/trace 2>/dev/null) || continue
+        while IFS= read -r line || [[ -n $line ]]; do
+            line=${line%$'\r'}
+            [[ $line == ip=* ]] || continue
+            candidate=${line#ip=}
+            if is_valid_ipv4_addr "$candidate" || is_valid_ipv6_addr "$candidate"; then
+                export ip="$candidate"
+                return 0
+            fi
+        done <<<"$trace"
+    done
+    err "无法获取服务器公网 IP。请检查网络连接后重试。"
+    return 1
 }
 
 get_port() {
@@ -2215,11 +2225,11 @@ edit_node_outbound_mode() {
 }
 
 is_valid_ipv4_addr() {
-    local addr=$1
+    local addr=$1 o1 o2 o3 o4 o
     [[ $addr =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
     IFS='.' read -r o1 o2 o3 o4 <<<"$addr"
     for o in "$o1" "$o2" "$o3" "$o4"; do
-        [[ $o -le 255 ]] || return 1
+        [[ $o =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((o <= 255)) || return 1
     done
     return 0
 }
@@ -6138,7 +6148,7 @@ main() {
         ;;
     dns)
         load dns.sh
-        dns_set ${@:2}
+        dns_set "${@:2}"
         ;;
     debug)
         is_debug=1
@@ -6174,7 +6184,7 @@ main() {
         ;;
     log)
         load log.sh
-        log_set $2
+        log_set "${@:2}"
         ;;
     url | qr)
         url_qr $@
