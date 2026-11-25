@@ -253,26 +253,36 @@ init_entry() {
 
     local subcmd=${1:-main}
     case $subcmd in
-    h | help | --help | ip | get-port | ssss | ss2022 | \
+    h | help | --help | \
     bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools | \
-    relay | start | stop | r | restart | block-cn | __post-update)
+    start | stop | r | restart)
+        is_core_defer_modules=1
+        ;;
+    ip | get-port | ssss | ss2022 | relay | block-cn | __post-update)
         ;;
     v | ver | version)
         init_core_ver
         init_caddy_probe version
+        is_core_defer_modules=1
         ;;
     s | status)
         init_core_ver
         init_caddy_probe status
+        is_core_defer_modules=1
         ;;
     i | info | url | qr | debug)
         init_core_ver
         core_status_read
         init_caddy_probe status
         ;;
-    d | del | rm | dd | ddel | un | uninstall | dns | log | bbr | fix-caddyfile)
+    d | del | rm | dd | ddel | un | uninstall | dns | fix-caddyfile)
         init_core_ver
         init_caddy_probe status
+        ;;
+    log | bbr)
+        init_core_ver
+        init_caddy_probe status
+        is_core_defer_modules=1
         ;;
     u | up | update | U | update.sh | reinstall)
         init_arch_detect
