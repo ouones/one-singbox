@@ -11,6 +11,10 @@ cleanup() {
       printf '%s\n' "--- $output_file ---"
       cat "$output_file"
     done
+    if [[ -f $workdir/fail.msg ]]; then
+      printf '%s\n' "--- failure ---"
+      cat "$workdir/fail.msg"
+    fi
   fi
   rm -rf "$workdir"
 }
@@ -46,17 +50,17 @@ printf '%s\n' "$*" >>"$QR_PACKAGE_LOG"
 FAKE_PACKAGE_MANAGER
 chmod +x "$workdir/bin/apt-get"
 fail() {
-  echo "FAIL: $1"
+  echo "FAIL: $1" | tee -a "$workdir/fail.msg"
   exit 1
 }
 
 run_core_case() {
   local core_file=$1 case_name=$2
-  CORE_FILE="$core_file" CASE_NAME="$case_name" CASE_DIR="$workdir/$case_name" QR_BIN="$workdir/bin" bash <<'CASE' || exit 1
+  FAIL_LOG="$workdir/fail.msg" CORE_FILE="$core_file" CASE_NAME="$case_name" CASE_DIR="$workdir/$case_name" QR_BIN="$workdir/bin" bash <<'CASE' || exit 1
 set -o pipefail
 
 fail() {
-  echo "FAIL(${CORE_FILE}): $1"
+  echo "FAIL(${CORE_FILE}): $1" | tee -a "$FAIL_LOG"
   exit 1
 }
 
