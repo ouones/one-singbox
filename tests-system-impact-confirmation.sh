@@ -142,9 +142,17 @@ run_dns_confirmation_case() {
             printf '%s\n' '{"dns":{"servers":[{"tag":"old"}]},"route":{"default_domain_resolver":"old"},"outbounds":[{"tag":"direct","type":"direct"}]}' >"$config_json"
             : >"$SERVICE_LOG"
             if [[ $branch == custom ]]; then
-                input=$(printf '5\n2\n%s\n%s\n%s\n\n0\nq\n' "$choice" "$address" "$answer")
+                if [[ $answer == y ]]; then
+                    input=$(printf '5\n2\n%s\n%s\n%s\n\n0\nq\n' "$choice" "$address" "$answer")
+                else
+                    input=$(printf '5\n2\n%s\n%s\n%s\n0\n0\nq\n' "$choice" "$address" "$answer")
+                fi
             else
-                input=$(printf '5\n2\n%s\n%s\n\n0\nq\n' "$choice" "$answer")
+                if [[ $answer == y ]]; then
+                    input=$(printf '5\n2\n%s\n%s\n\n0\nq\n' "$choice" "$answer")
+                else
+                    input=$(printf '5\n2\n%s\n%s\n0\n0\nq\n' "$choice" "$answer")
+                fi
             fi
             output=$(printf '%s' "$input" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
             [[ $output == *"操作对象：$target"* ]] || fail "DNS $branch/$answer did not identify target: $output"
@@ -159,7 +167,9 @@ run_dns_confirmation_case() {
             else
                 jq -e '.dns.servers[0].tag == "old" and .route.default_domain_resolver == "old"' "$config_json" >/dev/null || fail "DNS $branch/$answer changed config"
                 ! grep -Fq 'restart' "$SERVICE_LOG" || fail "DNS $branch/$answer restarted core"
-                [[ $output == *'已取消'* && $output == *'按回车返回菜单。'* ]] || fail "DNS $branch/$answer did not pause after cancellation: $output"
+                [[ $output == *'已取消'* ]] || fail "DNS $branch/$answer did not report the cancellation: $output"
+                [[ $(grep -Fc '请选择 DNS' <<<"$output") == 2 ]] || fail "DNS $branch/$answer did not return to the DNS selection list: $output"
+                [[ $output != *'按回车返回菜单。'* ]] || fail "DNS $branch/$answer must not leave the DNS selection after cancellation: $output"
             fi
         done
     done

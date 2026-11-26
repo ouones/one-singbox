@@ -781,7 +781,8 @@ create() {
 
 # change config file
 change() {
-    local change_choice_status change_info_status ss_method_status snell_status
+    local change_choice_status change_info_status change_sub_status ss_method_status snell_status
+    local change_choice_from_menu= change_node_picked=
     is_change=1
     is_dont_show_info=1
     is_auto=
@@ -862,386 +863,437 @@ change() {
         esac
     fi
     [[ $is_try_change ]] && return
-    [[ $is_dont_auto_exit ]] && {
-        get info "$1"
-        change_info_status=$?
-    } || {
-        [[ $is_change_id ]] && {
-            if [[ $is_change_id == 'full' ]]; then
-                [[ $3 ]] && is_change_msg="更改多个参数" || is_change_msg=
-            else
-                is_change_msg=${change_labels[$is_change_id]#*|}
-            fi
-            if [[ $is_change_msg ]]; then
-                _green "\n快速执行: $is_change_msg"
-            fi
-        }
-        info "$1"
-        change_info_status=$?
-        if [[ $is_auto_get_config ]]; then
-            msg "\n自动选择: $is_config_file"
-        fi
-    }
-    [[ $change_info_status == 2 ]] && return 2
-    [[ $change_info_status == 0 ]] || return "$change_info_status"
-    is_old_net=$net
-    [[ $is_tcp_http ]] && net=http
-    [[ $host ]] && net=$is_protocol-$net-tls
-    [[ $is_reality && $net_type =~ 'http' ]] && net=rh2
-
-    [[ $3 == 'auto' ]] && is_auto=1 || is_auto=
-    # if is_dont_show_info exist, cant show info.
-    is_dont_show_info=
-    # if not prefer args, show change list and then get change id.
-    [[ ! $is_change_id ]] && {
-        is_tmp_list=()
-        for v in "${is_can_change[@]}"; do
-            is_tmp_list+=("${change_labels[$v]%%|*}")
-        done
-        menu_select parent is_change_str "\n请选择更改:\n" "${is_tmp_list[@]}"
-        change_choice_status=$?
-        [[ $change_choice_status == 2 ]] && return 2
-        [[ $change_choice_status == 0 ]] || return 1
-        is_change_id=${is_can_change[$REPLY - 1]}
-    }
-    case $is_change_id in
-    full)
-        add "$net" "${@:3}"
-        ;;
-    0)
-        # new protocol
-        is_set_new_protocol=1
-        add "${@:3}"
-        ;;
-    1)
-        # new port
-        is_new_port=$3
-        if [[ $4 ]]; then
-            is_new_servername=$4
-            is_servername=$4
-        fi
-        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && { err "($is_config_file) 不支持更改端口, 因为没啥意义."; return 1; }
-        if [[ $is_new_port && ! $is_auto ]]; then
-            [[ ! $(is_test port "$is_new_port") ]] && { err "请输入正确的端口, 可选(1-65535)"; return 1; }
-            [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && { err "无法使用 ($is_new_port) 端口"; return 1; }
-        fi
-        [[ $is_auto ]] && get_port && is_new_port=$tmp_port
-    [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
-        if [[ $is_caddy && $host ]]; then
-            net=$is_old_net
-            is_https_port=$is_new_port
-            load caddy.sh
-            caddy_config "$net"
-            manage_restart_checked caddy "Caddy 端口配置已更新" || return 1
-            info
-        else
-            add "$net" "$is_new_port"
-        fi
-        ;;
-    2)
-        # new host
-        is_new_host=$3
-        [[ ! $host ]] && { err "($is_config_file) 不支持更改域名."; return 1; }
-    [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
-        old_host=$host # del old host
-        add "$net" "$is_new_host"
-        ;;
-    3)
-        # new path
-        is_new_path=$3
-        [[ ! $path ]] && { err "($is_config_file) 不支持更改路径."; return 1; }
-        [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
-    [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
-        add "$net" auto auto "$is_new_path"
-        ;;
-    4)
-        # new password
-        is_new_pass=$3
-        if [[ $ss_password || $password ]]; then
-            [[ $is_auto ]] && {
-                get_uuid && is_new_pass=$tmp_uuid
-                if [[ $ss_password ]]; then
-                    is_new_pass=$(get ss2022)
+    # 从哪里来就回哪里去：选择修改项按 0 退回选择节点，子选择页按 0 退回选择修改项。
+    [[ $is_change_id ]] || change_choice_from_menu=1
+    while :; do
+        is_node_picked_by_menu=
+        [[ $is_dont_auto_exit ]] && {
+            get info "$1"
+            change_info_status=$?
+        } || {
+            [[ $is_change_id ]] && {
+                if [[ $is_change_id == 'full' ]]; then
+                    [[ $3 ]] && is_change_msg="更改多个参数" || is_change_msg=
+                else
+                    is_change_msg=${change_labels[$is_change_id]#*|}
+                fi
+                if [[ $is_change_msg ]]; then
+                    _green "\n快速执行: $is_change_msg"
                 fi
             }
-        else
-            err "($is_config_file) 不支持更改密码."
-            return 1
-        fi
-    [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
-        password=$is_new_pass
-        ss_password=$is_new_pass
-        is_socks_pass=$is_new_pass
-        add "$net"
-        ;;
-    5)
-        # new uuid
-        is_new_uuid=$3
-        [[ ! $uuid ]] && { err "($is_config_file) 不支持更改 UUID."; return 1; }
-        [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
-    [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
-        add "$net" auto "$is_new_uuid"
-        ;;
-    6)
-        # new method
-        is_new_method=$3
-        is_new_ss_password=$ss_password
-        [[ $net != 'ss' ]] && { err "($is_config_file) 不支持更改加密方式."; return 1; }
-        [[ $is_auto ]] && is_new_method=$is_random_ss_method
-        if [[ ! $is_new_method ]]; then
-            select_ss_method
-            ss_method_status=$?
-            [[ $ss_method_status == 2 ]] && return 2
-            [[ $ss_method_status == 0 ]] || return 1
-            is_new_method=$ss_method
-        fi
-        if [[ $(grep 2022 <<<"$is_new_method") ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
-            is_new_ss_password=$(ss_password_for_method "$is_new_method")
-            msg "\n已根据新的加密方式自动更新密码: $(_green "$is_new_ss_password")\n"
-        fi
-        if [[ $is_new_ss_password ]]; then
-            add "$net" auto "$is_new_ss_password" "$is_new_method"
-        else
-            add "$net" auto auto "$is_new_method"
-        fi
-        ;;
-    7)
-        # new remote addr
-        is_new_door_addr=$3
-        [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标地址."; return 1; }
-    [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
-        door_addr=$is_new_door_addr
-        add "$net"
-        ;;
-    8)
-        # new remote port
-        is_new_door_port=$3
-        [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标端口."; return 1; }
-        [[ ! $is_new_door_port ]] && {
-        ask string door_port "请输入新的目标端口 (1-65535):"
-            is_new_door_port=$door_port
+            info "$1"
+            change_info_status=$?
+            if [[ $is_auto_get_config ]]; then
+                msg "\n自动选择: $is_config_file"
+            fi
         }
-        add "$net" auto auto "$is_new_door_port"
-        ;;
-    9)
-        # new is_private_key is_public_key
-        is_new_private_key=$3
-        is_new_public_key=$4
-        [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改密钥."; return 1; }
-        if [[ $is_auto ]]; then
-            get_pbk
-            add "$net"
-        else
-            [[ $is_new_private_key && ! $is_new_public_key ]] && {
-                err "无法找到 Public key."
-                return 1
-            }
-            [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新的私钥 (输入不显示):"
-            [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新的公钥:"
-            if [[ $is_new_private_key == "$is_new_public_key" ]]; then
-                err "Private key 和 Public key 不能一样."
-                return 1
+        change_node_picked=$is_node_picked_by_menu
+        [[ $change_info_status == 2 ]] && return 2
+        [[ $change_info_status == 0 ]] || return "$change_info_status"
+        is_old_net=$net
+        [[ $is_tcp_http ]] && net=http
+        [[ $host ]] && net=$is_protocol-$net-tls
+        [[ $is_reality && $net_type =~ 'http' ]] && net=rh2
+
+        [[ $3 == 'auto' ]] && is_auto=1 || is_auto=
+        # if is_dont_show_info exist, cant show info.
+        is_dont_show_info=
+        while :; do
+            # if not prefer args, show change list and then get change id.
+            if [[ ! $is_change_id ]]; then
+                is_tmp_list=()
+                for v in "${is_can_change[@]}"; do
+                    is_tmp_list+=("${change_labels[$v]%%|*}")
+                done
+                menu_select parent is_change_str "\n请选择更改:\n" "${is_tmp_list[@]}"
+                change_choice_status=$?
+                if [[ $change_choice_status == 2 ]]; then
+                    [[ $change_node_picked ]] || return 2
+                    # 退回选择节点：清空上一个节点的状态后重新选择。
+                    is_config_file=
+                    is_config_name=
+                    is_protocol=
+                    is_auto_get_config=
+                    is_reality=
+                    is_anytls_domain=
+                    continue 2
+                fi
+                [[ $change_choice_status == 0 ]] || return 1
+                is_change_id=${is_can_change[$REPLY - 1]}
             fi
-            is_tmp_json=$is_conf_dir/$is_config_file-$uuid
-            cp -f "$is_conf_dir/$is_config_file" "$is_tmp_json"
-            sed -i "s#$is_private_key" "#$is_new_private_key#" "$is_tmp_json"
-            "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
-            if [[ $? != 0 ]]; then
-                is_key_err=1
-                is_key_err_msg="Private key 无法通过测试."
-            fi
-            sed -i "s#$is_new_private_key" "#$is_new_public_key#" "$is_tmp_json"
-            "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
-            if [[ $? != 0 ]]; then
-                is_key_err=1
-                is_key_err_msg+="Public key 无法通过测试."
-            fi
-            rm "$is_tmp_json"
-            [[ $is_key_err ]] && { err "$is_key_err_msg"; return 1; }
-            is_private_key=$is_new_private_key
-            is_public_key=$is_new_public_key
-            is_test_json=
-            add "$net"
-        fi
-        ;;
-    10)
-        # new serverName
-        is_new_servername=$3
-        [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改 serverName."; return 1; }
-        [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
-        [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
-        is_servername=$is_new_servername
-        add "$net"
-        ;;
-    11)
-        # new proxy site
-        is_new_proxy_site=$3
-        [[ ! $is_caddy && ! $host ]] && {
-            err "($is_config_file) 不支持更改伪装网站."
-            return 1
-        }
-        [[ ! -f $is_caddy_conf/${host}.conf.add ]] && { err "无法配置伪装网站."; return 1; }
-        [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的反向代理目标域名 (例如 example.com):"
-        proxy_site=$(sed 's#^.*//##;s#/$##' <<<"$is_new_proxy_site")
-        load caddy.sh
-        caddy_config proxy
-        manage_restart_checked caddy "伪装网站配置已更新" || return 1
-        msg "\n已更新伪装网站为: $(_green "$proxy_site") \n"
-        ;;
-    12)
-        # new socks user
-        [[ ! $is_socks_user ]] && { err "($is_config_file) 不支持更改用户名 (Username)."; return 1; }
-    ask string is_socks_user "请输入新用户名:"
-        add "$net"
-        ;;
-    13)
-        # update share link node name (does not rename json file)
-        is_new_name=$3
-    [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
-        is_new_name=${is_new_name%.json}
-        [[ ! $is_new_name ]] && { err "节点名称不能为空."; return 1; }
-        is_old_name=$(node_name_for_link "$is_config_file")
-        [[ "$is_old_name" == "$is_new_name" ]] && { err "新节点名称与当前名称一致."; return 1; }
-        meta_set "$is_config_file" node_name "$is_new_name"
-        msg "\n已更新节点名称为: $(_green "$is_new_name")\n"
-        info
-        ;;
-    14)
-        edit_node_outbound_mode
-        ;;
-    15)
-        is_new_entry_addr=$3
-        if [[ -z $is_new_entry_addr ]]; then
-            echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
-            form_read -r is_new_entry_addr || return 1
-        fi
-        is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || { err "入口地址更新失败: $is_new_entry_addr"; return 1; }
-        msg "\n已更新入口地址为: $(_green "$is_new_entry_addr")\n"
-        info
-        ;;
-    17)
-        # psk
-        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell PSK."; return 1; }
-        is_new_snell_psk=$3
-        [[ $is_auto ]] && is_new_snell_psk=$(get_snell_psk)
-    [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
-        if [[ $snell_version == 6 ]]; then
-            ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || { err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"; return 1; }
-        fi
-        snell_psk=$is_new_snell_psk
-        add snell
-        ;;
-    18)
-        # snell-version
-        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 版本."; return 1; }
-        is_new_snell_version=$3
-        [[ $is_auto ]] && is_new_snell_version=6
-        [[ ! $is_new_snell_version ]] && {
-    ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
-        }
-        snell_version_valid "$is_new_snell_version" || { err "Snell 版本只支持 5 或 6. $is_err_tips"; return 1; }
-        if [[ $is_new_snell_version == 6 && $snell_version != 6 ]]; then
-            # migrating v5 -> v6
-            unset snell_obfs_mode
-            snell_mode=default
-            if ((${#snell_psk} < 12)); then
-                warn "原 PSK 长度不足 12 位，已自动生成符合 v6 规范的新 PSK."
-                snell_psk=$(get_snell_psk)
-            fi
-        elif [[ $is_new_snell_version == 5 && $snell_version != 5 ]]; then
-            # migrating v6 -> v5
-            unset snell_mode
-            snell_obfs_mode=none
-        fi
-        snell_version=$is_new_snell_version
-        add snell
-        ;;
-    19)
-        # obfs-mode
-        [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 混淆模式."; return 1; }
-        if [[ $snell_version == 6 ]]; then
-            # smart routing for v6 node
-            if [[ $3 =~ ^(default|unshaped|unsafe-raw)$ ]]; then
-                snell_mode=$3
+            case $is_change_id in
+            full)
+                add "$net" "${@:3}"
+                ;;
+            0)
+                # new protocol
+                is_set_new_protocol=1
+                add "${@:3}"
+                change_sub_status=$?
+                if [[ $change_sub_status == 2 ]]; then
+                    [[ $change_choice_from_menu ]] || return 2
+                    is_change_id=
+                    continue
+                fi
+                ;;
+            1)
+                # new port
+                is_new_port=$3
+                if [[ $4 ]]; then
+                    is_new_servername=$4
+                    is_servername=$4
+                fi
+                [[ $host && ! $is_caddy || $is_no_auto_tls ]] && { err "($is_config_file) 不支持更改端口, 因为没啥意义."; return 1; }
+                if [[ $is_new_port && ! $is_auto ]]; then
+                    [[ ! $(is_test port "$is_new_port") ]] && { err "请输入正确的端口, 可选(1-65535)"; return 1; }
+                    [[ $is_new_port != 443 && $(node_port_used "$is_new_port" "$is_protocol") && ${is_protocol,,} != snell ]] && { err "无法使用 ($is_new_port) 端口"; return 1; }
+                fi
+                [[ $is_auto ]] && get_port && is_new_port=$tmp_port
+            [[ ! $is_new_port ]] && ask string is_new_port "请输入新监听端口 (1-65535):"
+                if [[ $is_caddy && $host ]]; then
+                    net=$is_old_net
+                    is_https_port=$is_new_port
+                    load caddy.sh
+                    caddy_config "$net"
+                    manage_restart_checked caddy "Caddy 端口配置已更新" || return 1
+                    info
+                else
+                    add "$net" "$is_new_port"
+                fi
+                ;;
+            2)
+                # new host
+                is_new_host=$3
+                [[ ! $host ]] && { err "($is_config_file) 不支持更改域名."; return 1; }
+            [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名 (需解析到本机公网 IP):"
+                old_host=$host # del old host
+                add "$net" "$is_new_host"
+                ;;
+            3)
+                # new path
+                is_new_path=$3
+                [[ ! $path ]] && { err "($is_config_file) 不支持更改路径."; return 1; }
+                [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
+            [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径 (以 / 开头):"
+                add "$net" auto auto "$is_new_path"
+                ;;
+            4)
+                # new password
+                is_new_pass=$3
+                if [[ $ss_password || $password ]]; then
+                    [[ $is_auto ]] && {
+                        get_uuid && is_new_pass=$tmp_uuid
+                        if [[ $ss_password ]]; then
+                            is_new_pass=$(get ss2022)
+                        fi
+                    }
+                else
+                    err "($is_config_file) 不支持更改密码."
+                    return 1
+                fi
+            [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码 (输入不显示):"
+                password=$is_new_pass
+                ss_password=$is_new_pass
+                is_socks_pass=$is_new_pass
+                add "$net"
+                ;;
+            5)
+                # new uuid
+                is_new_uuid=$3
+                [[ ! $uuid ]] && { err "($is_config_file) 不支持更改 UUID."; return 1; }
+                [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
+            [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID (输入不显示):"
+                add "$net" auto "$is_new_uuid"
+                ;;
+            6)
+                # new method
+                is_new_method=$3
+                is_new_ss_password=$ss_password
+                [[ $net != 'ss' ]] && { err "($is_config_file) 不支持更改加密方式."; return 1; }
+                [[ $is_auto ]] && is_new_method=$is_random_ss_method
+                if [[ ! $is_new_method ]]; then
+                    select_ss_method
+                    ss_method_status=$?
+                    if [[ $ss_method_status == 2 ]]; then
+                        [[ $change_choice_from_menu ]] || return 2
+                        is_change_id=
+                        continue
+                    fi
+                    [[ $ss_method_status == 0 ]] || return 1
+                    is_new_method=$ss_method
+                fi
+                if [[ $(grep 2022 <<<"$is_new_method") ]] && ! ss_password_valid_for_method "$is_new_method" "$is_new_ss_password"; then
+                    is_new_ss_password=$(ss_password_for_method "$is_new_method")
+                    msg "\n已根据新的加密方式自动更新密码: $(_green "$is_new_ss_password")\n"
+                fi
+                if [[ $is_new_ss_password ]]; then
+                    add "$net" auto "$is_new_ss_password" "$is_new_method"
+                else
+                    add "$net" auto auto "$is_new_method"
+                fi
+                ;;
+            7)
+                # new remote addr
+                is_new_door_addr=$3
+                [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标地址."; return 1; }
+            [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址 (IPv4、IPv6 或域名):"
+                door_addr=$is_new_door_addr
+                add "$net"
+                ;;
+            8)
+                # new remote port
+                is_new_door_port=$3
+                [[ $net != 'direct' ]] && { err "($is_config_file) 不支持更改目标端口."; return 1; }
+                [[ ! $is_new_door_port ]] && {
+                ask string door_port "请输入新的目标端口 (1-65535):"
+                    is_new_door_port=$door_port
+                }
+                add "$net" auto auto "$is_new_door_port"
+                ;;
+            9)
+                # new is_private_key is_public_key
+                is_new_private_key=$3
+                is_new_public_key=$4
+                [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改密钥."; return 1; }
+                if [[ $is_auto ]]; then
+                    get_pbk
+                    add "$net"
+                else
+                    [[ $is_new_private_key && ! $is_new_public_key ]] && {
+                        err "无法找到 Public key."
+                        return 1
+                    }
+                    [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新的私钥 (输入不显示):"
+                    [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新的公钥:"
+                    if [[ $is_new_private_key == "$is_new_public_key" ]]; then
+                        err "Private key 和 Public key 不能一样."
+                        return 1
+                    fi
+                    is_tmp_json=$is_conf_dir/$is_config_file-$uuid
+                    cp -f "$is_conf_dir/$is_config_file" "$is_tmp_json"
+                    sed -i "s#$is_private_key" "#$is_new_private_key#" "$is_tmp_json"
+                    "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
+                    if [[ $? != 0 ]]; then
+                        is_key_err=1
+                        is_key_err_msg="Private key 无法通过测试."
+                    fi
+                    sed -i "s#$is_new_private_key" "#$is_new_public_key#" "$is_tmp_json"
+                    "$is_core_bin" check -c "$is_tmp_json" &>/dev/null
+                    if [[ $? != 0 ]]; then
+                        is_key_err=1
+                        is_key_err_msg+="Public key 无法通过测试."
+                    fi
+                    rm "$is_tmp_json"
+                    [[ $is_key_err ]] && { err "$is_key_err_msg"; return 1; }
+                    is_private_key=$is_new_private_key
+                    is_public_key=$is_new_public_key
+                    is_test_json=
+                    add "$net"
+                fi
+                ;;
+            10)
+                # new serverName
+                is_new_servername=$3
+                [[ ! $is_reality ]] && { err "($is_config_file) 不支持更改 serverName."; return 1; }
+                [[ $is_auto ]] && is_new_servername=$(reality_sni_select)
+                [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 SNI 域名 (TLS 握手域名):"
+                is_servername=$is_new_servername
+                add "$net"
+                ;;
+            11)
+                # new proxy site
+                is_new_proxy_site=$3
+                [[ ! $is_caddy && ! $host ]] && {
+                    err "($is_config_file) 不支持更改伪装网站."
+                    return 1
+                }
+                [[ ! -f $is_caddy_conf/${host}.conf.add ]] && { err "无法配置伪装网站."; return 1; }
+                [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的反向代理目标域名 (例如 example.com):"
+                proxy_site=$(sed 's#^.*//##;s#/$##' <<<"$is_new_proxy_site")
+                load caddy.sh
+                caddy_config proxy
+                manage_restart_checked caddy "伪装网站配置已更新" || return 1
+                msg "\n已更新伪装网站为: $(_green "$proxy_site") \n"
+                ;;
+            12)
+                # new socks user
+                [[ ! $is_socks_user ]] && { err "($is_config_file) 不支持更改用户名 (Username)."; return 1; }
+            ask string is_socks_user "请输入新用户名:"
+                add "$net"
+                ;;
+            13)
+                # update share link node name (does not rename json file)
+                is_new_name=$3
+            [[ ! $is_new_name ]] && ask string is_new_name "请输入新的节点名称 (不能为空):"
+                is_new_name=${is_new_name%.json}
+                [[ ! $is_new_name ]] && { err "节点名称不能为空."; return 1; }
+                is_old_name=$(node_name_for_link "$is_config_file")
+                [[ "$is_old_name" == "$is_new_name" ]] && { err "新节点名称与当前名称一致."; return 1; }
+                meta_set "$is_config_file" node_name "$is_new_name"
+                msg "\n已更新节点名称为: $(_green "$is_new_name")\n"
+                info
+                ;;
+            14)
+                edit_node_outbound_mode
+                change_sub_status=$?
+                if [[ $change_sub_status == 2 ]]; then
+                    [[ $change_choice_from_menu ]] || return 2
+                    is_change_id=
+                    continue
+                fi
+                ;;
+            15)
+                is_new_entry_addr=$3
+                if [[ -z $is_new_entry_addr ]]; then
+                    echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
+                    form_read -r is_new_entry_addr || return 1
+                fi
+                is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || { err "入口地址更新失败: $is_new_entry_addr"; return 1; }
+                msg "\n已更新入口地址为: $(_green "$is_new_entry_addr")\n"
+                info
+                ;;
+            17)
+                # psk
+                [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell PSK."; return 1; }
+                is_new_snell_psk=$3
+                [[ $is_auto ]] && is_new_snell_psk=$(get_snell_psk)
+            [[ ! $is_new_snell_psk ]] && ask string is_new_snell_psk "请输入新的 Snell PSK (输入不显示):"
+                if [[ $snell_version == 6 ]]; then
+                    ((${#is_new_snell_psk} >= 12 && ${#is_new_snell_psk} <= 255)) || { err "Snell v6 PSK 长度必须在 12 到 255 字符之间. $is_err_tips"; return 1; }
+                fi
+                snell_psk=$is_new_snell_psk
                 add snell
-                return
-            fi
-            if [[ $3 == 'auto' || $3 == 'none' || $3 == 'http' ]]; then
-                warn "当前为 Snell v6 节点，不支持混淆模式 (obfs_mode)，已自动转换为默认运行模式 (mode: default)."
-                snell_mode=default
+                ;;
+            18)
+                # snell-version
+                [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 版本."; return 1; }
+                is_new_snell_version=$3
+                [[ $is_auto ]] && is_new_snell_version=6
+                [[ ! $is_new_snell_version ]] && {
+            ask string is_new_snell_version "请输入 Snell 版本 (5 或 6):"
+                }
+                snell_version_valid "$is_new_snell_version" || { err "Snell 版本只支持 5 或 6. $is_err_tips"; return 1; }
+                if [[ $is_new_snell_version == 6 && $snell_version != 6 ]]; then
+                    # migrating v5 -> v6
+                    unset snell_obfs_mode
+                    snell_mode=default
+                    if ((${#snell_psk} < 12)); then
+                        warn "原 PSK 长度不足 12 位，已自动生成符合 v6 规范的新 PSK."
+                        snell_psk=$(get_snell_psk)
+                    fi
+                elif [[ $is_new_snell_version == 5 && $snell_version != 5 ]]; then
+                    # migrating v6 -> v5
+                    unset snell_mode
+                    snell_obfs_mode=none
+                fi
+                snell_version=$is_new_snell_version
                 add snell
-                return
-            fi
-            # interactive prompt for mode
-            select_snell_mode "\n当前为 Snell v6 节点，请选择运行模式:\n$(snell_mode_desc)\n"
-            snell_status=$?
-            [[ $snell_status == 2 ]] && return 2
-            [[ $snell_status == 0 ]] || return 1
-            snell_mode=$is_new_snell_mode
-            add snell
-            return
-        fi
-        is_new_snell_obfs_mode=$3
-        [[ $is_new_snell_obfs_mode == auto ]] && is_new_snell_obfs_mode=none
-        if [[ ! $is_new_snell_obfs_mode ]]; then
-            select_snell_obfs_mode "\n选择 Snell 混淆模式:\n"
-            snell_status=$?
-            [[ $snell_status == 2 ]] && return 2
-            [[ $snell_status == 0 ]] || return 1
-        fi
-        snell_obfs_mode=$is_new_snell_obfs_mode
-        add snell
-        ;;
-    20)
-        # mode
-        if [[ $is_protocol != snell ]]; then
-            # backward compatibility for non-snell outbound mode
-            edit_node_outbound_mode
-            return
-        fi
-        if [[ $snell_version == 5 ]]; then
-            # smart routing for v5 node
-            if [[ $3 =~ ^(none|http)$ ]]; then
-                snell_obfs_mode=$3
+                ;;
+            19)
+                # obfs-mode
+                [[ $is_protocol == snell ]] || { err "($is_config_file) 不支持更改 Snell 混淆模式."; return 1; }
+                if [[ $snell_version == 6 ]]; then
+                    # smart routing for v6 node
+                    if [[ $3 =~ ^(default|unshaped|unsafe-raw)$ ]]; then
+                        snell_mode=$3
+                        add snell
+                        return
+                    fi
+                    if [[ $3 == 'auto' || $3 == 'none' || $3 == 'http' ]]; then
+                        warn "当前为 Snell v6 节点，不支持混淆模式 (obfs_mode)，已自动转换为默认运行模式 (mode: default)."
+                        snell_mode=default
+                        add snell
+                        return
+                    fi
+                    # interactive prompt for mode
+                    select_snell_mode "\n当前为 Snell v6 节点，请选择运行模式:\n$(snell_mode_desc)\n"
+                    snell_status=$?
+                    if [[ $snell_status == 2 ]]; then
+                        [[ $change_choice_from_menu ]] || return 2
+                        is_change_id=
+                        continue
+                    fi
+                    [[ $snell_status == 0 ]] || return 1
+                    snell_mode=$is_new_snell_mode
+                    add snell
+                    return
+                fi
+                is_new_snell_obfs_mode=$3
+                [[ $is_new_snell_obfs_mode == auto ]] && is_new_snell_obfs_mode=none
+                if [[ ! $is_new_snell_obfs_mode ]]; then
+                    select_snell_obfs_mode "\n选择 Snell 混淆模式:\n"
+                    snell_status=$?
+                    if [[ $snell_status == 2 ]]; then
+                        [[ $change_choice_from_menu ]] || return 2
+                        is_change_id=
+                        continue
+                    fi
+                    [[ $snell_status == 0 ]] || return 1
+                fi
+                snell_obfs_mode=$is_new_snell_obfs_mode
                 add snell
-                return
-            fi
-            if [[ $3 == 'auto' || $3 =~ ^(default|unshaped|unsafe-raw)$ ]]; then
-                warn "当前为 Snell v5 节点，不支持运行模式 (mode)，已自动转换为默认混淆模式 (obfs_mode: none)."
-                snell_obfs_mode=none
+                ;;
+            20)
+                # mode
+                if [[ $is_protocol != snell ]]; then
+                    # backward compatibility for non-snell outbound mode
+                    edit_node_outbound_mode
+                    return
+                fi
+                if [[ $snell_version == 5 ]]; then
+                    # smart routing for v5 node
+                    if [[ $3 =~ ^(none|http)$ ]]; then
+                        snell_obfs_mode=$3
+                        add snell
+                        return
+                    fi
+                    if [[ $3 == 'auto' || $3 =~ ^(default|unshaped|unsafe-raw)$ ]]; then
+                        warn "当前为 Snell v5 节点，不支持运行模式 (mode)，已自动转换为默认混淆模式 (obfs_mode: none)."
+                        snell_obfs_mode=none
+                        add snell
+                        return
+                    fi
+                    select_snell_obfs_mode "\n当前为 Snell v5 节点，请选择混淆模式:\n"
+                    snell_status=$?
+                    if [[ $snell_status == 2 ]]; then
+                        [[ $change_choice_from_menu ]] || return 2
+                        is_change_id=
+                        continue
+                    fi
+                    [[ $snell_status == 0 ]] || return 1
+                    snell_obfs_mode=$is_new_snell_obfs_mode
+                    add snell
+                    return
+                fi
+                is_new_snell_mode=$3
+                [[ $is_new_snell_mode == auto ]] && is_new_snell_mode=default
+                if [[ ! $is_new_snell_mode ]]; then
+                    select_snell_mode "\n请选择 Snell v6 运行模式:\n$(snell_mode_desc)\n"
+                    snell_status=$?
+                    if [[ $snell_status == 2 ]]; then
+                        [[ $change_choice_from_menu ]] || return 2
+                        is_change_id=
+                        continue
+                    fi
+                    [[ $snell_status == 0 ]] || return 1
+                fi
+                snell_mode_valid "$is_new_snell_mode" || { err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"; return 1; }
+                snell_mode=$is_new_snell_mode
                 add snell
-                return
-            fi
-            select_snell_obfs_mode "\n当前为 Snell v5 节点，请选择混淆模式:\n"
-            snell_status=$?
-            [[ $snell_status == 2 ]] && return 2
-            [[ $snell_status == 0 ]] || return 1
-            snell_obfs_mode=$is_new_snell_obfs_mode
-            add snell
-            return
-        fi
-        is_new_snell_mode=$3
-        [[ $is_new_snell_mode == auto ]] && is_new_snell_mode=default
-        if [[ ! $is_new_snell_mode ]]; then
-            select_snell_mode "\n请选择 Snell v6 运行模式:\n$(snell_mode_desc)\n"
-            snell_status=$?
-            [[ $snell_status == 2 ]] && return 2
-            [[ $snell_status == 0 ]] || return 1
-        fi
-        snell_mode_valid "$is_new_snell_mode" || { err "Snell 运行模式只支持 default, unshaped 或 unsafe-raw. $is_err_tips"; return 1; }
-        snell_mode=$is_new_snell_mode
-        add snell
-        ;;
-    16)
-        # view current share link
-        url_qr url
-        ;;
-    21)
-        # note
-        note_apply_cli "$is_config_file" "${@:3}" || return $?
-        info
-        ;;
-    esac
+                ;;
+            16)
+                # view current share link
+                url_qr url
+                ;;
+            21)
+                # note
+                note_apply_cli "$is_config_file" "${@:3}" || return $?
+                info
+                ;;
+            esac
+            break 2
+        done
+    done
     is_change_id=
 }
 
@@ -1456,9 +1508,24 @@ service_action_result() {
     return 1
 }
 
+# 选择添加节点使用的协议，供添加流程与「返回选择协议」复用。
+select_node_protocol() {
+    local protocol_status
+    is_tmp_list=("${protocol_list[@]}")
+    [[ $is_no_auto_tls ]] && {
+        is_tmp_list=()
+        for v in "${protocol_list[@]}"; do
+            [[ $(grep -i "\-tls$" <<<"$v") ]] && is_tmp_list+=("$v")
+        done
+    }
+    menu_select parent is_new_protocol "\n选择协议:\n" "${is_tmp_list[@]}"
+    protocol_status=$?
+    return "$protocol_status"
+}
+
 # add a config
 add() {
-    local caddy_shared_lock= protocol_choice_status ss_method_status
+    local caddy_shared_lock= protocol_choice_status ss_method_status is_protocol_from_menu=
     is_custom_node_name=
     is_custom_node_note=
     [[ ! $1 && ! $is_change ]] && unset is_new_protocol
@@ -1518,21 +1585,15 @@ add() {
 
     # no prefer protocol
     if [[ ! $is_new_protocol ]]; then
-        is_tmp_list=("${protocol_list[@]}")
-        [[ $is_no_auto_tls ]] && {
-            is_tmp_list=()
-            for v in "${protocol_list[@]}"; do
-                [[ $(grep -i "\-tls$" <<<"$v") ]] && is_tmp_list+=("$v")
-            done
-        }
-        menu_select parent is_new_protocol "\n选择协议:\n" "${is_tmp_list[@]}"
+        select_node_protocol
         protocol_choice_status=$?
         if [[ $protocol_choice_status == 2 ]]; then
             unset is_new_protocol
-            msg "\n已取消添加节点，返回节点管理菜单。\n"
+            [[ $is_change ]] || msg "\n已取消添加节点，返回节点管理菜单。\n"
             return 2
         fi
         [[ $protocol_choice_status == 0 ]] || return 1
+        is_protocol_from_menu=1
     fi
 
     if [[ ${is_new_protocol,,} == 'anytls' ]]; then
@@ -1761,12 +1822,28 @@ add() {
             shadowsocks)
                 # set method
                 if [[ ! $ss_method ]]; then
-                    select_ss_method
-                    ss_method_status=$?
-                    if [[ $ss_method_status == 2 ]]; then
-                        msg "\n已取消添加节点，返回节点管理菜单。\n"
-                        return 2
-                    fi
+                    while :; do
+                        select_ss_method
+                        ss_method_status=$?
+                        [[ $ss_method_status == 2 ]] || break
+                        if [[ ! $is_protocol_from_menu ]]; then
+                            msg "\n已取消添加节点，返回节点管理菜单。\n"
+                            return 2
+                        fi
+                        # 按 0 退回「选择协议」，按重新选定的协议继续添加。
+                        select_node_protocol
+                        protocol_choice_status=$?
+                        if [[ $protocol_choice_status == 2 ]]; then
+                            unset is_new_protocol
+                            [[ $is_change ]] || msg "\n已取消添加节点，返回节点管理菜单。\n"
+                            return 2
+                        fi
+                        [[ $protocol_choice_status == 0 ]] || return 1
+                        [[ ${is_new_protocol,,} == shadowsocks ]] || {
+                            add "$is_new_protocol"
+                            return $?
+                        }
+                    done
                     [[ $ss_method_status == 0 ]] || return 1
                 fi
                 # set password
@@ -1929,6 +2006,8 @@ get() {
             [[ $get_status == 0 ]] || return 1
             is_config_file=${is_all_json[REPLY - 1]}
             export is_config_file
+            # 标记节点来自选择列表，便于上层修改流程把 0 退回本页。
+            is_node_picked_by_menu=1
         }
         return 0
         ;;
