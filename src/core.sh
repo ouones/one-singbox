@@ -240,6 +240,15 @@ interactive_read() {
     return "$status"
 }
 
+# Read a form field. When the input stream ends (Ctrl+D / EOF) the current flow
+# aborts instead of re-prompting forever on empty replies.
+form_read() {
+    interactive_read "$@" && return 0
+    msg '\n输入已结束，已取消当前操作。'
+    [[ ${is_interactive_operation:-0} == 1 ]] && exit 1
+    return 1
+}
+
 run_interactive_operation() {
     local previous_int status
     previous_int=$(trap -p INT)
@@ -319,6 +328,7 @@ show_list() {
 ask() {
     local outbound_display=
     local is_secret_input=
+    local ask_status=0
     case $1 in
     set_ss_method)
         is_tmp_list=("${ss_method_list[@]}")
@@ -360,10 +370,10 @@ ask() {
     while :; do
         echo -ne "$is_opt_input_msg"
         if [[ $is_secret_input ]]; then
-            interactive_read -rs REPLY
+            form_read -rs REPLY || { ask_status=1; break; }
             echo
         else
-            interactive_read -r REPLY
+            form_read -r REPLY || { ask_status=1; break; }
         fi
         [[ ! $REPLY && $is_default_arg ]] && export "$is_ask_set=$is_default_arg" && break
         if [[ ! $is_tmp_list ]]; then
@@ -434,6 +444,7 @@ ask() {
         fi
     done
     unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg
+    return "$ask_status"
 }
 
 select_ss_method() {
@@ -538,7 +549,7 @@ edit_node_outbound_mode() {
         else
             echo -ne "请输入 Shadowsocks 分享链接 (输入内容隐藏):"
         fi
-        IFS= interactive_read -rs is_outbound_ss_uri
+        IFS= form_read -rs is_outbound_ss_uri || return 1
         echo
         [[ $is_outbound_ss_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_ss_uri ]]; then
@@ -560,7 +571,7 @@ edit_node_outbound_mode() {
         else
             echo -ne "请输入 VLESS 分享链接 (输入内容隐藏):"
         fi
-        IFS= interactive_read -rs is_outbound_vless_uri
+        IFS= form_read -rs is_outbound_vless_uri || return 1
         echo
         [[ $is_outbound_vless_uri ]] && msg "已接收分享链接（输入内容已隐藏）。"
         if [[ $is_outbound_vless_uri ]]; then
@@ -1102,7 +1113,7 @@ change() {
         is_new_entry_addr=$3
         if [[ -z $is_new_entry_addr ]]; then
             echo -ne "请输入分享链接中的服务器地址 (IPv4、IPv6 或域名):"
-            interactive_read -r is_new_entry_addr
+            form_read -r is_new_entry_addr || return 1
         fi
         is_new_entry_addr=$(sync_entry_addr_config "$is_config_file" "$is_new_entry_addr") || { err "入口地址更新失败: $is_new_entry_addr"; return 1; }
         msg "\n已更新入口地址为: $(_green "$is_new_entry_addr")\n"
@@ -1830,7 +1841,7 @@ add() {
 
     if [[ $is_main_start && ! $is_change && ! $is_gen ]]; then
         echo -ne "输入节点名称 (回车自动生成 8 位名称):"
-        interactive_read -r is_custom_node_name
+        form_read -r is_custom_node_name || return 1
         is_custom_node_name=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$is_custom_node_name")
         is_custom_node_name=${is_custom_node_name%.json}
         [[ ! $is_custom_node_name ]] && is_custom_node_name=$(random_node_name)
@@ -2168,10 +2179,12 @@ info() {
         get info "$info_target"
         info_status=$?
         [[ $info_status == 2 ]] && return 2
+        [[ $info_status == 0 ]] || return "$info_status"
     elif [[ ! $is_protocol ]]; then
         get info "$1"
         info_status=$?
         [[ $info_status == 2 ]] && return 2
+        [[ $info_status == 0 ]] || return "$info_status"
     fi
     # is_color=$(shuf -i 41-45 -n1)
     is_color=44
@@ -2232,7 +2245,7 @@ info() {
         is_info_str=("$is_protocol" "$is_addr" "$port" "$password" tcp tls true)
         ;;
     hy*)
-        is_can_change=(0 1 4 12 13 14 15)
+        is_can_change=(0 1 4 13 14 15)
         is_info_show=(0 1 2 10 8 9 20)
         # fix xray core for client use.
         is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in "$is_core_dir/bin/tls.cer" | sed 's/.*=//;s/://g')
@@ -2261,7 +2274,7 @@ info() {
         is_url="$is_protocol://$uuid@$is_addr:${is_public_port:-$port}?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_node_name"
         ;;
     anytls)
-        is_can_change=(0 1 4 12 13 14 15)
+        is_can_change=(0 1 4 13 14 15)
         if [[ $is_anytls_domain ]]; then
             is_info_show=(0 1 2 10 8)
             is_info_str=("$is_protocol" "$is_anytls_domain" "$port" "$password" tls)
@@ -2463,7 +2476,7 @@ menu_action() {
 }
 
 menu_select() {
-    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent= menu_default=${is_default_arg:-}
+    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent= menu_default=${is_default_arg:-} menu_index
     shift 3
     [[ $menu_kind == parent ]] && menu_has_parent=1
     while :; do
@@ -2479,6 +2492,14 @@ menu_select() {
             echo -ne "请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (q 退出):"
         fi
         interactive_read -r REPLY || { unset is_tmp_list; return 1; }
+        if [[ $menu_has_parent && ! $REPLY && $menu_default ]]; then
+            for menu_index in "${!is_tmp_list[@]}"; do
+                if [[ ${is_tmp_list[menu_index]} == "$menu_default" ]]; then
+                    REPLY=$((menu_index + 1))
+                    break
+                fi
+            done
+        fi
         if [[ $menu_has_parent ]]; then
             if [[ $REPLY == 0 ]]; then
                 export "$menu_var="
@@ -2661,7 +2682,7 @@ system_tools_menu() {
 
 # Main menu; q/Q exits and empty input or 0 redraws it.
 is_main_menu() {
-    local is_log_usage_limit is_log_usage_bytes menu_status
+    local is_log_usage_limit is_log_usage_bytes menu_status action_status
     while :; do
         if ! qrcode_dependency_checked; then
             qrcode_dependency_install || :
@@ -2694,7 +2715,13 @@ is_main_menu() {
         5) system_tools_menu ;;
         6) msg "\n命令行帮助"; load help.sh; show_help; menu_pause ;;
         7) load help.sh; about; menu_pause ;;
-        8) menu_action uninstall ;;
+        8)
+            # 卸载成功后脚本与菜单依赖已被移除，直接结束本次交互会话。
+            run_interactive_operation uninstall
+            action_status=$?
+            [[ $action_status == 0 ]] && return
+            [[ $action_status == 2 ]] || menu_pause
+            ;;
         esac
     done
 }

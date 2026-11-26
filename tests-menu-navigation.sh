@@ -184,12 +184,12 @@ create() { printf 'created:%s\n' "$ss_method"; }
 meta_set() { :; }
 is_random_ss_method=2022-blake3-aes-128-gcm
 
-assert_ss_method_menu_redrawn() {
+assert_ss_method_menu_shown() {
     local method output=$1 context=$2
-    [[ $(grep -Fc '选择加密方式:' <<<"$output") == 2 ]] || fail "$context redraws the SS method prompt: $output"
-    [[ $(grep -Fc '回车默认 2022-blake3-aes-128-gcm' <<<"$output") == 2 ]] || fail "$context keeps the SS method default visible: $output"
+    [[ $(grep -Fc '选择加密方式:' <<<"$output") == 1 ]] || fail "$context shows the SS method prompt once: $output"
+    [[ $(grep -Fc '回车默认 2022-blake3-aes-128-gcm' <<<"$output") == 1 ]] || fail "$context keeps the SS method default visible: $output"
     for method in "${ss_method_list[@]}"; do
-        [[ $(grep -Fc ") $method" <<<"$output") == 2 ]] || fail "$context redraws the complete SS method list: $output"
+        [[ $(grep -Fc ") $method" <<<"$output") == 1 ]] || fail "$context shows the complete SS method list: $output"
     done
 }
 
@@ -200,11 +200,11 @@ assert_ss_method_menu_redrawn() {
     [[ $return_output == *'0) 返回上级'* && $return_output == *'aes-128-gcm'* && $return_output == *'2022-blake3-chacha20-poly1305'* ]] || fail "SS method choices remain visible: $return_output"
     [[ $return_output != *'changed:'* ]] || fail "0 must not change the SS method: $return_output"
 
-    empty_output=$(unset ss_method; printf '\n0\n' | change node.json method 2>&1); status=$?
-    [[ $status == 2 ]] || fail "Enter is invalid and 0 returns from the SS method change selector: status=$status output=$empty_output"
-    assert_ss_method_menu_redrawn "$empty_output" "empty Enter in change mode"
-    [[ $(grep -Fc '输入无效' <<<"$empty_output") == 1 ]] || fail "empty Enter prints one SS method error: $empty_output"
-    [[ $empty_output != *'changed:'* ]] || fail "empty Enter must not select the SS method default: $empty_output"
+    empty_output=$(unset ss_method; printf '\n' | change node.json method 2>&1); status=$?
+    [[ $status == 0 ]] || fail "Enter accepts the SS method default: status=$status output=$empty_output"
+    assert_ss_method_menu_shown "$empty_output" "empty Enter in change mode"
+    [[ $(grep -Fc '输入无效' <<<"$empty_output") == 0 ]] || fail "empty Enter must not report an invalid SS method: $empty_output"
+    [[ $empty_output == *'changed:2022-blake3-aes-128-gcm'* ]] || fail "empty Enter selects the SS method default: $empty_output"
 
     selected_output=$(unset ss_method; printf '1\n' | change node.json method 2>&1); status=$?
     [[ $status == 0 && $selected_output == *'changed:aes-128-gcm'* ]] || fail "SS method numeric selection keeps its mapping: status=$status output=$selected_output"
@@ -215,11 +215,11 @@ add_return=$(unset ss_method; is_main_start=1; port=32002; printf '0\n' | add sh
 [[ $add_return == *'0) 返回上级'* ]] || fail "SS add shows the shared return item: $add_return"
 [[ $add_return != *'created:'* ]] || fail "0 must not create a Shadowsocks node: $add_return"
 
-add_empty=$(unset ss_method; is_main_start=1; port=32002; ss_password=generated-password; printf '\n0\n' | add shadowsocks 2>&1); status=$?
-[[ $status == 2 ]] || fail "Enter is invalid and 0 returns from the SS method add selector: status=$status output=$add_empty"
-assert_ss_method_menu_redrawn "$add_empty" "empty Enter in add mode"
-[[ $(grep -Fc '输入无效' <<<"$add_empty") == 1 ]] || fail "empty Enter prints one SS add method error: $add_empty"
-[[ $add_empty != *'created:'* ]] || fail "empty Enter must not create an SS node with the default method: $add_empty"
+add_default=$(unset ss_method; is_main_start=1; port=32002; ss_password=generated-password; printf '\nmy-node\n' | add shadowsocks 2>&1); status=$?
+[[ $status == 0 ]] || fail "Enter accepts the SS method default when adding: status=$status output=$add_default"
+assert_ss_method_menu_shown "$add_default" "empty Enter in add mode"
+[[ $(grep -Fc '输入无效' <<<"$add_default") == 0 ]] || fail "empty Enter must not report an invalid SS add method: $add_default"
+[[ $add_default == *'created:2022-blake3-aes-128-gcm'* ]] || fail "empty Enter creates the node with the SS method default: $add_default"
 
 quick_output=$(unset ss_method; is_main_start=; port=; ss_password=; printf '' | add shadowsocks 32003 secret aes-128-gcm 2>&1); status=$?
 [[ $status == 0 && $quick_output == *'created:aes-128-gcm'* ]] || fail "SS quick arguments bypass the selector: status=$status output=$quick_output"
