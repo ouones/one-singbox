@@ -74,11 +74,12 @@ grep -Fq '当前备注: (无)' <<<"$note_edit_out" || fail "valid number opens t
 [[ $(grep -Fc '按回车返回菜单' <<<"$note_edit_out") == 1 ]] || fail "note result stays visible with one pause: $note_edit_out"
 
 # 4. Invalid numbers re-prompt on the delete page, then a valid number reaches its confirmation.
-delete_cancel_out=$(printf '4\nabc\n2\nn\n\n0\n' | relay_menu 2>&1) || fail "delete selection cancel failed: $delete_cancel_out"
+delete_cancel_out=$(printf '4\nabc\n2\nn\n0\n' | relay_menu 2>&1) || fail "delete selection cancel failed: $delete_cancel_out"
 [[ $(grep -Fc '输入无效' <<<"$delete_cancel_out") == 1 ]] || fail "invalid delete number explains the valid range once: $delete_cancel_out"
 [[ $(grep -Fc '请选择要删除的端口转发:' <<<"$delete_cancel_out") == 2 ]] || fail "invalid delete number re-prompts the delete list: $delete_cancel_out"
 grep -Fq '将删除监听端口 10001 → 203.0.113.11:20001 的端口转发' <<<"$delete_cancel_out" || fail "valid delete number targets the selected relay: $delete_cancel_out"
 grep -Fq '已取消删除端口转发' <<<"$delete_cancel_out" || fail "declining the confirmation cancels the delete: $delete_cancel_out"
+[[ $delete_cancel_out != *'按回车返回菜单'* ]] || fail "declining the confirmation returns without an extra pause: $delete_cancel_out"
 [[ -f "$is_conf_dir/relay-10001.json" ]] || fail "declining the confirmation removed relay-10001.json"
 
 # 5. 查看 page: numbered list, 0 returns straight to the relay menu without any pause.

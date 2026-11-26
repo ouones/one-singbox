@@ -101,19 +101,26 @@ run_action_result_case() {
         ;;
     cancel)
         printf '%s\n' '{"inbounds":[{"tag":"relay-10000.json","type":"direct","listen_port":10000,"override_address":"203.0.113.10","override_port":20000}]}' >"$case_dir/root/etc/sing-box/conf/relay-10000.json"
-        output=$(printf '2\n4\n1\nn\n\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
+        output=$(printf '2\n4\n1\nn\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
         status=$?
         expected='已取消删除端口转发'
         ;;
     esac
 
     [[ $status == 0 ]] || fail "action $result parent menu did not resume cleanly: status=$status output=$output"
-    [[ $output == *'按回车返回菜单。'* ]] || fail "action $result did not wait for Enter: $output"
     [[ $output == *"$expected"* ]] || fail "action $result did not explain outcome: $output"
     message_line=$(awk -v text="$expected" 'index($0, text) { print NR; exit }' <<<"$output")
-    pause_line=$(awk 'index($0, "按回车返回菜单。") { print NR; exit }' <<<"$output")
-    return_line=$(awk 'index($0, "按回车返回菜单。") { paused=1 } paused && index($0, "0) 返回上级") { print NR; exit }' <<<"$output")
-    [[ $message_line -lt $pause_line && $pause_line -lt $return_line ]] || fail "action $result order mismatch: $output"
+    if [[ $result == cancel ]]; then
+        # A declined confirmation returns straight to the parent menu.
+        [[ $output != *'按回车返回菜单。'* ]] || fail "action cancel left an extra pause: $output"
+        return_line=$(awk 'index($0, "请选择端口转发操作") { count++; if (count == 2) { print NR; exit } }' <<<"$output")
+        [[ $message_line -lt $return_line ]] || fail "action cancel, parent menu out of order: $output"
+    else
+        [[ $output == *'按回车返回菜单。'* ]] || fail "action $result did not wait for Enter: $output"
+        pause_line=$(awk 'index($0, "按回车返回菜单。") { print NR; exit }' <<<"$output")
+        return_line=$(awk 'index($0, "按回车返回菜单。") { paused=1 } paused && index($0, "0) 返回上级") { print NR; exit }' <<<"$output")
+        [[ $message_line -lt $pause_line && $pause_line -lt $return_line ]] || fail "action $result order mismatch: $output"
+    fi
     [[ $(grep -o '请选择端口转发操作' <<<"$output" | wc -l) == 2 ]] || fail "action $result did not return to relay menu: $output"
 }
 

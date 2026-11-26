@@ -113,7 +113,7 @@ run_bbr_confirmation_case() {
 
     for input in y Y n N '' 0 no 'Y '; do
         rm -f "$TEST_BBR_EFFECT"
-        output=$(printf '5\n1\n%s\n\n0\nq\n' "$input" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
+        output=$(printf '5\n1\n%s\n0\nq\n' "$input" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
         [[ $output == *'操作对象：系统内核拥塞控制（BBR）'* ]] || fail "BBR input '$input' did not identify BBR: $output"
         [[ $output == *'主要影响：修改 /etc/sysctl.conf 中的拥塞控制与队列设置'* ]] || fail "BBR input '$input' did not explain impact: $output"
         [[ $output == *'是否重启核心：否'* ]] || fail "BBR input '$input' did not state no restart: $output"
@@ -122,7 +122,7 @@ run_bbr_confirmation_case() {
         else
             [[ ! -e $TEST_BBR_EFFECT ]] || fail "BBR input '$input' applied BBR: $output"
             [[ $output == *'已取消'* ]] || fail "BBR input '$input' did not report cancellation: $output"
-            [[ $output == *'按回车返回菜单。'* ]] || fail "BBR input '$input' did not pause after cancellation: $output"
+            [[ $output != *'按回车返回菜单。'* ]] || fail "BBR input '$input' left an extra pause after cancellation: $output"
         fi
     done
 }
@@ -190,7 +190,7 @@ run_block_cn_confirmation_case() {
             : >"$SERVICE_LOG"
             printf '%s\n' '{"dns":{},"route":{"rules":[]},"outbounds":[{"tag":"direct","type":"direct"}]}' >"$case_dir/root/etc/sing-box/config.json"
             if [[ $initial == enabled ]]; then : >"$marker"; else rm -f "$marker"; fi
-            output=$(printf '5\n4\n%s\n\n0\nq\n' "$answer" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
+            output=$(printf '5\n4\n%s\n0\nq\n' "$answer" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
             [[ $output == *"操作对象：$object"* ]] || fail "block-cn $action/$answer did not identify target: $output"
             [[ $output == *"主要影响：$impact"* ]] || fail "block-cn $action/$answer did not explain impact: $output"
             [[ $output == *'是否重启核心：是'* ]] || fail "block-cn $action/$answer did not state restart: $output"
@@ -208,7 +208,7 @@ run_block_cn_confirmation_case() {
                 else
                     [[ ! -e $marker ]] || fail "block-cn $action/$answer created marker"
                 fi
-                [[ $output == *'已取消'* && $output == *'按回车返回菜单。'* ]] || fail "block-cn $action/$answer did not pause after cancellation: $output"
+                [[ $output == *'已取消'* && $output != *'按回车返回菜单。'* ]] || fail "block-cn $action/$answer left an extra pause after cancellation: $output"
             fi
         done
     done
@@ -243,7 +243,7 @@ run_update_confirmation_case() {
         IFS='|' read -r choice expected_call object impact restart <<<"$spec"
         for answer in y n; do
             rm -f "$case_dir/update-effects"
-            output=$(run_update_menu_with_caddy 1 $''"$choice"$'\n'"$answer"$'\n\n0\n')
+            output=$(run_update_menu_with_caddy 1 $''"$choice"$'\n'"$answer"$'\n0\n')
             [[ $output == *"操作对象：$object"* ]] || fail "update $choice/$answer did not identify target: $output"
             [[ $output == *"主要影响：$impact"* ]] || fail "update $choice/$answer did not explain impact: $output"
             [[ $output == *"是否重启核心：$restart"* ]] || fail "update $choice/$answer did not state restart impact: $output"
@@ -251,7 +251,7 @@ run_update_confirmation_case() {
                 [[ $(cat "$case_dir/update-effects" 2>/dev/null) == "$expected_call" ]] || fail "update $choice/y did not invoke update $expected_call: $output"
             else
                 [[ ! -e $case_dir/update-effects ]] || fail "update $choice/$answer ran update"
-                [[ $output == *'已取消'* && $output == *'按回车返回菜单。'* ]] || fail "update $choice/$answer did not pause after cancellation: $output"
+                [[ $output == *'已取消'* && $output != *'按回车返回菜单。'* ]] || fail "update $choice/$answer left an extra pause after cancellation: $output"
             fi
         done
     done
@@ -280,7 +280,7 @@ run_service_confirmation_case() {
         IFS='|' read -r choice action object impact restart <<<"$spec"
         for answer in y n; do
             : >"$SERVICE_LOG"
-            output=$(printf '3\n%s\n%s\n\n0\nq\n' "$choice" "$answer" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
+            output=$(printf '3\n%s\n%s\n0\nq\n' "$choice" "$answer" | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
             [[ $output == *"操作对象：$object"* ]] || fail "service $action/$answer did not identify action: $output"
             [[ $output == *"主要影响：$impact"* ]] || fail "service $action/$answer did not explain impact: $output"
             [[ $output == *"是否重启核心：$restart"* ]] || fail "service $action/$answer did not state restart impact: $output"
@@ -288,7 +288,7 @@ run_service_confirmation_case() {
                 grep -Fq "$action sing-box" "$SERVICE_LOG" || fail "service $action/y did not invoke systemctl $action: $(cat "$SERVICE_LOG")"
             else
                 ! grep -Eq "^(start|stop|restart) " "$SERVICE_LOG" || fail "service $action/$answer invoked service change: $(cat "$SERVICE_LOG")"
-                [[ $output == *'已取消'* && $output == *'按回车返回菜单。'* ]] || fail "service $action/$answer did not pause after cancellation: $output"
+                [[ $output == *'已取消'* && $output != *'按回车返回菜单。'* ]] || fail "service $action/$answer left an extra pause after cancellation: $output"
             fi
         done
     done

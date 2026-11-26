@@ -209,7 +209,7 @@ relay_delete() {
     if [[ $is_main_start ]]; then
         remote_addr=$(jq -r '.inbounds[0].override_address // empty' "$relay_file")
         remote_port=$(jq -r '.inbounds[0].override_port // empty' "$relay_file")
-        confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return; }
+        confirm_action "将删除监听端口 $local_port → $remote_addr:$remote_port 的端口转发；删除范围包括配置文件 $relay_file 和运行时转发规则，不影响其他端口转发，删除后将重启 sing-box。确认删除" || { msg "已取消删除端口转发。"; return 2; }
     fi
     shared_config_lock || { err "${shared_config_error:-无法获取公共配置锁}"; return 1; }
     backup_file="$is_conf_dir/.relay-${local_port}.json.bak"

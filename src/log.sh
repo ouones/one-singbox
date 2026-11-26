@@ -145,7 +145,10 @@ log_limit_set() {
     while :; do
         msg "输入日志上限 (大于 0 的整数，单位 MB；回车保留当前值):"
         IFS= interactive_read -r value || return
-        [[ ! $value ]] && return 0
+        if [[ ! $value ]]; then
+            msg "\n已保留当前日志占用上限: $(_green "$current MB")\n"
+            return 2
+        fi
         if log_limit_valid "$value"; then
             break
         fi
@@ -204,7 +207,11 @@ interactive_log_tail() {
     wait "$tail_pid"
     status=$?
     wait "$tail_pid" 2>/dev/null || :
-    [[ $interrupted ]] && return 130
+    # A Ctrl+C that lands after the pre-check still cancels: the trap records it
+    # even when tail is terminated with 143 instead of reporting 130.
+    if [[ $interrupted || ${interactive_log_cancel_requested:-} || $status == 130 || $status == 143 ]]; then
+        return 130
+    fi
     return "$status"
 }
 

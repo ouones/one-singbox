@@ -331,7 +331,7 @@ menu_system_impact() {
     msg "是否重启核心：$restart_core"
     if ! confirm_action "确认执行上述操作"; then
         msg "已取消。"
-        return 1
+        return 2
     fi
     "$@"
 }
@@ -1411,7 +1411,7 @@ del() {
         if [[ $is_main_start && ! $is_no_del_msg ]]; then
             if ! confirm_action "将删除节点“$is_config_name”及其配置文件 $is_config_file；删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点，删除后将重启 sing-box。确认删除"; then
                 msg "已取消删除节点。"
-                return
+                return 2
             fi
         fi
         deleted_config_file=$is_config_file
@@ -1455,12 +1455,12 @@ uninstall() {
         [[ $uninstall_choice_status == 2 ]] && return 2
         [[ $uninstall_choice_status == 0 ]] || return 1
         if [[ $is_do_uninstall == '全部卸载' ]]; then
-            confirm_exact_yes "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return 1; }
+            confirm_exact_yes "$uninstall_scope；还将删除 Caddy 服务、程序及整个 /etc/caddy 安装和配置目录。确认卸载" || { msg "已取消卸载。"; return 2; }
         else
-            confirm_exact_yes "$uninstall_scope。Caddy 服务、程序及 /etc/caddy 安装和配置目录保留，不删除。确认卸载" || { msg "已取消卸载。"; return 1; }
+            confirm_exact_yes "$uninstall_scope。Caddy 服务、程序及 /etc/caddy 安装和配置目录保留，不删除。确认卸载" || { msg "已取消卸载。"; return 2; }
         fi
     else
-        confirm_exact_yes "$uninstall_scope。Caddy 未安装，不涉及 Caddy 删除。确认卸载" || { msg "已取消卸载。"; return 1; }
+        confirm_exact_yes "$uninstall_scope。Caddy 未安装，不涉及 Caddy 删除。确认卸载" || { msg "已取消卸载。"; return 2; }
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
@@ -2353,7 +2353,11 @@ get() {
     reinstall)
         is_install_sh=$(cat "$is_sh_dir/install.sh")
         uninstall || return $?
-        bash <<<"$is_install_sh"
+        bash <<<"$is_install_sh" || return 1
+        if [[ ${is_interactive_operation:-0} == 1 ]]; then
+            msg "正在重新加载新版本面板...\n"
+            return "$is_reload_exit_code"
+        fi
         ;;
     esac
 }
@@ -2652,9 +2656,28 @@ update() {
     fi
 }
 
+# Read one menu line without ending the panel session on Ctrl+C. The read runs
+# in a subshell whose SIGINT aborts only that prompt, so the caller can step back
+# to its parent menu instead of terminating the whole session.
+menu_read_cancelable() {
+    local var=$1 answer read_status previous_int
+    previous_int=$(trap -p INT)
+    trap ':' INT
+    answer=$( (trap 'exit 130' INT; interactive_read -r line || exit 1; printf '%s' "${line-}") )
+    read_status=$?
+    if [[ $previous_int ]]; then
+        eval "$previous_int"
+    else
+        trap - INT
+    fi
+    printf -v "$var" '%s' "$answer"
+    return "$read_status"
+}
+
 menu_pause() {
     printf '\n按回车返回菜单。\n'
-    interactive_read -r
+    menu_read_cancelable REPLY
+    return 0
 }
 
 menu_action() {
@@ -2667,7 +2690,7 @@ menu_action() {
 }
 
 menu_select() {
-    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent= menu_default=${is_default_arg:-} menu_index
+    local menu_kind=$1 menu_var=$2 menu_prompt=$3 menu_has_parent= menu_default=${is_default_arg:-} menu_index menu_read_status
     shift 3
     [[ $menu_kind == parent ]] && menu_has_parent=1
     while :; do
@@ -2682,7 +2705,15 @@ menu_select() {
         else
             echo -ne "请输入选项编号 [\e[91m1-${#is_tmp_list[@]}\e[0m] (q 退出):"
         fi
-        interactive_read -r REPLY || { unset is_tmp_list; return 1; }
+        if [[ $menu_has_parent && ${is_interactive_operation:-0} != 1 ]]; then
+            # Ctrl+C in a nested menu steps back to the parent menu, never quits.
+            menu_read_cancelable REPLY
+            menu_read_status=$?
+            [[ $menu_read_status == 130 ]] && { unset is_tmp_list; return 2; }
+            [[ $menu_read_status == 0 ]] || { unset is_tmp_list; return 1; }
+        else
+            interactive_read -r REPLY || { unset is_tmp_list; return 1; }
+        fi
         if [[ $menu_has_parent && ! $REPLY && $menu_default ]]; then
             for menu_index in "${!is_tmp_list[@]}"; do
                 if [[ ${is_tmp_list[menu_index]} == "$menu_default" ]]; then

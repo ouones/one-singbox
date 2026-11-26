@@ -396,10 +396,11 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 JSON
 is_main_start=1
 
-output=$(printf '4\n1\nn\n\n0\n5\n' | relay_menu 2>&1)
+output=$(printf '4\n1\nn\n0\n' | relay_menu 2>&1)
 [[ $output == *'请选择要删除的端口转发:'* && $output == *'1) 监听端口 10000'* && $output == *'0) 返回上级'* ]] || fail "delete offers a numbered forwarding selection: $output"
 [[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
 [[ $output == *'已取消删除端口转发'* ]] || fail "cancel is reported without deleting the relay: $output"
+[[ $output != *'按回车返回菜单'* ]] || fail "declining the delete confirmation returns without an extra pause: $output"
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
 output=$(printf '4\n1\ny\n\n0\n5\n' | relay_menu 2>&1)

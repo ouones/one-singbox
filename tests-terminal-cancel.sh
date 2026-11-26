@@ -187,6 +187,33 @@ kernel-log)
 kernel-log-missing)
     service_menu
     ;;
+kernel-log-terminated)
+    touch "$is_log_dir/access.log"
+    # A terminated tail must still count as a cancellation (issue #134 race).
+    cat >"$case_dir/bin/tail" <<'FAKE_TAIL'
+#!/usr/bin/env bash
+exit 143
+FAKE_TAIL
+    chmod +x "$case_dir/bin/tail"
+    service_menu
+    ;;
+main-node-back)
+    is_main_menu
+    ;;
+main-help-pause)
+    show_help() { printf ' HELP_TEXT\n'; }
+    is_main_menu
+    ;;
+empty-node-pause)
+    # Restore the real empty-state page that the harness stubs out.
+    node_menu_has_nodes() { return 1; }
+    node_menu_empty_state() {
+        msg "\n暂无节点，请先添加。\n"
+        menu_pause
+        return 0
+    }
+    node_menu
+    ;;
 system-input)
     system_tools_menu
     ;;
@@ -510,6 +537,44 @@ def verify(core_file):
     )
     if status != 0:
         raise AssertionError(f"kernel-log: panel did not return to the kernel menu (status {status})\n{proc.text()}")
+    if "按回车返回菜单。" in proc.text():
+        raise AssertionError(f"kernel-log: Ctrl+C left an extra pause before the kernel menu\n{proc.text()}")
+
+    proc, status = run_case(
+        "kernel-log-terminated",
+        core_file,
+        ["请选择服务操作", b"5\n", "按 Ctrl+C", "请选择服务操作", b"0\n"],
+    )
+    if status != 0:
+        raise AssertionError(f"kernel-log-terminated: panel did not return to the kernel menu (status {status})\n{proc.text()}")
+    if "按回车返回菜单。" in proc.text():
+        raise AssertionError(f"kernel-log-terminated: a terminated tail left an extra pause\n{proc.text()}")
+
+    proc, status = run_case(
+        "main-node-back",
+        core_file,
+        ["one-singbox script", b"1\n", "请选择节点操作", b"\x03", "one-singbox script", b"q\n"],
+    )
+    if status != 0:
+        raise AssertionError(f"main-node-back: Ctrl+C in a nested menu must return to the main menu (status {status})\n{proc.text()}")
+    if "请选择节点操作" not in proc.text():
+        raise AssertionError(f"main-node-back: the node menu never opened\n{proc.text()}")
+
+    proc, status = run_case(
+        "main-help-pause",
+        core_file,
+        ["one-singbox script", b"6\n", "按回车返回菜单。", b"\x03", "one-singbox script", b"q\n"],
+    )
+    if status != 0:
+        raise AssertionError(f"main-help-pause: Ctrl+C on a pause page must return to its parent menu (status {status})\n{proc.text()}")
+
+    proc, status = run_case(
+        "empty-node-pause",
+        core_file,
+        ["请选择节点操作", b"3\n", "暂无节点，请先添加。", "按回车返回菜单。", b"\x03", "请选择节点操作", b"0\n"],
+    )
+    if status != 0:
+        raise AssertionError(f"empty-node-pause: Ctrl+C on the empty-state pause must return to the node menu (status {status})\n{proc.text()}")
 
     proc, status = run_case(
         "kernel-log-missing",
