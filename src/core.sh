@@ -254,6 +254,7 @@ form_read() {
 # with a failure so no later form step or business action can run.
 form_cancel() {
     if [[ ${is_form_cancel_return:-0} == 1 ]]; then
+        msg '\n已取消当前操作，未改动任何配置。'
         return 2
     fi
     if [[ ${is_interactive_operation:-0} == 1 ]]; then
