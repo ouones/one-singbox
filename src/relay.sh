@@ -118,10 +118,33 @@ relay_add() {
 }
 
 relay_info() {
-    local local_port=$1
+    local local_port=${1-}
     if [[ ! $local_port ]]; then
-        relay_list
-        ask string local_port "输入要查看的监听端口:"
+        if ! relay_menu_has_entries; then
+            relay_list
+            return 1
+        fi
+        local file l_port r_addr r_port cfg_name base_label choice_status
+        local -a files=() ports=() labels=()
+        shopt -s nullglob
+        files=("$is_conf_dir"/relay-*.json)
+        shopt -u nullglob
+        for file in "${files[@]}"; do
+            l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
+            r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
+            r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
+            cfg_name=${file##*/}
+            [[ $l_port ]] || l_port=${cfg_name#relay-}
+            l_port=${l_port%.json}
+            ports+=("$l_port")
+            base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+            labels+=("$(note_format_list_label "$cfg_name" "$base_label")")
+        done
+        menu_select parent local_port "\n请选择要查看的端口转发:\n" "${labels[@]}"
+        choice_status=$?
+        [[ $choice_status == 2 ]] && return 0
+        [[ $choice_status == 0 ]] || return 1
+        local_port=${ports[REPLY - 1]}
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
@@ -253,7 +276,7 @@ relay_menu_empty_state() {
 relay_menu() {
     local choice_status
     while :; do
-        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "列表" "查看" "备注" "删除"
+        menu_select parent is_relay_action "\n请选择端口转发操作:\n" "添加" "查看" "备注" "删除"
         choice_status=$?
         [[ $choice_status == 2 ]] && return
         [[ $choice_status == 0 ]] || return 1
@@ -266,13 +289,9 @@ relay_menu() {
             ;;
         3)
             relay_menu_empty_state && continue
-            menu_action relay_info
-            ;;
-        4)
-            relay_menu_empty_state && continue
             menu_action relay_note
             ;;
-        5)
+        4)
             relay_menu_empty_state && continue
             menu_action relay_delete
             ;;

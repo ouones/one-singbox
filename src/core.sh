@@ -1898,7 +1898,7 @@ get() {
         shopt -s nullglob
         for is_json_file in "$is_conf_dir"/*.json; do
             is_json_name=${is_json_file##*/}
-            [[ $is_json_name =~ dynamic-port-.*-link ]] && continue
+            [[ $is_json_name == relay-* || $is_json_name =~ dynamic-port-.*-link ]] && continue
             grep -E -i -q -- "$is_file_str" <<<"$is_json_name" || continue
             is_all_json+=("$is_json_name")
             [[ ${#is_all_json[@]} -ge 233 ]] && break

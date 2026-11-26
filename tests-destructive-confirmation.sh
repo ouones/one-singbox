@@ -146,7 +146,7 @@ run_relay_delete_confirmation_matrix() {
                 is_sh_ver=test
                 source "$1/sh/src/core.sh"
                 is_main_menu
-            ' _ "$case_dir" <<<$'2\n5\n10000\n'"$input"$'\n\n0\nq\n' 2>&1
+            ' _ "$case_dir" <<<$'2\n4\n10000\n'"$input"$'\n\n0\nq\n' 2>&1
         )
         [[ $output == *'监听端口 10000'* && $output == *'203.0.113.10:20000'* ]] || fail "input '$input' did not identify the forwarding rule: $output"
         [[ $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "input '$input' did not explain the forwarding deletion scope: $output"

@@ -271,11 +271,15 @@ fail() { echo "FAIL(node-sel-return): $*" >&2; exit 1; }
 load_case_core "$CASE_DIR"
 : >"$is_conf_dir/node-a.json"
 : >"$is_conf_dir/node-b.json"
+cat >"$is_conf_dir/relay-10000.json" <<'JSON'
+{"inbounds":[{"tag":"relay-10000.json","type":"direct","listen":"::","listen_port":10000,"override_address":"203.0.113.60","override_port":20060}]}
+JSON
 
 output=$(printf '0\n' | get file 2>&1); status=$?
 [[ $status == 2 ]] || fail "0 returns from node selection: status=$status output=$output"
 [[ $output == *'0) 返回上级'* ]] || fail "node selection shows the shared return item: $output"
 [[ $output == *'node-a.json'* && $output == *'node-b.json'* ]] || fail "node selection keeps all node choices: $output"
+[[ $output != *'relay-10000.json'* ]] || fail "node selection must exclude relay configs: $output"
 [[ -z $is_config_file ]] || fail "0 must not select a node: $is_config_file"
 CASE
 }
@@ -313,9 +317,10 @@ is_main_start=1
 
 output=$(printf '2\n\n0\n5\n' | relay_menu 2>&1)
 [[ $output == *'暂无端口转发，请先添加'* ]] || fail "empty relay state is explained: $output"
-for item in '1) 添加' '2) 列表' '3) 查看' '4) 备注' '5) 删除'; do
+for item in '1) 添加' '2) 查看' '3) 备注' '4) 删除'; do
     grep -Fq "$item" <<<"$output" || fail "relay menu missing item '$item': $output"
 done
+[[ $output != *'列表'* ]] || fail "relay menu should not split redundant list/view items: $output"
 [[ $output == *'0) 返回上级'* ]] || fail "relay menu shows the shared return item: $output"
 [[ $output == *'按回车返回菜单'* ]] || fail "empty relay state remains visible until return: $output"
 [[ $(grep -o '请选择端口转发操作' <<<"$output" | wc -l) == 2 ]] || fail "empty state returns to relay menu: $output"
@@ -353,10 +358,22 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 {"inbounds":[{"listen_port":10000,"override_address":"203.0.113.60","override_port":20060}]}
 JSON
 is_main_start=1
+is_port_used() { [[ $1 == 10000 ]] && printf '10000\n'; }
 
-output=$(printf '3\n10000\n\n0\n5\n' | relay_menu 2>&1)
-[[ $output == *'输入要查看的监听端口'* ]] || fail "view requests the listener port by name: $output"
-[[ $output == *'监听端口: 10000'* && $output == *'目标地址: 203.0.113.60'* && $output == *'目标端口: 20060'* ]] || fail "view maps the entered listener port to its existing relay: $output"
+output=$(printf '2\n\n0\n5\n' | relay_menu 2>&1)
+[[ $output == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "view displays the relay list directly: $output"
+[[ $output != *'输入要查看的监听端口'* ]] || fail "menu view must not re-prompt for listener port: $output"
+[[ $output != *'无法使用'* ]] || fail "menu view must not reject listening relay port: $output"
+
+info_out=$(printf '1\n' | relay_info 2>&1); status=$?
+[[ $status == 0 ]] || fail "interactive relay_info selection failed: status=$status output=$info_out"
+[[ $info_out == *'0) 返回上级'* ]] || fail "interactive relay_info must offer return/exit option: $info_out"
+[[ $info_out == *'监听端口: 10000'* && $info_out == *'目标地址: 203.0.113.60'* && $info_out == *'目标端口: 20060'* ]] || fail "interactive relay_info displays selected relay details: $info_out"
+[[ $info_out != *'无法使用'* ]] || fail "interactive relay_info must not check port_used on listening relay: $info_out"
+
+cancel_out=$(printf '0\n' | relay_info 2>&1); status=$?
+[[ $status == 0 ]] || fail "interactive relay_info return option failed: status=$status output=$cancel_out"
+[[ $cancel_out != *'端口转发配置信息'* ]] || fail "returning from interactive relay_info must not display details: $cancel_out"
 CASE
 }
 
@@ -372,13 +389,13 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 JSON
 is_main_start=1
 
-output=$(printf '5\n10000\nn\n\n0\n5\n' | relay_menu 2>&1)
+output=$(printf '4\n10000\nn\n\n0\n5\n' | relay_menu 2>&1)
 [[ $output == *'输入要删除的监听端口'* ]] || fail "delete requests the listener port by name: $output"
 [[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
 [[ $output == *'已取消删除端口转发'* ]] || fail "cancel is reported without deleting the relay: $output"
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
-output=$(printf '5\n10000\ny\n\n0\n5\n' | relay_menu 2>&1)
+output=$(printf '4\n10000\ny\n\n0\n5\n' | relay_menu 2>&1)
 [[ $output == *'将删除监听端口 10000 → 203.0.113.60:20060 的端口转发'* && $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "confirmed deletion explains the forwarding target and scope: $output"
 [[ $output == *'已删除端口转发配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
 [[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'

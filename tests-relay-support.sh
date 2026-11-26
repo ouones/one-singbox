@@ -236,7 +236,7 @@ if (main relay unknown) >/dev/null 2>&1; then
 fi
 
 # 13.1. relay_menu option 2 is the port-forwarding list and does not prompt for local_port
-del_option=5
+del_option=4
 ret_option=0
 
 menu_out=$(

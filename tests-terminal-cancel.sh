@@ -466,7 +466,7 @@ def verify(core_file):
     proc, status = run_case(
         "relay-confirm",
         core_file,
-        ["请选择端口转发操作", b"5\n", "RELAY_CONFIRM_INPUT", "确认删除端口转发", b"\x03", "已取消当前操作", b"\n", "请选择端口转发操作", b"0\n"],
+        ["请选择端口转发操作", b"4\n", "RELAY_CONFIRM_INPUT", "确认删除端口转发", b"\x03", "已取消当前操作", b"\n", "请选择端口转发操作", b"0\n"],
     )
     if status != 0:
         raise AssertionError(f"relay-confirm: menu did not exit normally after return (status {status})\n{proc.text()}")

@@ -411,21 +411,21 @@ manage() { printf '%s\n' "$*" >>"$manage_log"; }
 systemctl() { printf '%s\n' "$*" >>"$manage_log"; return 0; }
 is_port_used() { :; }
 
-# 1. Empty state shows flat 5-item menu and guards options 4 (备注) and 5 (删除).
+# 1. Empty state shows flat 4-item menu and guards options 3 (备注) and 4 (删除).
 empty_menu_out=$(relay_menu 2>&1 <<'INPUT'
-4
+3
 
-5
+4
 
 0
 INPUT
 ) || fail "empty relay_menu navigation failed: $empty_menu_out"
-for item in '1) 添加' '2) 列表' '3) 查看' '4) 备注' '5) 删除' '0) 返回上级'; do
+for item in '1) 添加' '2) 查看' '3) 备注' '4) 删除' '0) 返回上级'; do
     grep -Fq "$item" <<<"$empty_menu_out" || fail "relay_menu missing item '$item': $empty_menu_out"
 done
-[[ $(grep -Fc '暂无端口转发，请先添加' <<<"$empty_menu_out") == 2 ]] || fail "options 4 and 5 should both show empty state when no relays exist: $empty_menu_out"
+[[ $(grep -Fc '暂无端口转发，请先添加' <<<"$empty_menu_out") == 2 ]] || fail "options 3 and 4 should both show empty state when no relays exist: $empty_menu_out"
 
-# 2. Setup relays, then edit/keep/clear note via option 4, delete via option 5, add via option 1.
+# 2. Setup relays, then edit/keep/clear note via option 3, delete via option 4, add via option 1.
 main relay add 13000 203.0.113.10 23000 >/dev/null 2>&1 || fail "setup 13000 failed"
 main relay add 13001 203.0.113.11 23001 >/dev/null 2>&1 || fail "setup 13001 failed"
 before_13000=$(cat "$is_conf_dir/relay-13000.json")
@@ -433,50 +433,50 @@ before_cfg=$(cat "$is_config_json")
 : >"$manage_log"
 
 edit_out=$(relay_menu 2>&1 <<'INPUT'
-4
+3
 13000
   菜单编辑备注  
 
 0
 INPUT
-) || fail "relay_menu option 4 edit failed: $edit_out"
-grep -Fq '当前备注: (无)' <<<"$edit_out" || fail "relay_menu option 4 did not enter note_edit_interactive: $edit_out"
-[[ $(note_get relay-13000.json) == '菜单编辑备注' ]] || fail "relay_menu option 4 did not save note: '$(note_get relay-13000.json)'"
+) || fail "relay_menu option 3 edit failed: $edit_out"
+grep -Fq '当前备注: (无)' <<<"$edit_out" || fail "relay_menu option 3 did not enter note_edit_interactive: $edit_out"
+[[ $(note_get relay-13000.json) == '菜单编辑备注' ]] || fail "relay_menu option 3 did not save note: '$(note_get relay-13000.json)'"
 
 (relay_menu >/dev/null 2>&1 <<'INPUT'
-4
+3
 13000
 
 
 0
 INPUT
-) || fail "relay_menu option 4 keep-on-enter failed"
+) || fail "relay_menu option 3 keep-on-enter failed"
 [[ $(note_get relay-13000.json) == '菜单编辑备注' ]] || fail "relay_menu Enter cleared note"
 
 (relay_menu >/dev/null 2>&1 <<'INPUT'
-4
+3
 13000
 clear
 
 0
 INPUT
-) || fail "relay_menu option 4 clear failed"
+) || fail "relay_menu option 3 clear failed"
 [[ -z $(note_get relay-13000.json) ]] || fail "relay_menu clear failed"
 [[ ! -e "$is_conf_dir/.quan-meta/relay-13000.json.meta.json" ]] || fail "relay_menu clear left empty meta file"
 
-[[ $(cat "$is_conf_dir/relay-13000.json") == "$before_13000" ]] || fail "relay_menu option 4 mutated relay config"
-[[ $(cat "$is_config_json") == "$before_cfg" ]] || fail "relay_menu option 4 mutated runtime config.json"
-[[ ! -s $manage_log ]] || fail "relay_menu option 4 triggered service restart: $(cat "$manage_log")"
+[[ $(cat "$is_conf_dir/relay-13000.json") == "$before_13000" ]] || fail "relay_menu option 3 mutated relay config"
+[[ $(cat "$is_config_json") == "$before_cfg" ]] || fail "relay_menu option 3 mutated runtime config.json"
+[[ ! -s $manage_log ]] || fail "relay_menu option 3 triggered service restart: $(cat "$manage_log")"
 
 del_out=$(relay_menu 2>&1 <<'INPUT'
-5
+4
 13001
 y
 
 0
 INPUT
-) || fail "relay_menu option 5 delete failed: $del_out"
-[[ ! -f "$is_conf_dir/relay-13001.json" ]] || fail "relay_menu option 5 did not delete relay-13001.json"
+) || fail "relay_menu option 4 delete failed: $del_out"
+[[ ! -f "$is_conf_dir/relay-13001.json" ]] || fail "relay_menu option 4 did not delete relay-13001.json"
 
 add_menu_out=$(relay_menu 2>&1 <<'INPUT'
 1
@@ -552,7 +552,7 @@ grep -Fxq '监听端口 14000 -> 目标 203.0.113.20:24000 (TCP/UDP)' <<<"$rebui
 # 4. Interactive menu delete cancel keeps metadata; confirm removes metadata.
 is_main_start=1
 (relay_menu >/dev/null 2>&1 <<'INPUT'
-5
+4
 14001
 n
 
@@ -563,7 +563,7 @@ INPUT
 [[ $(note_get relay-14001.json) == '保留其他端口备注' ]] || fail "canceled delete removed 14001 metadata"
 
 (relay_menu >/dev/null 2>&1 <<'INPUT'
-5
+4
 14001
 y
 
