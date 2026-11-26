@@ -262,11 +262,11 @@ expect_qr_args "$issue16_url"
 TEST_TTY_SIZE='40 80'
 
 # A node without a share URL must not reuse the preceding node's URL.
-cat >"$is_conf_dir/relay-41603.json" <<'NODE'
-{"inbounds":[{"tag":"relay-41603.json","type":"direct","listen":"::","listen_port":41603,"override_address":"203.0.113.20","override_port":41603}]}
+cat >"$is_conf_dir/direct-41603.json" <<'NODE'
+{"inbounds":[{"tag":"direct-41603.json","type":"direct","listen":"::","listen_port":41603,"override_address":"203.0.113.20","override_port":41603}]}
 NODE
 rm -f "$QR_LOG"
-info relay-41603.json >"$case_dir/no-link.out" 2>&1 || fail "info for an unshareable node should succeed"
+info direct-41603.json >"$case_dir/no-link.out" 2>&1 || fail "info for an unshareable node should succeed"
 [[ ! -f $QR_LOG ]] || fail "node without a share URL must not call qrencode"
 [[ $is_url ]] && fail "node without a share URL must clear the previous URL"
 [[ $(<"$case_dir/no-link.out") != *"$full_qr_cell"* ]] || fail "node without a share URL must not display a QR code"

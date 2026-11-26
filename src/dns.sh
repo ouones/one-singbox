@@ -14,64 +14,70 @@ dns_set() {
     if [[ $(echo -e "1.11.99\n$is_core_ver" | sort -V | head -n1) == '1.11.99' ]]; then
         is_dns_new=1
     fi
-    if [[ $1 ]]; then
-        case ${1,,} in
-        11 | 1111)
-            is_dns_use=${is_dns_list[0]}
-            ;;
-        88 | 8888)
-            is_dns_use=${is_dns_list[1]}
-            ;;
-        gg | google)
-            is_dns_use=${is_dns_list[2]}
-            ;;
-        cf | cloudflare)
-            is_dns_use=${is_dns_list[3]}
-            ;;
-        nosex | family)
-            is_dns_use=${is_dns_list[4]}
-            ;;
-        set)
-            if [[ $2 ]]; then
-                is_dns_use=${2,,}
-            else
-                ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): "
-            fi
-            ;;
-        none)
-            is_dns_use=none
-            ;;
-        *)
-            err "无法识别 DNS 参数: $*"
-            return 1
-            ;;
-        esac
-    else
-        is_tmp_list=("${is_dns_list[@]}")
-        is_tmp_list[5]="自定义"
-        is_tmp_list[6]="不设置"
-        menu_select parent is_dns_use "\n请选择 DNS；选择“自定义”输入地址，选择“不设置”清除 DNS 配置:\n" "${is_tmp_list[@]}"
-        dns_choice_status=$?
-        [[ $dns_choice_status == 2 ]] && return 2
-        [[ $dns_choice_status == 0 ]] || return 1
-        case $is_dns_use in
-        自定义) is_dns_use=set ;;
-        不设置) is_dns_use=none ;;
-        esac
-        if [[ $is_dns_use == "set" ]]; then
-            ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): "
-        fi
-    fi
-    is_dns_use_bak=$is_dns_use
-    [[ $is_interactive && $is_dns_use_bak == none ]] && is_dns_use_bak="不设置"
-    if [[ $is_interactive ]]; then
-        if [[ $is_dns_use == none ]]; then
-            dns_impact='清除现有 DNS 配置并重启 sing-box；现有节点配置不变'
+    # 从哪里来就回哪里去：取消自定义输入或系统影响确认时退回「选择 DNS」。
+    while :; do
+        is_dns_use=
+        is_dns_use_bak=
+        if [[ $1 ]]; then
+            case ${1,,} in
+            11 | 1111)
+                is_dns_use=${is_dns_list[0]}
+                ;;
+            88 | 8888)
+                is_dns_use=${is_dns_list[1]}
+                ;;
+            gg | google)
+                is_dns_use=${is_dns_list[2]}
+                ;;
+            cf | cloudflare)
+                is_dns_use=${is_dns_list[3]}
+                ;;
+            nosex | family)
+                is_dns_use=${is_dns_list[4]}
+                ;;
+            set)
+                if [[ $2 ]]; then
+                    is_dns_use=${2,,}
+                else
+                    ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): "
+                fi
+                ;;
+            none)
+                is_dns_use=none
+                ;;
+            *)
+                err "无法识别 DNS 参数: $*"
+                return 1
+                ;;
+            esac
         else
-            dns_impact='更新运行时 DNS 配置并重启 sing-box；现有节点配置不变'
+            is_tmp_list=("${is_dns_list[@]}")
+            is_tmp_list[5]="自定义"
+            is_tmp_list[6]="不设置"
+            menu_select parent is_dns_use "\n请选择 DNS；选择“自定义”输入地址，选择“不设置”清除 DNS 配置:\n" "${is_tmp_list[@]}"
+            dns_choice_status=$?
+            [[ $dns_choice_status == 2 ]] && return 2
+            [[ $dns_choice_status == 0 ]] || return 1
+            case $is_dns_use in
+            自定义) is_dns_use=set ;;
+            不设置) is_dns_use=none ;;
+            esac
+            if [[ $is_dns_use == "set" ]]; then
+                is_form_cancel_return=1 ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): " || continue
+            fi
         fi
-        menu_system_impact "DNS 配置：$is_dns_use_bak" "$dns_impact" "是" : || return 1
-    fi
+        is_dns_use_bak=$is_dns_use
+        [[ $is_interactive && $is_dns_use_bak == none ]] && is_dns_use_bak="不设置"
+        if [[ $is_interactive ]]; then
+            if [[ $is_dns_use == none ]]; then
+                dns_impact='清除现有 DNS 配置并重启 sing-box；现有节点配置不变'
+            else
+                dns_impact='更新运行时 DNS 配置并重启 sing-box；现有节点配置不变'
+            fi
+            menu_system_impact "DNS 配置：$is_dns_use_bak" "$dns_impact" "是" : || continue
+        fi
+        break
+    done
     if [[ $is_dns_use != "none" && $is_dns_new ]]; then
         dns_set_server "$is_dns_use" || return 1
     fi

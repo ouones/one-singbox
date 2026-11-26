@@ -43,7 +43,9 @@ abc
 1'
 [[ $(log_limit_read) == 1 ]] || fail 'retry invalid input and save'
 [[ $service_calls == 2 ]] || fail 'start maintenance service'
-log_limit_set <<<''
+keep_status=0
+log_limit_set <<<'' || keep_status=$?
+[[ $keep_status == 2 ]] || fail 'enter must return to the settings menu without a change'
 [[ $(log_limit_read) == 1 && $service_calls == 2 ]] || fail 'enter preserves value'
 [[ $(bash -c 'is_core_dir=$1; source "$2"; log_limit_read' _ "$is_core_dir" "$repo_root/src/log.sh") == 1 ]] || fail 'persist across process restart'
 
@@ -174,6 +176,7 @@ FAKE_RC
         ' _ "$menu_case_dir" "$repo_root" "$core_file" <<<$'5\n3\n\n\n0\nq\n' 2>&1
     ) || fail 'menu navigation to log limit failed'
     [[ $menu_out == *'日志上限'* && $menu_out == *'输入日志上限'* ]] || fail "menu did not execute log limit setting: $menu_out"
+    [[ $menu_out == *'已保留当前日志占用上限'* ]] || fail "menu does not report the preserved log limit: $menu_out"
 
     # 2. Homepage status display refreshes systemd/OpenRC state on every display without mutating services.
     run_main_menu_status() {

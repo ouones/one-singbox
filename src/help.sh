@@ -47,6 +47,7 @@ show_help() {
             # "   seed [name] [seed | auto]                       更改 mKCP seed"
             "   new [name] [...]                                更改协议"
             "   web [name] [domain]                             更改反向代理目标域名"
+            "   entry [name] [addr | auto]                       更改分享地址；auto 恢复为公网 IP"
             "   psk [name] [psk | auto]                         更改 Snell PSK"
             "   snell-version [name] [6 | 5 | auto]             更改 Snell 版本"
             "   mode [name] [default | unshaped | unsafe-raw | auto] 更改 Snell 运行模式 (v6)"

@@ -105,7 +105,7 @@ JSON
                 is_sh_ver=test
                 source "$1/sh/src/core.sh"
                 is_main_menu
-            ' _ "$case_dir" <<<$'1\n4\n1\n'"$input"$'\n\n0\nq\n' 2>&1
+            ' _ "$case_dir" <<<$'1\n4\n1\n'"$input"$'\n0\nq\n' 2>&1
         )
         [[ $output == *'node.json'* ]] || fail "input '$input' did not identify the node config file: $output"
         [[ $output == *'删除范围包括该节点的配置、关联元数据和运行时路由，不影响其他节点'* ]] || fail "input '$input' did not explain the node deletion scope: $output"
@@ -118,7 +118,7 @@ JSON
             [[ -f $case_dir/conf/node.json ]] || fail "input '$input' executed node deletion: $output"
             [[ ! -s $SERVICE_LOG ]] || fail "input '$input' restarted sing-box: $(cat "$SERVICE_LOG")"
             [[ $output == *'已取消删除节点'* ]] || fail "input '$input' did not show cancellation: $output"
-            [[ $output == *'按回车返回菜单'* ]] || fail "input '$input' did not pause after cancellation: $output"
+            [[ $output != *'按回车返回菜单'* ]] || fail "input '$input' left an extra pause after cancellation: $output"
         fi
     done
 }
@@ -146,7 +146,7 @@ run_relay_delete_confirmation_matrix() {
                 is_sh_ver=test
                 source "$1/sh/src/core.sh"
                 is_main_menu
-            ' _ "$case_dir" <<<$'2\n4\n10000\n'"$input"$'\n\n0\nq\n' 2>&1
+            ' _ "$case_dir" <<<$'2\n4\n1\n'"$input"$'\n0\nq\n' 2>&1
         )
         [[ $output == *'监听端口 10000'* && $output == *'203.0.113.10:20000'* ]] || fail "input '$input' did not identify the forwarding rule: $output"
         [[ $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "input '$input' did not explain the forwarding deletion scope: $output"
@@ -158,7 +158,7 @@ run_relay_delete_confirmation_matrix() {
             [[ -f $case_dir/conf/relay-10000.json ]] || fail "input '$input' removed the forwarding rule: $output"
             [[ ! -s $SERVICE_LOG ]] || fail "input '$input' restarted sing-box: $(cat "$SERVICE_LOG")"
             [[ $output == *'已取消删除端口转发'* ]] || fail "input '$input' did not show cancellation: $output"
-            [[ $output == *'按回车返回菜单'* ]] || fail "input '$input' did not pause after cancellation: $output"
+            [[ $output != *'按回车返回菜单'* ]] || fail "input '$input' left an extra pause after cancellation: $output"
         fi
     done
 }
@@ -198,7 +198,7 @@ run_uninstall_confirmation_matrix() {
                 log_limit_remove() { printf "logs\n" >>"$CASE_DIR/uninstall-effects"; }
                 load() { [[ $1 == log.sh ]] && return 0; . "$is_sh_dir/src/$1"; }
                 is_main_menu
-            ' <<<$'8\n2\n'"$input"$'\n\nq\n' 2>&1
+            ' <<<$'8\n2\n'"$input"$'\nq\n' 2>&1
         )
         [[ $output == *'sing-box 程序、服务和配置'* && $output == *'日志维护服务及日志'* && $output == *'one-singbox 程序、脚本和快捷命令'* ]] || fail "input '$input' did not explain the core/script removal scope: $output"
         [[ $output == *'Caddy 服务、程序及整个 /etc/caddy 安装和配置目录'* ]] || fail "input '$input' did not explain the Caddy removal scope: $output"
@@ -214,7 +214,7 @@ run_uninstall_confirmation_matrix() {
             [[ -d $case_dir/install/core && -d $case_dir/install/log && -f $case_dir/install/sing-box && -d $case_dir/install/caddy && -f $case_dir/install/caddy-bin ]] || fail "input '$input' removed installation data: $output"
             [[ ! -s $case_dir/uninstall-effects ]] || fail "input '$input' changed services or logs: $output"
             [[ $output == *'已取消卸载'* ]] || fail "input '$input' did not show cancellation: $output"
-            [[ $output == *'按回车返回菜单'* ]] || fail "input '$input' did not pause after cancellation: $output"
+            [[ $output != *'按回车返回菜单'* ]] || fail "input '$input' left an extra pause after cancellation: $output"
         fi
     done
 }
@@ -229,7 +229,8 @@ run_reinstall_confirmation_matrix() {
         cp -R "$repo_root/src/." "$case_dir/reinstall/apps/src/"
         rm -f "$installer_marker"
         printf 'core\n' >"$case_dir/reinstall/sing-box"
-        printf '#!/usr/bin/env bash\nprintf installed > %q\n' "$installer_marker" >"$case_dir/reinstall/apps/install.sh"
+        printf '#!/usr/bin/env bash\nprintf installed > %q\nprintf %s > %q\nchmod +x %q\n' "$installer_marker" '#!/usr/bin/env bash
+printf "RELOADED_PANEL\n"' "$case_dir/reinstall/sing-box" "$case_dir/reinstall/sing-box" >"$case_dir/reinstall/apps/install.sh"
 
         output=$(
             CASE_DIR="$case_dir" PATH="$case_dir/bin:$PATH" bash -c '
@@ -249,18 +250,19 @@ run_reinstall_confirmation_matrix() {
                 is_openrc=
                 touch "$is_core_dir/qrcode-dependency-checked"
                 is_main_menu
-            ' <<<$'5\n5\n'"$input"$'\n\n0\nq\n' 2>&1
+            ' <<<$'5\n5\n'"$input"$'\n0\nq\n' 2>&1
         )
         [[ $output == *'sing-box 程序、服务和配置'* && $output == *'日志维护服务及日志'* && $output == *'one-singbox 程序、脚本和快捷命令'* ]] || fail "input '$input' did not explain the reinstall removal scope: $output"
         [[ $output == *'Caddy 未安装，不涉及 Caddy 删除'* ]] || fail "input '$input' did not explain the Caddy scope: $output"
         if [[ $input == YES ]]; then
             [[ -f $installer_marker ]] || fail "YES did not run the installer: $output"
+            [[ $output == *'RELOADED_PANEL'* ]] || fail "YES did not reload the reinstalled panel: $output"
             [[ $output != *'已取消'* ]] || fail "YES was reported as canceled: $output"
         else
             [[ ! -e $installer_marker ]] || fail "input '$input' ran the installer: $output"
             [[ -d $case_dir/reinstall/core && -d $case_dir/reinstall/log && -f $case_dir/reinstall/sing-box ]] || fail "input '$input' removed installation data: $output"
             [[ $output == *'已取消'* ]] || fail "input '$input' did not show cancellation: $output"
-            [[ $output == *'按回车返回菜单'* ]] || fail "input '$input' did not pause after cancellation: $output"
+            [[ $output != *'按回车返回菜单'* ]] || fail "input '$input' left an extra pause after cancellation: $output"
             [[ $output != *'检测到脚本已安装'* ]] || fail "input '$input' reported conflicting post-cancel state: $output"
         fi
     done

@@ -184,12 +184,12 @@ create() { printf 'created:%s\n' "$ss_method"; }
 meta_set() { :; }
 is_random_ss_method=2022-blake3-aes-128-gcm
 
-assert_ss_method_menu_redrawn() {
+assert_ss_method_menu_shown() {
     local method output=$1 context=$2
-    [[ $(grep -Fc '选择加密方式:' <<<"$output") == 2 ]] || fail "$context redraws the SS method prompt: $output"
-    [[ $(grep -Fc '回车默认 2022-blake3-aes-128-gcm' <<<"$output") == 2 ]] || fail "$context keeps the SS method default visible: $output"
+    [[ $(grep -Fc '选择加密方式:' <<<"$output") == 1 ]] || fail "$context shows the SS method prompt once: $output"
+    [[ $(grep -Fc '回车默认 2022-blake3-aes-128-gcm' <<<"$output") == 1 ]] || fail "$context keeps the SS method default visible: $output"
     for method in "${ss_method_list[@]}"; do
-        [[ $(grep -Fc ") $method" <<<"$output") == 2 ]] || fail "$context redraws the complete SS method list: $output"
+        [[ $(grep -Fc ") $method" <<<"$output") == 1 ]] || fail "$context shows the complete SS method list: $output"
     done
 }
 
@@ -200,11 +200,11 @@ assert_ss_method_menu_redrawn() {
     [[ $return_output == *'0) 返回上级'* && $return_output == *'aes-128-gcm'* && $return_output == *'2022-blake3-chacha20-poly1305'* ]] || fail "SS method choices remain visible: $return_output"
     [[ $return_output != *'changed:'* ]] || fail "0 must not change the SS method: $return_output"
 
-    empty_output=$(unset ss_method; printf '\n0\n' | change node.json method 2>&1); status=$?
-    [[ $status == 2 ]] || fail "Enter is invalid and 0 returns from the SS method change selector: status=$status output=$empty_output"
-    assert_ss_method_menu_redrawn "$empty_output" "empty Enter in change mode"
-    [[ $(grep -Fc '输入无效' <<<"$empty_output") == 1 ]] || fail "empty Enter prints one SS method error: $empty_output"
-    [[ $empty_output != *'changed:'* ]] || fail "empty Enter must not select the SS method default: $empty_output"
+    empty_output=$(unset ss_method; printf '\n' | change node.json method 2>&1); status=$?
+    [[ $status == 0 ]] || fail "Enter accepts the SS method default: status=$status output=$empty_output"
+    assert_ss_method_menu_shown "$empty_output" "empty Enter in change mode"
+    [[ $(grep -Fc '输入无效' <<<"$empty_output") == 0 ]] || fail "empty Enter must not report an invalid SS method: $empty_output"
+    [[ $empty_output == *'changed:2022-blake3-aes-128-gcm'* ]] || fail "empty Enter selects the SS method default: $empty_output"
 
     selected_output=$(unset ss_method; printf '1\n' | change node.json method 2>&1); status=$?
     [[ $status == 0 && $selected_output == *'changed:aes-128-gcm'* ]] || fail "SS method numeric selection keeps its mapping: status=$status output=$selected_output"
@@ -215,11 +215,11 @@ add_return=$(unset ss_method; is_main_start=1; port=32002; printf '0\n' | add sh
 [[ $add_return == *'0) 返回上级'* ]] || fail "SS add shows the shared return item: $add_return"
 [[ $add_return != *'created:'* ]] || fail "0 must not create a Shadowsocks node: $add_return"
 
-add_empty=$(unset ss_method; is_main_start=1; port=32002; ss_password=generated-password; printf '\n0\n' | add shadowsocks 2>&1); status=$?
-[[ $status == 2 ]] || fail "Enter is invalid and 0 returns from the SS method add selector: status=$status output=$add_empty"
-assert_ss_method_menu_redrawn "$add_empty" "empty Enter in add mode"
-[[ $(grep -Fc '输入无效' <<<"$add_empty") == 1 ]] || fail "empty Enter prints one SS add method error: $add_empty"
-[[ $add_empty != *'created:'* ]] || fail "empty Enter must not create an SS node with the default method: $add_empty"
+add_default=$(unset ss_method; is_main_start=1; port=32002; ss_password=generated-password; printf '\nmy-node\n' | add shadowsocks 2>&1); status=$?
+[[ $status == 0 ]] || fail "Enter accepts the SS method default when adding: status=$status output=$add_default"
+assert_ss_method_menu_shown "$add_default" "empty Enter in add mode"
+[[ $(grep -Fc '输入无效' <<<"$add_default") == 0 ]] || fail "empty Enter must not report an invalid SS add method: $add_default"
+[[ $add_default == *'created:2022-blake3-aes-128-gcm'* ]] || fail "empty Enter creates the node with the SS method default: $add_default"
 
 quick_output=$(unset ss_method; is_main_start=; port=; ss_password=; printf '' | add shadowsocks 32003 secret aes-128-gcm 2>&1); status=$?
 [[ $status == 0 && $quick_output == *'created:aes-128-gcm'* ]] || fail "SS quick arguments bypass the selector: status=$status output=$quick_output"
@@ -360,10 +360,17 @@ JSON
 is_main_start=1
 is_port_used() { [[ $1 == 10000 ]] && printf '10000\n'; }
 
-output=$(printf '2\n\n0\n5\n' | relay_menu 2>&1)
-[[ $output == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "view displays the relay list directly: $output"
+output=$(printf '2\n1\n\n0\n0\n' | relay_menu 2>&1)
+[[ $output == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "view lists the relay entries in a numbered selection: $output"
+[[ $output == *'0) 返回上级'* ]] || fail "view selection page shows the shared return item: $output"
 [[ $output != *'输入要查看的监听端口'* ]] || fail "menu view must not re-prompt for listener port: $output"
 [[ $output != *'无法使用'* ]] || fail "menu view must not reject listening relay port: $output"
+
+[[ $(grep -Fc '按回车返回菜单' <<<"$output") == 1 ]] || fail "view detail result pauses exactly once: $output"
+
+view_return_out=$(printf '2\n0\n0\n' | relay_menu 2>&1)
+[[ $view_return_out != *'按回车返回菜单'* ]] || fail "returning from the detail selection must not pause: $view_return_out"
+[[ $(grep -Fc '请选择端口转发操作' <<<"$view_return_out") == 2 ]] || fail "0 returns straight back to the relay menu: $view_return_out"
 
 info_out=$(printf '1\n' | relay_info 2>&1); status=$?
 [[ $status == 0 ]] || fail "interactive relay_info selection failed: status=$status output=$info_out"
@@ -372,7 +379,7 @@ info_out=$(printf '1\n' | relay_info 2>&1); status=$?
 [[ $info_out != *'无法使用'* ]] || fail "interactive relay_info must not check port_used on listening relay: $info_out"
 
 cancel_out=$(printf '0\n' | relay_info 2>&1); status=$?
-[[ $status == 0 ]] || fail "interactive relay_info return option failed: status=$status output=$cancel_out"
+[[ $status == 2 ]] || fail "interactive relay_info return option reports back-to-parent: status=$status output=$cancel_out"
 [[ $cancel_out != *'端口转发配置信息'* ]] || fail "returning from interactive relay_info must not display details: $cancel_out"
 CASE
 }
@@ -389,13 +396,14 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 JSON
 is_main_start=1
 
-output=$(printf '4\n10000\nn\n\n0\n5\n' | relay_menu 2>&1)
-[[ $output == *'输入要删除的监听端口'* ]] || fail "delete requests the listener port by name: $output"
+output=$(printf '4\n1\nn\n0\n' | relay_menu 2>&1)
+[[ $output == *'请选择要删除的端口转发:'* && $output == *'1) 监听端口 10000'* && $output == *'0) 返回上级'* ]] || fail "delete offers a numbered forwarding selection: $output"
 [[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
 [[ $output == *'已取消删除端口转发'* ]] || fail "cancel is reported without deleting the relay: $output"
+[[ $output != *'按回车返回菜单'* ]] || fail "declining the delete confirmation returns without an extra pause: $output"
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
-output=$(printf '4\n10000\ny\n\n0\n5\n' | relay_menu 2>&1)
+output=$(printf '4\n1\ny\n\n0\n5\n' | relay_menu 2>&1)
 [[ $output == *'将删除监听端口 10000 → 203.0.113.60:20060 的端口转发'* && $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "confirmed deletion explains the forwarding target and scope: $output"
 [[ $output == *'已删除端口转发配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
 [[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'
