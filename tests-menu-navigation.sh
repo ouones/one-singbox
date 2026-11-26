@@ -360,10 +360,17 @@ JSON
 is_main_start=1
 is_port_used() { [[ $1 == 10000 ]] && printf '10000\n'; }
 
-output=$(printf '2\n\n0\n5\n' | relay_menu 2>&1)
-[[ $output == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "view displays the relay list directly: $output"
+output=$(printf '2\n1\n\n0\n0\n' | relay_menu 2>&1)
+[[ $output == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* ]] || fail "view lists the relay entries in a numbered selection: $output"
+[[ $output == *'0) 返回上级'* ]] || fail "view selection page shows the shared return item: $output"
 [[ $output != *'输入要查看的监听端口'* ]] || fail "menu view must not re-prompt for listener port: $output"
 [[ $output != *'无法使用'* ]] || fail "menu view must not reject listening relay port: $output"
+
+[[ $(grep -Fc '按回车返回菜单' <<<"$output") == 1 ]] || fail "view detail result pauses exactly once: $output"
+
+view_return_out=$(printf '2\n0\n0\n' | relay_menu 2>&1)
+[[ $view_return_out != *'按回车返回菜单'* ]] || fail "returning from the detail selection must not pause: $view_return_out"
+[[ $(grep -Fc '请选择端口转发操作' <<<"$view_return_out") == 2 ]] || fail "0 returns straight back to the relay menu: $view_return_out"
 
 info_out=$(printf '1\n' | relay_info 2>&1); status=$?
 [[ $status == 0 ]] || fail "interactive relay_info selection failed: status=$status output=$info_out"
@@ -372,7 +379,7 @@ info_out=$(printf '1\n' | relay_info 2>&1); status=$?
 [[ $info_out != *'无法使用'* ]] || fail "interactive relay_info must not check port_used on listening relay: $info_out"
 
 cancel_out=$(printf '0\n' | relay_info 2>&1); status=$?
-[[ $status == 0 ]] || fail "interactive relay_info return option failed: status=$status output=$cancel_out"
+[[ $status == 2 ]] || fail "interactive relay_info return option reports back-to-parent: status=$status output=$cancel_out"
 [[ $cancel_out != *'端口转发配置信息'* ]] || fail "returning from interactive relay_info must not display details: $cancel_out"
 CASE
 }
@@ -389,13 +396,13 @@ cat >"$is_conf_dir/relay-10000.json" <<'JSON'
 JSON
 is_main_start=1
 
-output=$(printf '4\n10000\nn\n\n0\n5\n' | relay_menu 2>&1)
-[[ $output == *'输入要删除的监听端口'* ]] || fail "delete requests the listener port by name: $output"
+output=$(printf '4\n1\nn\n\n0\n5\n' | relay_menu 2>&1)
+[[ $output == *'请选择要删除的端口转发:'* && $output == *'1) 监听端口 10000'* && $output == *'0) 返回上级'* ]] || fail "delete offers a numbered forwarding selection: $output"
 [[ $output == *'监听端口 10000'* && $output == *'转发'* && $output == *'[y/N]'* ]] || fail "confirmation identifies the forwarding rule and preserves its yes/no prompt: $output"
 [[ $output == *'已取消删除端口转发'* ]] || fail "cancel is reported without deleting the relay: $output"
 [[ -f "$is_conf_dir/relay-10000.json" ]] || fail 'canceling deletion preserves the relay configuration'
 
-output=$(printf '4\n10000\ny\n\n0\n5\n' | relay_menu 2>&1)
+output=$(printf '4\n1\ny\n\n0\n5\n' | relay_menu 2>&1)
 [[ $output == *'将删除监听端口 10000 → 203.0.113.60:20060 的端口转发'* && $output == *'删除范围包括配置文件'* && $output == *'不影响其他端口转发'* && $output == *'重启 sing-box'* ]] || fail "confirmed deletion explains the forwarding target and scope: $output"
 [[ $output == *'已删除端口转发配置: relay-10000.json'* ]] || fail "confirming deletion removes the selected forwarding rule: $output"
 [[ ! -f "$is_conf_dir/relay-10000.json" ]] || fail 'confirmed deletion removes only the selected relay configuration'

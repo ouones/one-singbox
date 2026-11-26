@@ -117,34 +117,42 @@ relay_add() {
     relay_warn_security
 }
 
+# Print existing relays as a numbered menu and store the selected listener port in <target-var>.
+# Returns 0 with a selection, 2 when the user picks "0) 返回上级", and 1 when nothing can be listed.
+relay_select_port() {
+    local prompt=$1 target_var=$2 file l_port r_addr r_port cfg_name base_label choice_status relay_pick=
+    local -a files=() ports=() labels=()
+    if ! relay_menu_has_entries; then
+        relay_list
+        return 1
+    fi
+    shopt -s nullglob
+    files=("$is_conf_dir"/relay-*.json)
+    shopt -u nullglob
+    for file in "${files[@]}"; do
+        l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
+        r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
+        r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
+        cfg_name=${file##*/}
+        [[ $l_port ]] || l_port=${cfg_name#relay-}
+        l_port=${l_port%.json}
+        ports+=("$l_port")
+        base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
+        labels+=("$(note_format_list_label "$cfg_name" "$base_label")")
+    done
+    menu_select parent relay_pick "$prompt" "${labels[@]}"
+    choice_status=$?
+    [[ $choice_status == 0 ]] || return "$choice_status"
+    printf -v "$target_var" '%s' "${ports[REPLY - 1]}"
+    return 0
+}
+
 relay_info() {
-    local local_port=${1-}
+    local local_port=${1-} select_status
     if [[ ! $local_port ]]; then
-        if ! relay_menu_has_entries; then
-            relay_list
-            return 1
-        fi
-        local file l_port r_addr r_port cfg_name base_label choice_status
-        local -a files=() ports=() labels=()
-        shopt -s nullglob
-        files=("$is_conf_dir"/relay-*.json)
-        shopt -u nullglob
-        for file in "${files[@]}"; do
-            l_port=$(jq -r '.inbounds[0].listen_port // empty' "$file")
-            r_addr=$(jq -r '.inbounds[0].override_address // empty' "$file")
-            r_port=$(jq -r '.inbounds[0].override_port // empty' "$file")
-            cfg_name=${file##*/}
-            [[ $l_port ]] || l_port=${cfg_name#relay-}
-            l_port=${l_port%.json}
-            ports+=("$l_port")
-            base_label="监听端口 $l_port -> 目标 $r_addr:$r_port (TCP/UDP)"
-            labels+=("$(note_format_list_label "$cfg_name" "$base_label")")
-        done
-        menu_select parent local_port "\n请选择要查看的端口转发:\n" "${labels[@]}"
-        choice_status=$?
-        [[ $choice_status == 2 ]] && return 0
-        [[ $choice_status == 0 ]] || return 1
-        local_port=${ports[REPLY - 1]}
+        relay_select_port "\n请选择要查看的端口转发:\n" local_port
+        select_status=$?
+        [[ $select_status == 0 ]] || return "$select_status"
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
@@ -188,12 +196,11 @@ relay_list() {
 }
 
 relay_delete() {
-    local local_port=$1 relay_file backup_file remote_addr remote_port
+    local local_port=${1-} relay_file backup_file remote_addr remote_port select_status
     if [[ ! $local_port ]]; then
-        relay_list
-        # Existing relays may be listening; only validate the port format here.
-        local is_cant_test_port=1
-        ask string local_port "输入要删除的监听端口:"
+        relay_select_port "\n请选择要删除的端口转发:\n" local_port
+        select_status=$?
+        [[ $select_status == 0 ]] || return "$select_status"
     fi
     local_port=${local_port#relay-}
     local_port=${local_port%.json}
@@ -236,16 +243,11 @@ relay_delete() {
 }
 
 relay_note() {
-    local local_port=${1-} relay_cfg relay_file
+    local local_port=${1-} relay_cfg relay_file select_status
     if [[ ! $local_port ]]; then
-        if ! relay_menu_has_entries; then
-            relay_list
-            return 1
-        fi
-        relay_list
-        # Existing relays may be listening; only validate the port format here.
-        local is_cant_test_port=1
-        ask string local_port "输入要编辑备注的监听端口:"
+        relay_select_port "\n请选择要编辑备注的端口转发:\n" local_port
+        select_status=$?
+        [[ $select_status == 0 ]] || return "$select_status"
     fi
     local_port=$(printf '%s' "$local_port" | tr -d '[:space:]')
     local_port=${local_port#relay-}
@@ -285,7 +287,8 @@ relay_menu() {
             menu_action relay_add
             ;;
         2)
-            menu_action relay_list
+            relay_menu_empty_state && continue
+            menu_action relay_info
             ;;
         3)
             relay_menu_empty_state && continue

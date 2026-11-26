@@ -175,9 +175,9 @@ cli_info=$(PATH="$case_dir/bin:$PATH" bash "$entry" relay info 10000)
 [[ $cli_info != *'中转'* ]] || fail "CLI relay info still mixes wording: $cli_info"
 [[ $cli_info != *'按回车返回'* ]] || fail 'CLI relay info must not pause'
 
-interactive_list=$(printf '2\n2\n\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
-[[ $interactive_list == *'端口转发列表'* && $interactive_list == *'共 1 个端口转发'* && $interactive_list == *'端口转发没有身份验证'* ]] || fail "interactive relay list still mixes wording: $interactive_list"
-[[ $interactive_list != *'中转'* ]] || fail "interactive relay list still contains 中转: $interactive_list"
+interactive_list=$(printf '2\n2\n1\n\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
+[[ $interactive_list == *'请选择要查看的端口转发'* && $interactive_list == *'监听端口 10000 -> 目标 203.0.113.60:20060 (TCP/UDP)'* && $interactive_list == *'端口转发没有身份验证'* ]] || fail "interactive relay view wording changed: $interactive_list"
+[[ $interactive_list != *'中转'* ]] || fail "interactive relay view still contains 中转: $interactive_list"
 CASE
 }
 

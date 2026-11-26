@@ -312,14 +312,16 @@ timeout 3 bash -c '
 ' _ "$REPO_DIR/src/core.sh" "$case_dir" < <(exec >/dev/null 2>&1; command sleep 1) >"$case_dir/slice3-pipe.out" 2>&1 || fail "relay note hung on silent pipe"
 [[ $(note_get relay-12000.json) == '防挂死保留' ]] || fail "silent pipe altered relay note"
 
-# 6. Omitting port lists relays and accepts active listening port without leaking is_cant_test_port.
+# 6. Omitting port lists relays as a numbered selection and accepts an active listening port
+#    without leaking is_cant_test_port.
 TEST_ACTIVE_PORT=12001
 omit_port_out=$(main relay note 2>&1 <<'INPUT'
-12001
+2
 活跃监听备注
 INPUT
 ) || fail "relay note without port failed: $omit_port_out"
-grep -Fq '端口转发列表' <<<"$omit_port_out" || fail "relay note without port did not show list: $omit_port_out"
+grep -Fq '请选择要编辑备注的端口转发:' <<<"$omit_port_out" || fail "relay note without port did not show the relay selection list: $omit_port_out"
+grep -Fq '0) 返回上级' <<<"$omit_port_out" || fail "relay note selection is missing the return item: $omit_port_out"
 [[ $(note_get relay-12001.json) == '活跃监听备注' ]] || fail "relay note without port did not save note on active port: '$(note_get relay-12001.json)'"
 
 TEST_ACTIVE_PORT=12009
@@ -434,7 +436,7 @@ before_cfg=$(cat "$is_config_json")
 
 edit_out=$(relay_menu 2>&1 <<'INPUT'
 3
-13000
+1
   菜单编辑备注  
 
 0
@@ -445,7 +447,7 @@ grep -Fq '当前备注: (无)' <<<"$edit_out" || fail "relay_menu option 3 did n
 
 (relay_menu >/dev/null 2>&1 <<'INPUT'
 3
-13000
+1
 
 
 0
@@ -455,7 +457,7 @@ INPUT
 
 (relay_menu >/dev/null 2>&1 <<'INPUT'
 3
-13000
+1
 clear
 
 0
@@ -470,7 +472,7 @@ INPUT
 
 del_out=$(relay_menu 2>&1 <<'INPUT'
 4
-13001
+2
 y
 
 0
@@ -553,7 +555,7 @@ grep -Fxq '监听端口 14000 -> 目标 203.0.113.20:24000 (TCP/UDP)' <<<"$rebui
 is_main_start=1
 (relay_menu >/dev/null 2>&1 <<'INPUT'
 4
-14001
+2
 n
 
 0
@@ -564,7 +566,7 @@ INPUT
 
 (relay_menu >/dev/null 2>&1 <<'INPUT'
 4
-14001
+2
 y
 
 0

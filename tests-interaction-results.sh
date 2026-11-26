@@ -101,7 +101,7 @@ run_action_result_case() {
         ;;
     cancel)
         printf '%s\n' '{"inbounds":[{"tag":"relay-10000.json","type":"direct","listen_port":10000,"override_address":"203.0.113.10","override_port":20000}]}' >"$case_dir/root/etc/sing-box/conf/relay-10000.json"
-        output=$(printf '2\n4\n10000\nn\n\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
+        output=$(printf '2\n4\n1\nn\n\n0\nq\n' | PATH="$case_dir/bin:$PATH" bash "$entry" 2>&1)
         status=$?
         expected='已取消删除端口转发'
         ;;

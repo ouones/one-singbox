@@ -235,24 +235,25 @@ if (main relay unknown) >/dev/null 2>&1; then
     fail "unknown relay subcommand should fail"
 fi
 
-# 13.1. relay_menu option 2 is the port-forwarding list and does not prompt for local_port
+# 13.1. relay_menu option 2 opens a numbered relay selection instead of prompting for local_port
 del_option=4
 ret_option=0
 
 menu_out=$(
     (show_list() { :; }; relay_menu) 2>&1 <<EOF
 2
-
+0
 0
 EOF
 )
-[[ $menu_out == *"端口转发列表"* || $menu_out == *"暂无端口转发"* || $menu_out == *"当前未配置任何端口转发"* ]] || fail "relay_menu option 2 should output the port-forwarding list"
+[[ $menu_out == *"请选择要查看的端口转发"* ]] || fail "relay_menu option 2 should open the numbered relay selection"
+[[ $menu_out == *"0) 返回上级"* ]] || fail "relay_menu option 2 selection should offer 0) 返回上级"
 [[ $menu_out != *"请输入要查看的中转本地端口"* ]] || fail "relay_menu option 2 should not prompt for local port"
 
-# 13.2. Interactive deletion must accept a relay port that is actively listening
+# 13.2. Interactive deletion selects from the numbered relay list and accepts an actively listening port
 TEST_ACTIVE_PORT=10001
 restart_count_before=$(grep -c "restart" "$manage_log" || true)
-delete_out=$(printf "${del_option}\n0\n65536\ninvalid\n10001\n\n${ret_option}\n" | (
+delete_out=$(printf "${del_option}\n65536\ninvalid\n1\n\n${ret_option}\n" | (
     show_list() { :; }
     read() { builtin read "$@" || exit 99; }
     main relay || exit 1
@@ -264,7 +265,8 @@ delete_out=$(printf "${del_option}\n0\n65536\ninvalid\n10001\n\n${ret_option}\n"
 delete_status=$?
 [[ $delete_out != *"无法使用 (10001) 端口"* ]] || fail "interactive relay delete must accept its active port: $delete_out"
 [[ $delete_status == 0 ]] || fail "interactive relay delete should succeed: $delete_out"
-[[ $delete_out == *"请输入正确的端口"* || $delete_out == *"不是一个有效"* || $delete_out == *"输入要删除"* ]] || fail "interactive relay delete must still validate port format"
+[[ $delete_out == *"请选择要删除的端口转发"* ]] || fail "interactive relay delete must show the numbered relay list: $delete_out"
+[[ $(grep -Fc '输入无效' <<<"$delete_out") == 2 ]] || fail "interactive relay delete must re-prompt on invalid selections instead of exiting: $delete_out"
 [[ ! -f "$is_conf_dir/relay-10001.json" ]] || fail "interactive relay delete should remove relay-10001.json"
 [[ -f "$is_conf_dir/relay-10003.json" ]] || fail "interactive relay delete must preserve other relays"
 restart_count_after=$(grep -c "restart" "$manage_log" || true)
