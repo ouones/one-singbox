@@ -63,7 +63,7 @@ dns_set() {
             不设置) is_dns_use=none ;;
             esac
             if [[ $is_dns_use == "set" ]]; then
-                ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): " || continue
+                is_form_cancel_return=1 ask string is_dns_use "请输入 DNS 地址或 URL (例如 1.1.1.1 或 https://dns.example/dns-query): " || continue
             fi
         fi
         is_dns_use_bak=$is_dns_use
